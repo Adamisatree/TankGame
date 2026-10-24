@@ -2,7 +2,7 @@
 
 一个**简笔画 / 几何风格**的坦克对战小游戏。你开着一台铅笔涂出来的小坦克，在纸上的方厅里转向、前进、开火——**子弹打到任何墙壁都会反弹，包括你自己的炮弹**（站在自己的弹道上一样会被自己打到）。
 
-支持**单人闯关**（三档难度，AI 会打反弹球、会躲你的炮弹）和**本地双人**（同一台电脑，两人对轰，不用联机），还有一个**自动躲弹**模式：车身自己躲炮弹，你只管瞄准和开火。
+支持**单人闯关**（三档难度，AI 会打反弹球、会躲你的炮弹）、**本地双人**（同一台电脑，两人对轰）和**局域网联机**（同一个 Wi-Fi 下两台电脑对打，不用联网、不用注册、不用服务器）。还有一个**自动躲弹**模式：车身自己躲炮弹，你只管瞄准和开火。
 
 用主流游戏引擎 **[Phaser 3](https://phaser.io/)**（3.90）构建，Vite + TypeScript 打包，`npm run dev` 即可开玩。
 
@@ -10,7 +10,36 @@
 
 ![tech](https://img.shields.io/badge/Phaser-3.90-8a4b9c) ![tech](https://img.shields.io/badge/TypeScript-5.9-3178c6) ![tech](https://img.shields.io/badge/Vite-5-646cff)
 
-## 快速开始
+## 三种打开方式
+
+### 1. 什么都不装：双击一个文件
+
+`release/坦克大作战.html` 是一个**完全自包含**的网页（1.5 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+
+- Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
+- 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
+
+> 局域网联机需要下面两种方式之一（浏览器不能当服务器用）。
+
+### 2. 联机客户端：.exe / .dmg（推荐）
+
+从 [Releases](https://github.com/Adamisatree/TankGame/releases) 下载对应安装包：
+
+| 你的电脑 | 下载 |
+| --- | --- |
+| Windows（Intel / AMD） | `TankGame-*-x64-setup.exe` |
+| Windows（ARM 笔记本） | `TankGame-*-arm64-setup.exe` |
+| Windows 免安装 | `TankGame-*-portable.exe` |
+| Mac（M1/M2/M3/M4） | `TankGame-*-arm64.dmg` |
+| Mac（Intel） | `TankGame-*-x64.dmg` |
+
+装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
+
+> 安装包没有做代码签名（个人项目拿不到证书），所以：
+> - Windows：首次运行 SmartScreen 会拦一下 → 点「更多信息」→「仍要运行」；
+> - macOS：首次打开提示「无法验证开发者」→ 右键点图标选「打开」，或执行 `xattr -dr com.apple.quarantine /Applications/TankGame.app`。
+
+### 3. 开发模式
 
 ```bash
 npm install
@@ -20,10 +49,24 @@ npm run dev        # http://localhost:5173
 其他命令：
 
 ```bash
-npm run build      # 类型检查 + 生产构建（输出到 dist/）
-npm run preview    # 预览生产构建（http://localhost:4173）
-npm run selftest   # 无头运行物理 / 反弹 / 命中判定的单元测试
+npm run build        # 类型检查 + 生产构建（输出到 dist/）
+npm run lan          # 构建并启动局域网服务：http://<你的IP>:8787
+npm run build:single # 生成 release/坦克大作战.html 单文件版
+npm run test:desktop # 检查桌面端打包后能否正常起服务
 ```
+
+## 局域网联机（不用联网）
+
+1. 两台电脑连同一个 Wi-Fi / 路由器（同一个网段）；
+2. 房主：打开客户端 → 模式选「局域网联机」→ 角色「我是房主」→ 开始，屏幕上会显示 `http://<局域网IP>:8787`；
+3. 对方：在同一 Wi-Fi 下用浏览器打开这个地址（或在自己客户端的「加入房间」里填这个 IP），进入游戏后选「加入房间」；
+4. 两人到齐自动开局。
+
+技术上是**房主权威**：房主的机器跑物理、判命中，每秒 30 次把状态推给对方，对方只上传操作意图。所以两边看到的结果一定一致，也不怕对方改内存。
+
+- 一台电脑能同时开两个窗口做本地测试（一个当房主、一个当房客）；
+- 端口默认 `8787`，被占用时会自动顺延；
+- 防火墙第一次会弹窗询问，允许「专用网络」即可。
 
 ## 模式
 
@@ -33,6 +76,7 @@ npm run selftest   # 无头运行物理 / 反弹 / 命中判定的单元测试
 | --- | --- |
 | **单人闯关** | 你 vs AI，3 张地图。难度分「轻松 / 标准 / 困难」 |
 | **本地双人** | P1 vs P2，同一台电脑，每人 3 条命，先被打光的一方输 |
+| **局域网联机** | 两台电脑，各自 3 条命，房主当裁判（权威同步） |
 
 ### 难度（单人）
 
@@ -68,6 +112,8 @@ npm run selftest   # 无头运行物理 / 反弹 / 命中判定的单元测试
 | 驾驶 / 转向 | `W` `A` `S` `D` | `↑` `←` `↓` `→` |
 | 微调炮口 | `Q` / `E` | `,` / `.` |
 | 开火 | `空格` | `Enter` |
+
+局域网联机时：房主用单人那套键位（`WASD` + 鼠标），房客用 `WASD` / 方向键 + 鼠标 + 左键/空格开火，两队都是 3 条命。
 
 规则：
 
@@ -128,9 +174,20 @@ src/
     art.ts           # 运行时生成纸纹/颗粒纹理
     Sound.ts         # WebAudio 合成音效
   main.ts            # Phaser 启动 + DOM 覆盖层（开始 / 暂停 / 结束）
+  net/
+    protocol.ts      # 局域网报文格式（快照 / 输入 / 事件）
+    LanClient.ts     # WebSocket 客户端（自动重连、状态回调）
+server/
+  lan-server.mjs     # 静态站点 + WebSocket 中继（一个进程，无外部服务）
+electron/
+  main.cjs           # 桌面窗口，启动时自带局域网服务
+  lan-boot.cjs       # 服务引导（可脱离 Electron 单独测试）
 scripts/
   selftest.ts        # 53 项纯逻辑检查
-  smoke.ts           # jsdom + 软件 Canvas 里跑真游戏的冒烟测试（23 项）
+  smoke.ts           # jsdom + 软件 Canvas 里跑真游戏的冒烟测试（31 项，含真 WebSocket 联机）
+  lantest.ts         # 20 项局域网中继检查（配对 / 转发 / 断线 / 重开）
+  desktop-test.ts    # 7 项打包后服务检查
+  verify-singlefile.ts # 在 jsdom 里真的打开单文件版，确认能起
   render.ts          # 离线渲染 PNG 截图（npx tsx scripts/render.ts 输出目录）
 ```
 

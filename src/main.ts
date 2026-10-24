@@ -69,6 +69,39 @@ const VERSUS_CONTROLS = `
   </ul>
 `;
 
+function lanPanel(): string {
+  // The desktop app and `npm run lan` serve the page from the LAN server itself,
+  // so "leave blank" means "this machine". Vite's dev/preview ports are not it.
+  const devPorts = ['5173', '4173'];
+  const servedByLanServer =
+    location.protocol.startsWith('http') && !devPorts.includes(location.port);
+  return `
+    <div class="lan-panel">
+      <div class="setting-row">
+        <span class="setting-label">身份</span>
+        <div class="segmented">
+          <button type="button" data-lanrole="host" class="${settings.lanRole === 'host' ? 'on' : ''}">创建房间（房主）</button>
+          <button type="button" data-lanrole="guest" class="${settings.lanRole === 'guest' ? 'on' : ''}">加入房间（访客）</button>
+        </div>
+      </div>
+      <div class="setting-row lan-address-row">
+        <span class="setting-label">房主 IP</span>
+        <input id="lan-address" class="lan-input" type="text" spellcheck="false"
+          placeholder="${servedByLanServer ? location.host : '192.168.1.10:8787'}"
+          value="${settings.lanAddress}" />
+        <span class="lan-hint">留空 = 使用当前网页所在的服务器</span>
+      </div>
+      <div class="setting-note">
+        ${
+          settings.lanRole === 'host'
+            ? '你负责开房间：启动后把界面上的地址发给朋友，他们在浏览器打开就能加入（最多 2 人）。'
+            : '输入房主电脑的 IP（或完整地址）后点“开始游戏”连接。'
+        }
+      </div>
+    </div>
+  `;
+}
+
 function settingsPanel(): string {
   const d = DIFFICULTIES[settings.difficulty];
   return `
@@ -78,6 +111,7 @@ function settingsPanel(): string {
         <div class="segmented" role="group" aria-label="游戏模式">
           <button type="button" data-mode="solo" class="${settings.mode === 'solo' ? 'on' : ''}">单人闯关</button>
           <button type="button" data-mode="versus" class="${settings.mode === 'versus' ? 'on' : ''}">本地双人</button>
+          <button type="button" data-mode="lan" class="${settings.mode === 'lan' ? 'on' : ''}">局域网联机</button>
         </div>
       </div>
       <div class="setting-row ${settings.mode === 'versus' ? 'is-muted' : ''}">
@@ -92,6 +126,7 @@ function settingsPanel(): string {
         </div>
       </div>
       <div class="setting-note">${settings.mode === 'versus' ? '双人模式：每人 3 条命，先被击毁的一方输掉这一局。' : d.blurb}</div>
+      ${settings.mode === 'lan' ? lanPanel() : ''}
       <label class="setting-row toggle ${settings.mode === 'versus' ? 'is-muted' : ''}">
         <input type="checkbox" id="auto-dodge" ${settings.autoDodge ? 'checked' : ''} ${settings.mode === 'versus' ? 'disabled' : ''} />
         <span class="switch" aria-hidden="true"></span>
@@ -107,6 +142,15 @@ function settingsPanel(): string {
 function controlsForMode(): string {
   return settings.mode === 'versus' ? VERSUS_CONTROLS : SOLO_CONTROLS;
 }
+
+const LAN_CONTROLS = `
+  <ul class="controls">
+    <li><kbd>WASD</kbd> 驾驶 / 转向</li>
+    <li><kbd>鼠标</kbd> 瞄准炮塔</li>
+    <li><kbd>左键</kbd><kbd>空格</kbd> 开火</li>
+    <li><kbd>P</kbd> 暂停 · <kbd>M</kbd> 静音</li>
+  </ul>
+`;
 
 function bindSettings(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => {
@@ -124,6 +168,16 @@ function bindSettings(root: HTMLElement): void {
       render({ kind: 'start' });
     });
   });
+  root.querySelectorAll<HTMLButtonElement>('[data-lanrole]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      settings.lanRole = btn.dataset.lanrole === 'guest' ? 'guest' : 'host';
+      sound.ui();
+      render({ kind: 'start' });
+    });
+  });
+  root.querySelector<HTMLInputElement>('#lan-address')?.addEventListener('input', (event) => {
+    settings.lanAddress = (event.target as HTMLInputElement).value.trim();
+  });
   const auto = root.querySelector<HTMLInputElement>('#auto-dodge');
   auto?.addEventListener('change', () => {
     settings.autoDodge = auto.checked;
@@ -136,10 +190,10 @@ function startMatch(): void {
   sound.ui();
   game.scene.stop('Menu');
   if (game.scene.isActive('Game')) {
-    gameScene()?.restartGame();
-  } else {
-    game.scene.start('Game');
+    // Re-entering with a different mode has to rebuild the scene.
+    game.scene.stop('Game');
   }
+  game.scene.start('Game');
   render({ kind: 'hidden' });
 }
 
@@ -165,16 +219,18 @@ function render(next: OverlayState): void {
       <div class="rule"></div>
       <p>子弹碰到任何墙壁都会<strong>反弹</strong>——包括你自己的炮弹。站在自己的弹道上，一样会被自己打到。</p>
       ${settingsPanel()}
-      ${controlsForMode()}
+      ${settings.mode === 'lan' ? LAN_CONTROLS : controlsForMode()}
       <div class="actions">
         <button class="primary" id="btn-start">开始游戏</button>
         <span class="hint">或按 Enter</span>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
       </div>
       <div class="tip"><span class="dot"></span> ${
-        settings.mode === 'versus'
-          ? '双人：先被打光 3 条命的一方输 · 3 张地图轮换'
-          : `单人：你有 ${DIFFICULTIES[settings.difficulty].lives} 条命，击毁敌方坦克 ${DIFFICULTIES[settings.difficulty].enemyLives} 次即可过关 · 共 3 关`
+        settings.mode === 'lan'
+          ? '联机：房主开好房间后把局域网地址发给朋友，对方用浏览器打开即可加入 · 1v1，各 3 条命'
+          : settings.mode === 'versus'
+            ? '双人：先被打光 3 条命的一方输 · 3 张地图轮换'
+            : `单人：你有 ${DIFFICULTIES[settings.difficulty].lives} 条命，击毁敌方坦克 ${DIFFICULTIES[settings.difficulty].enemyLives} 次即可过关 · 3 关`
       }</div>
     `;
     bindSettings(card);
@@ -185,7 +241,7 @@ function render(next: OverlayState): void {
       <div class="rule"></div>
       <p>绿色虚线是真实的反弹路径，拐角上的小圈就是反弹点。</p>
       ${settingsPanel()}
-      ${controlsForMode()}
+      ${settings.mode === 'lan' ? LAN_CONTROLS : controlsForMode()}
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
         <button id="btn-restart">重新开始</button>

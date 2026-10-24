@@ -1,4 +1,4 @@
-export type GameMode = 'solo' | 'versus';
+export type GameMode = 'solo' | 'versus' | 'lan';
 export type Difficulty = 'easy' | 'normal' | 'hard';
 
 export interface DifficultyPreset {
@@ -80,6 +80,10 @@ export interface Settings {
   difficulty: Difficulty;
   /** Solo only: the hull dodges shells on its own, you keep the trigger. */
   autoDodge: boolean;
+  /** LAN: who this machine is in the match. */
+  lanRole: 'host' | 'guest';
+  /** LAN: host IP / URL. Empty = the page's own server. */
+  lanAddress: string;
 }
 
 /** Mutated by the DOM overlay, read by the game scene when it boots. */
@@ -88,11 +92,16 @@ export const settings: Settings = {
   // The first version was too punishing, so the game now opens on the gentle preset.
   difficulty: 'easy',
   autoDodge: false,
+  lanRole: 'host',
+  lanAddress: '',
 };
 
 export function preset(): DifficultyPreset {
   return DIFFICULTIES[settings.difficulty];
 }
 
-/** Lives each side starts a versus match with. */
+/** Lives each side starts a versus (and LAN) match with. */
 export const VERSUS_LIVES = 3;
+
+/** Default port of the bundled LAN server. */
+export { DEFAULT_LAN_PORT } from '../net/protocol';
