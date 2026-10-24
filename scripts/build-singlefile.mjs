@@ -11,8 +11,11 @@
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = resolve(new URL('..', import.meta.url).pathname);
+// fileURLToPath, not url.pathname: on Windows that would yield "/C:/..." and
+// every read below would fail.
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const dist = join(root, 'dist-single');
 const outDir = join(root, 'release');
 
