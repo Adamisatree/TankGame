@@ -104,11 +104,32 @@ console.log('card text:', JSON.stringify(cardText.slice(0, 120)));
 console.log('overlay classes:', doc.getElementById('overlay')?.className);
 console.log('body length:', doc.body.textContent?.length ?? -1);
 
+// The menu must actually expose the LAN panel (this is pure DOM wiring in main.ts).
+const lanButton = doc.querySelector('[data-mode="lan"]') as HTMLElement | null;
+lanButton?.click();
+await new Promise((r) => setTimeout(r, 120));
+const lanAddress = doc.getElementById('lan-address') as HTMLInputElement | null;
+const roleButtons = doc.querySelectorAll('[data-lanrole]');
+const hostButton = doc.querySelector('[data-lanrole="host"]') as HTMLElement | null;
+const guestButton = doc.querySelector('[data-lanrole="guest"]') as HTMLElement | null;
+guestButton?.click();
+await new Promise((r) => setTimeout(r, 120));
+const guestHint = (doc.querySelector('.lan-panel .setting-note')?.textContent ?? '').trim();
+hostButton?.click();
+await new Promise((r) => setTimeout(r, 120));
+const hostHint = (doc.querySelector('.lan-panel .setting-note')?.textContent ?? '').trim();
+(doc.querySelector('[data-mode="solo"]') as HTMLElement | null)?.click();
+
 const checks: [string, boolean, string?][] = [
   ['a canvas was created', !!canvas],
   ['the title card rendered', cardText.includes('坦克大作战'), cardText.slice(0, 60)],
   ['the start button exists', !!doc.getElementById('btn-start')],
   ['no page errors', errors.length === 0, errors.slice(0, 2).join(' | ')],
+  ['the LAN mode button exists', !!lanButton],
+  ['picking LAN shows the address field', !!lanAddress, 'no #lan-address'],
+  ['both host and guest roles are offered', roleButtons.length === 2, `${roleButtons.length} buttons`],
+  ['the guest role explains where to type the IP', guestHint.includes('IP'), guestHint.slice(0, 40)],
+  ['the host role explains what to share', hostHint.includes('地址'), hostHint.slice(0, 40)],
 ];
 
 let failed = 0;
