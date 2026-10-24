@@ -1,7 +1,7 @@
 {
   "name": "tank-duel",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "手绘风反弹坦克对战游戏：单人、本地双人、局域网联机",
   "scripts": {
@@ -111,9 +111,6 @@
       "category": "public.app-category.games",
       "identity": null,
       "artifactName": "TankGame-${version}-${arch}.${ext}"
-    },
-    "dmg": {
-      "title": "坦克大作战"
     },
     "linux": {
       "target": [
