@@ -102,6 +102,7 @@ jobs:
 
       - name: Report failure
         if: failure()
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
