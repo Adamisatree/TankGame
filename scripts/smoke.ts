@@ -128,6 +128,10 @@ define('location', window.location);
 define('focus', window.focus.bind(window));
 define('AudioContext', undefined);
 
+// jsdom has no WebSocket; the LAN client can use the real `ws` implementation.
+const { default: NodeWebSocket } = await import('ws');
+define('WebSocket', NodeWebSocket);
+
 const Phaser = (await import('phaser')).default;
 const { GameScene } = await import('../src/game/GameScene');
 const { MenuScene } = await import('../src/game/MenuScene');
@@ -348,6 +352,79 @@ await wait(150);
 poke.setPaused(false);
 await wait(150);
 check('pause/resume keeps the game healthy', poke.phase !== 'over', poke.phase);
+
+// --- LAN: host the match for real and connect a guest over WebSocket.
+const { createLanServer } = await import('../server/lan-server.mjs');
+const lanServer = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+settings.mode = 'lan';
+settings.lanRole = 'host';
+settings.lanAddress = `127.0.0.1:${lanServer.port}`;
+poke.restartGame();
+await wait(1800);
+
+check('host mode connects to the LAN server', (scene as unknown as { lanRole: string }).lanRole === 'host');
+
+// A guest joins from a plain WebSocket client.
+const guest = new NodeWebSocket(`ws://127.0.0.1:${lanServer.port}/ws`);
+const guestMsgs: any[] = [];
+guest.on('message', (raw: unknown) => {
+  try {
+    guestMsgs.push(JSON.parse(String(raw)));
+  } catch {
+    /* ignore */
+  }
+});
+await new Promise<void>((resolve, reject) => {
+  guest.once('open', () => resolve());
+  guest.once('error', reject);
+});
+guest.send(JSON.stringify({ t: 'join', role: 'guest' }));
+
+const snapSeen = () => guestMsgs.filter((m) => m.t === 'state');
+await wait(700);
+check('the guest starts receiving snapshots', snapSeen().length > 0, `got ${snapSeen().length}`);
+
+const lastSnap = () => snapSeen()[snapSeen().length - 1];
+check('snapshots describe both tanks', (lastSnap()?.tanks?.length ?? 0) === 2, JSON.stringify(lastSnap()?.tanks?.length));
+check(
+  'snapshots carry lives, phase and level',
+  typeof lastSnap()?.phase === 'string' && typeof lastSnap()?.level === 'number' && Array.isArray(lastSnap()?.crates),
+  JSON.stringify({ phase: lastSnap()?.phase, level: lastSnap()?.level })
+);
+
+// Guest input must actually move the host's second tank.
+const p2Start = { x: poke.p2!.x, y: poke.p2!.y };
+const sendInput = () =>
+  guest.send(JSON.stringify({ t: 'input', seq: 1, input: { turn: 1, drive: 1, aim: 0, fire: false } }));
+const inputTimer = setInterval(sendInput, 33);
+await wait(900);
+clearInterval(inputTimer);
+const p2Moved = Math.hypot(poke.p2!.x - p2Start.x, poke.p2!.y - p2Start.y);
+check('guest input drives the host-side tank', p2Moved > 10, `moved=${p2Moved.toFixed(1)}px`);
+
+const guestTank = lastSnap()?.tanks?.find((t: { id: string }) => t.id === 'p2');
+check(
+  'the guest sees its own tank move in snapshots',
+  !!guestTank && Math.hypot(guestTank.x - p2Start.x, guestTank.y - p2Start.y) > 10,
+  JSON.stringify(guestTank)
+);
+
+// Host can end the match / restart and the guest is told.
+guestMsgs.length = 0;
+poke.restartGame();
+await wait(400);
+check('restart is mirrored to the guest', guestMsgs.some((m) => m.t === 'restart'), JSON.stringify(guestMsgs.map((m) => m.t)));
+
+guest.close();
+lanServer.close();
+await wait(300);
+
+// Back to solo: this must shut the socket down and leave no pending retries.
+settings.mode = 'solo';
+settings.lanAddress = '';
+poke.restartGame();
+await wait(1200);
+check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown }).lan, 'socket still open');
 
 console.log('');
 const failed = checks.filter((c) => !c.ok);

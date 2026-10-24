@@ -19,3 +19,9 @@ npm-debug.log*
 # screenshots / scratch
 screenshots/
 shots/
+
+# single-file build output
+dist-single/
+
+# electron-builder output (installers are attached to GitHub releases)
+release/desktop/

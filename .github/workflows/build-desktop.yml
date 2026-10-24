@@ -1,0 +1,101 @@
+name: Build desktop clients
+
+# Builds the real installers on GitHub's own Windows / macOS machines.
+# Run it from the Actions tab, or push a tag like v1.0.0 to publish a release.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (.exe installer + portable)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check and test
+        run: |
+          npm run typecheck
+          npm run selftest
+          npm run lantest
+
+      - name: Build the game
+        run: npm run build:desktop
+
+      - name: Package Windows app
+        run: npx electron-builder --win --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TankGame-windows
+          path: |
+            release/desktop/*.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TankGame-portable-html
+          path: release/*.html
+
+  macos:
+    name: macOS (dmg, Apple Silicon + Intel)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the game
+        run: npm run build:desktop
+
+      - name: Package macOS app
+        run: npx electron-builder --mac --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TankGame-macos
+          path: |
+            release/desktop/*.dmg
+            release/desktop/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Attach builds to a release
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist-artifacts/**/*
+          generate_release_notes: true

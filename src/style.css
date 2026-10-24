@@ -457,3 +457,49 @@ b.p2 {
     font-size: 15px;
   }
 }
+
+/* --------------------------------------------------------------- LAN panel */
+
+.lan-panel {
+  margin: 2px 0 10px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--player2);
+  background: rgba(111, 90, 168, 0.07);
+  border-radius: 3px;
+}
+
+.lan-address-row {
+  gap: 10px;
+}
+
+.lan-input {
+  flex: 1 1 200px;
+  min-width: 160px;
+  font-family: var(--font);
+  font-size: 17px;
+  color: var(--ink);
+  background: #fffaf0;
+  border: 1.8px solid var(--ink);
+  border-radius: 4px;
+  padding: 6px 10px;
+  box-shadow: inset 1px 1px 0 rgba(38, 34, 29, 0.08);
+}
+
+.lan-input:focus {
+  outline: 2px dashed var(--player2);
+  outline-offset: 2px;
+}
+
+.lan-hint {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.lang-badge {
+  display: inline-block;
+  font-size: 13px;
+  padding: 1px 7px;
+  border: 1.4px solid currentColor;
+  border-radius: 10px;
+  color: var(--player2);
+}

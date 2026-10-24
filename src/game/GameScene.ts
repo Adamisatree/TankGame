@@ -11,6 +11,8 @@ import { Tank, type TankId } from './Tank';
 import { makeTextures, paperBackground } from './art';
 import { sound } from './Sound';
 import { preset, settings, VERSUS_LIVES, type DifficultyPreset } from './settings';
+import { LanClient } from '../net/LanClient';
+import type { NetEvent, Snapshot, TankInput } from '../net/protocol';
 
 /** Drawing area, leaving room for the sketch HUD at the top and hints below. */
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
@@ -124,16 +126,34 @@ export class GameScene extends Phaser.Scene {
   private escKey!: Phaser.Input.Keyboard.Key;
   private muteKey!: Phaser.Input.Keyboard.Key;
   private autoKey!: Phaser.Input.Keyboard.Key;
+  private guestKeys!: { w: Phaser.Input.Keyboard.Key; a: Phaser.Input.Keyboard.Key; s: Phaser.Input.Keyboard.Key; d: Phaser.Input.Keyboard.Key };
 
   private fireCd1 = 0;
   private fireCd2 = 0;
+
+  // ---- LAN
+  private lan: LanClient | null = null;
+  private lanRole: 'host' | 'guest' | null = null;
+  /** Set on shutdown so late socket callbacks never touch a dead scene. */
+  private lanClosed = false;
+  private remoteInput: TankInput = { turn: 0, drive: 0, aim: 0, fire: false };
+  private netEvents: NetEvent[] = [];
+  private netTimer = 0;
+  private netSeq = 0;
+  private snap: Snapshot | null = null;
+  private snapAt = 0;
+  private netBanner = '';
 
   constructor() {
     super('Game');
   }
 
   private get versus(): boolean {
-    return settings.mode === 'versus';
+    return settings.mode === 'versus' || settings.mode === 'lan';
+  }
+
+  private get lanMode(): boolean {
+    return settings.mode === 'lan';
   }
 
   // ------------------------------------------------------------------ setup
@@ -161,6 +181,7 @@ export class GameScene extends Phaser.Scene {
     this.escKey = kb.addKey('ESC');
     this.muteKey = kb.addKey('M');
     this.autoKey = kb.addKey('G');
+    this.guestKeys = { w: kb.addKey('W'), a: kb.addKey('A'), s: kb.addKey('S'), d: kb.addKey('D') };
 
     this.levelText = this.hud.text(GAME_W / 2, 40, '', 24, COLORS.ink);
     this.scoreText = this.hud.text(GAME_W - 48, 40, '', 22, COLORS.ink, 'right');
@@ -177,6 +198,79 @@ export class GameScene extends Phaser.Scene {
     this.autoDodge = settings.autoDodge;
     this.levelIndex = 0;
     this.loadLevel(0);
+    this.emitOverlay({ kind: 'hidden' });
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.lanClosed = true;
+      this.lan?.close();
+      this.lan = null;
+      this.lanRole = null;
+    });
+
+    if (this.lanMode) this.connectLan();
+  }
+
+  // ------------------------------------------------------------------ LAN
+
+  /** Opens the socket for the role chosen in the menu. */
+  connectLan(): void {
+    if (!this.lanMode) return;
+    const role = settings.lanRole;
+    this.lanRole = role;
+    this.lan?.close();
+    this.lanClosed = false;
+    this.lan = new LanClient(role, settings.lanAddress, {
+      onStatus: (status, detail) => {
+        // The socket can report after the scene is torn down (mode change, quit).
+        if (this.lanClosed) return;
+        if (status === 'waiting') this.netBanner = '等待对手加入…';
+        else if (status === 'playing') this.netBanner = '';
+        else if (status === 'error') this.netBanner = detail ?? '连接失败';
+        else if (status === 'closed') this.netBanner = '连接已断开';
+        else if (status === 'connecting') this.netBanner = detail ?? '连接中…';
+        if (this.netBanner) this.showBanner(this.netBanner, 1.6);
+        this.modeText.setText(this.modeLabel());
+      },
+      onPeer: (state) => {
+        this.showBanner(state === 'joined' ? '对手已加入！' : '对手离开了', 1.4);
+        if (state === 'joined') {
+          sound.ui();
+          // A fresh opponent means a fresh match.
+          if (role === 'host') {
+            this.bullets = [];
+            this.restartLanMatch();
+          }
+        }
+      },
+      onInput: (input) => {
+        this.remoteInput = input;
+      },
+      onSnapshot: (snap) => this.applySnapshot(snap),
+      onHostMessage: (msg) => {
+        if (msg.t === 'restart' || msg.t === 'start') {
+          if (typeof msg.level === 'number' && msg.level !== this.levelIndex) this.loadLevel(msg.level);
+          else this.restartLanMatch();
+        }
+      },
+    });
+    this.lan.connect();
+  }
+
+  private modeLabel(): string {
+    if (this.lanMode) {
+      const role = this.lanRole === 'host' ? '房主' : '访客';
+      return `局域网 · ${role}`;
+    }
+    return this.versus ? '双人对战' : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}`;
+  }
+
+  /** Host: reset the arena without touching the socket. */
+  private restartLanMatch(): void {
+    this.score = 0;
+    this.bullets = [];
+    this.particles = [];
+    this.loadLevel(0);
+    this.lan?.send({ t: 'restart', level: 0 });
     this.emitOverlay({ kind: 'hidden' });
   }
 
@@ -195,13 +289,15 @@ export class GameScene extends Phaser.Scene {
 
   private refreshHeaderText(): void {
     this.hintText.setText(
-      this.versus
-        ? 'P1: WASD 驾驶 · Q/E 微调炮口 · 空格 开火      P2: 方向键 驾驶 · ,/. 微调炮口 · Enter 开火      P 暂停'
-        : 'WASD / 方向键 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · Shift 慢速 · G 自动躲弹 · P 暂停'
+      this.lanMode
+        ? settings.lanRole === 'host'
+          ? '房主：WASD 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · P 暂停'
+          : '访客：WASD / 方向键 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · P 暂停'
+        : this.versus
+          ? 'P1: WASD 驾驶 · Q/E 微调炮口 · 空格 开火      P2: 方向键 驾驶 · ,/. 微调炮口 · Enter 开火      P 暂停'
+          : 'WASD / 方向键 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · Shift 慢速 · G 自动躲弹 · P 暂停'
     );
-    this.modeText.setText(
-      this.versus ? '双人对战' : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}`
-    );
+    this.modeText.setText(this.modeLabel());
   }
 
   private loadLevel(index: number): void {
@@ -258,6 +354,12 @@ export class GameScene extends Phaser.Scene {
 
   /** Called by the DOM overlay to restart with the current settings. */
   restartGame(): void {
+    // Leaving LAN mode must actually drop the socket, not leave it half-open.
+    if (!this.lanMode && this.lan) {
+      this.lan.close();
+      this.lan = null;
+      this.lanRole = null;
+    }
     this.score = 0;
     this.bullets = [];
     this.particles = [];
@@ -265,8 +367,18 @@ export class GameScene extends Phaser.Scene {
     this.autoDodge = settings.autoDodge;
     this.loadLevel(0);
     this.emitOverlay({ kind: 'hidden' });
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.lanClosed = true;
+      this.lan?.close();
+      this.lan = null;
+      this.lanRole = null;
+    });
+
+    if (this.lanMode) this.connectLan();
   }
 
+  /** Toggle the solo autopilot (menu checkbox or the G key). */
   setAutoDodge(on: boolean): void {
     this.autoDodge = on;
     settings.autoDodge = on;
@@ -399,16 +511,29 @@ export class GameScene extends Phaser.Scene {
 
     if (this.hudDirty) this.drawHud();
 
+    const guest = this.lanMode && this.lanRole === 'guest';
+
     if (this.phase === 'ready') {
       this.readyTimer -= dt;
       if (this.readyTimer <= 0) this.phase = 'playing';
-    } else if (this.phase === 'playing') {
-      this.updateHuman(this.p1, dt, 1);
-      if (this.versus && this.p2) this.updateHuman(this.p2, dt, 2);
+    } else if (this.phase === 'playing' && !guest) {
+      // Host / solo / local versus: simulate everything on this machine.
+      const mouseAim = settings.mode !== 'versus';
+      const slow = settings.mode === 'solo' && this.shiftKey.isDown;
+      this.applyInput(this.p1, this.readLocalInput(1, this.p1, dt, mouseAim), dt, { slow });
+      if (this.p2) {
+        if (this.lanMode) this.applyInput(this.p2, this.remoteInput, dt, { aimRate: 22 });
+        else this.applyInput(this.p2, this.readLocalInput(2, this.p2, dt, false), dt);
+      }
       if (this.enemy) this.updateAi(dt);
     }
 
-    this.updateBullets(dt);
+    if (guest) {
+      this.updateGuest(dt);
+    } else {
+      this.updateBullets(dt);
+      this.updateNetHost(dt);
+    }
     this.updateParticles(dt);
     this.updatePhase(dt);
     this.drawFrame(time);
@@ -465,9 +590,8 @@ export class GameScene extends Phaser.Scene {
 
   // ------------------------------------------------------------------ humans
 
-  private updateHuman(tank: Tank, dt: number, which: 1 | 2): void {
-    if (!tank.alive) return;
-
+  /** Reads this machine's keyboard/mouse for the given seat. */
+  private readLocalInput(which: 1 | 2, tank: Tank, dt: number, mouseAim: boolean): TankInput {
     const keys = which === 1 ? this.wasd : this.arrows;
     const trimLeft = which === 1 ? this.trimLeft1 : this.trimLeft2;
     const trimRight = which === 1 ? this.trimRight1 : this.trimRight2;
@@ -476,7 +600,7 @@ export class GameScene extends Phaser.Scene {
     let turn = (keys.right.isDown ? 1 : 0) - (keys.left.isDown ? 1 : 0);
     let drive = (keys.up.isDown ? 1 : 0) - (keys.down.isDown ? 1 : 0);
 
-    // Solo P1: the optional autopilot handles the hull so you can just aim.
+    // Solo: let the autopilot drive when the player isn't steering.
     const manual = turn !== 0 || drive !== 0;
     if (which === 1 && !this.versus && this.autoDodge && !manual) {
       const auto = this.autopilotMove(tank);
@@ -484,14 +608,32 @@ export class GameScene extends Phaser.Scene {
       drive = auto.drive;
     }
 
-    const slow = which === 1 && this.shiftKey.isDown;
-    const aimMode = slow && !this.versus;
-    tank.bodyAngle += turn * TANK.turnRate * (aimMode ? 0.8 : 1) * dt;
+    let aim: number;
+    if (mouseAim) {
+      const pointer = this.input.activePointer;
+      const mx = pointer.worldX || GAME_W / 2;
+      const my = pointer.worldY || GAME_H / 2;
+      aim = Math.atan2(my - tank.y, mx - tank.x);
+    } else {
+      const trim = (trimRight.isDown ? 1 : 0) - (trimLeft.isDown ? 1 : 0);
+      aim = Phaser.Math.Angle.Wrap(tank.turretAngle + trim * 1.9 * dt);
+    }
 
-    const fwd = aimMode ? TANK.tacticalSpeed : TANK.driveSpeed;
-    const rev = aimMode ? TANK.tacticalReverse : TANK.reverseSpeed;
-    const speed = drive > 0 ? fwd : rev;
-    const v = drive * speed;
+    const mouseFire = mouseAim && this.input.activePointer.leftButtonDown();
+    return { turn, drive, aim, fire: fireKey.isDown || mouseFire };
+  }
+
+  /** Applies one input frame to a tank – shared by local players and the guest. */
+  private applyInput(tank: Tank, input: TankInput, dt: number, opts: { slow?: boolean; aimRate?: number } = {}): void {
+    if (!tank.alive) return;
+
+    const slow = opts.slow ?? false;
+    tank.bodyAngle += input.turn * TANK.turnRate * (slow ? 0.8 : 1) * dt;
+
+    const fwd = slow ? TANK.tacticalSpeed : TANK.driveSpeed;
+    const rev = slow ? TANK.tacticalReverse : TANK.reverseSpeed;
+    const speed = input.drive > 0 ? fwd : rev;
+    const v = input.drive * speed;
     tank.vx = Math.cos(tank.bodyAngle) * v;
     tank.vy = Math.sin(tank.bodyAngle) * v;
     tank.x += tank.vx * dt;
@@ -501,39 +643,50 @@ export class GameScene extends Phaser.Scene {
       tank.vy *= 0.2;
     }
 
-    // Aiming: mouse in solo, turret trim in versus.
-    if (!this.versus) {
-      const pointer = this.input.activePointer;
-      const mx = pointer.worldX || GAME_W / 2;
-      const my = pointer.worldY || GAME_H / 2;
-      const want = Math.atan2(my - tank.y, mx - tank.x);
-      tank.turretAngle = turnToward(tank.turretAngle, want, 14, dt);
-    } else {
-      const trim = (trimRight.isDown ? 1 : 0) - (trimLeft.isDown ? 1 : 0);
-      if (trim !== 0) {
-        tank.turretAngle = Phaser.Math.Angle.Wrap(tank.turretAngle + trim * 1.9 * dt);
-      }
+    if (Number.isFinite(input.aim)) {
+      tank.turretAngle = turnToward(tank.turretAngle, input.aim, opts.aimRate ?? 16, dt);
     }
 
     this.separateTanks();
 
-    if (which === 1) {
+    const seat = tank.id === 'p2' ? 2 : 1;
+    if (seat === 1) {
       this.fireCd1 -= dt;
-      if (this.fireCd1 <= 0 && (fireKey.isDown || (!this.versus && this.input.activePointer.leftButtonDown()))) {
+      if (input.fire && this.fireCd1 <= 0) {
         this.fire(tank);
         this.fireCd1 = 0.24;
       }
     } else {
       this.fireCd2 -= dt;
-      if (this.fireCd2 <= 0 && fireKey.isDown) {
+      if (input.fire && this.fireCd2 <= 0) {
         this.fire(tank);
         this.fireCd2 = 0.24;
       }
     }
+  }
 
-    if (!this.versus && this.input.activePointer.rightButtonDown() && which === 1) {
-      // right mouse = tactical slow mode is already handled by Shift
-    }
+  /** Guest: the whole match lives on the host, we only read input here. */
+  private readGuestInput(dt: number): TankInput {
+    const gk = this.guestKeys;
+    const left = gk.a.isDown || this.arrows.left.isDown;
+    const right = gk.d.isDown || this.arrows.right.isDown;
+    const up = gk.w.isDown || this.arrows.up.isDown;
+    const down = gk.s.isDown || this.arrows.down.isDown;
+    const pointer = this.input.activePointer;
+    const tank = this.p2;
+    const aim = tank ? Math.atan2((pointer.worldY || 0) - tank.y, (pointer.worldX || 0) - tank.x) : 0;
+    const fire = this.spaceKeyDown() || pointer.leftButtonDown();
+    void dt;
+    return {
+      turn: (right ? 1 : 0) - (left ? 1 : 0),
+      drive: (up ? 1 : 0) - (down ? 1 : 0),
+      aim,
+      fire,
+    };
+  }
+
+  private spaceKeyDown(): boolean {
+    return this.fire1.isDown || this.fire2.isDown;
   }
 
   /** Auto-dodge: choose the safest heading, ignore walls we would hit. */
@@ -643,6 +796,7 @@ export class GameScene extends Phaser.Scene {
     const m = tank.muzzle(len, dir);
     this.spawnBullet(m.x, m.y, dir, tank.id, speed, maxBounces);
     this.burst(m.x, m.y, dir, tank.id);
+    this.netEvent('fire', m.x, m.y, { id: tank.id });
     this.cameras.main.shake(60, 0.002);
     if (tank.id === 'enemy') sound.enemyFire();
     else sound.fire();
@@ -912,6 +1066,7 @@ export class GameScene extends Phaser.Scene {
         if (ev.kind === 'wall') {
           b.trail = [];
           this.impactSpark(ev.x, ev.y, ev.nx, ev.ny, b.color);
+          this.netEvent('bounce', ev.x, ev.y, { color: b.color });
           if (this.time.now - this.lastBounceSound > 45) {
             this.lastBounceSound = this.time.now;
             sound.bounce();
@@ -971,6 +1126,7 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.flash(90, 220, 200, 170);
     this.puff(victim.x, victim.y, victim.color, 10);
     this.ring(victim.x, victim.y, victim.color);
+    this.netEvent('hit', victim.x, victim.y, { id: victim.id, color: victim.color });
     sound.hit();
 
     if (self) {
@@ -1004,6 +1160,7 @@ export class GameScene extends Phaser.Scene {
     this.drawCrates();
     this.puff(x, y, COLORS.crate, 12);
     this.ring(x, y, COLORS.crate);
+    this.netEvent('crate', x, y);
     sound.hit();
   }
 
@@ -1052,6 +1209,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private explode(x: number, y: number, color: number): void {
+    this.netEvent('explode', x, y, { color });
     this.puff(x, y, color, 22);
     this.ring(x, y, color);
     this.ring(x + 6, y - 4, COLORS.ink);
@@ -1086,12 +1244,183 @@ export class GameScene extends Phaser.Scene {
     this.particles = this.particles.filter((p) => p.life > 0);
   }
 
+  // ------------------------------------------------------------------ network I/O
+
+  /** Host: push a state snapshot to the guest at 30Hz. */
+  private updateNetHost(dt: number): void {
+    if (!this.lanMode || this.lanRole !== 'host' || !this.lan) return;
+    this.netTimer -= dt;
+    if (this.netTimer > 0) return;
+    this.netTimer = 1 / 30;
+    this.lan.sendSnapshot(this.buildSnapshot());
+  }
+
+  private buildSnapshot(): Snapshot {
+    this.netSeq += 1;
+    const events = this.netEvents;
+    this.netEvents = [];
+    return {
+      t: 'state',
+      seq: this.netSeq,
+      level: this.levelIndex,
+      phase: this.phase,
+      score: this.score,
+      crates: this.crates.map((c) => (c.alive ? 1 : 0)),
+      tanks: [this.p1, this.p2]
+        .filter((t): t is Tank => !!t)
+        .map((t) => ({
+          id: t.id === 'p2' ? 'p2' : ('p1' as const),
+          x: Math.round(t.x * 10) / 10,
+          y: Math.round(t.y * 10) / 10,
+          body: Math.round(t.bodyAngle * 100) / 100,
+          turret: Math.round(t.turretAngle * 100) / 100,
+          lives: t.lives,
+          damage: t.damage,
+          alive: t.alive ? 1 : 0,
+        })),
+      bullets: this.bullets.map((b) => ({
+        x: Math.round(b.x * 10) / 10,
+        y: Math.round(b.y * 10) / 10,
+        vx: Math.round(b.vx),
+        vy: Math.round(b.vy),
+        owner: b.owner === 'p2' ? 'p2' : 'p1',
+      })),
+      events,
+    };
+  }
+
+  /** Records an effect that the guest should also see/hear. */
+  private netEvent(kind: NetEvent['k'], x: number, y: number, extra: Partial<NetEvent> = {}): void {
+    if (!this.lanMode || this.lanRole !== 'host') return;
+    if (this.netEvents.length > 40) return;
+    this.netEvents.push({ k: kind, x: Math.round(x), y: Math.round(y), ...extra });
+  }
+
+  /** Guest: send our input and keep the arena alive from snapshots. */
+  private updateGuest(dt: number): void {
+    this.netTimer -= dt;
+    if (this.netTimer <= 0) {
+      this.netTimer = 1 / 30;
+      this.lan?.sendInput(this.readGuestInput(dt));
+    }
+
+    const snap = this.snap;
+    if (!snap) return;
+    const age = Math.min(0.12, (this.time.now - this.snapAt) / 1000);
+
+    // Tanks: smooth towards the authoritative transform.
+    const lerp = Math.min(1, dt * 18);
+    for (const st of snap.tanks) {
+      const tank = st.id === 'p1' ? this.p1 : this.p2;
+      if (!tank) continue;
+      tank.x += (st.x - tank.x) * lerp;
+      tank.y += (st.y - tank.y) * lerp;
+      tank.bodyAngle = angleLerp(tank.bodyAngle, st.body, lerp);
+      tank.turretAngle = angleLerp(tank.turretAngle, st.turret, lerp);
+      tank.lives = st.lives;
+      if (tank.damage !== st.damage) {
+        tank.damage = st.damage;
+        tank.redraw();
+      }
+      if ((st.alive === 1) !== tank.alive) tank.setAlive(st.alive === 1, this.time.now);
+    }
+
+    // Shells: draw from the snapshot, extrapolated by its age.
+    this.bullets = snap.bullets.map((b) => ({
+      x: b.x + b.vx * age,
+      y: b.y + b.vy * age,
+      vx: b.vx,
+      vy: b.vy,
+      owner: b.owner === 'p2' ? ('p2' as const) : ('p1' as const),
+      color: b.owner === 'p2' ? COLORS.player2 : COLORS.player,
+      bounces: 0,
+      maxBounces: BULLET.maxBounces,
+      life: BULLET.lifetime,
+      dead: false,
+      trail: [],
+    }));
+
+    if (this.score !== snap.score) {
+      this.score = snap.score;
+      this.hudDirty = true;
+    }
+    if (snap.phase !== this.phase && (snap.phase === 'versusOver' || snap.phase === 'playing')) {
+      this.phase = snap.phase as Phase;
+      this.hudDirty = true;
+    }
+  }
+
+  /** Guest: adopt a snapshot, replaying effects and syncing the level. */
+  private applySnapshot(snap: Snapshot): void {
+    this.snap = snap;
+    this.snapAt = this.time.now;
+
+    if (snap.level !== this.levelIndex) {
+      // Level changed on the host – rebuild the arena locally.
+      const keepLives = { p1: this.p1?.lives ?? VERSUS_LIVES, p2: this.p2?.lives ?? VERSUS_LIVES };
+      this.levelIndex = snap.level;
+      this.layout = buildLayout(LEVELS[snap.level], PLAY_RECT);
+      const level = LEVELS[snap.level];
+      this.p1.destroy();
+      this.p2?.destroy();
+      this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
+      this.p2 = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'p2', 22);
+      this.p1.lives = keepLives.p1;
+      this.p2.lives = keepLives.p2;
+      this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
+      this.particles = [];
+      this.bullets = [];
+      this.drawTerrain();
+      this.drawCrates();
+      this.hudDirty = true;
+      this.levelText.setText(level.name);
+      this.showBanner(level.name, 1.2);
+    }
+
+    // Crates.
+    let cratesChanged = false;
+    snap.crates.forEach((alive, i) => {
+      const crate = this.crates[i];
+      if (crate && crate.alive !== (alive === 1)) {
+        crate.alive = alive === 1;
+        cratesChanged = true;
+      }
+    });
+    if (cratesChanged) this.drawCrates();
+
+    // Effects.
+    for (const ev of snap.events) {
+      if (ev.k === 'fire') {
+        this.burst(ev.x, ev.y, Math.atan2(0, 1), ev.id === 'p2' ? 'p2' : 'p1');
+        sound.fire();
+      } else if (ev.k === 'hit') {
+        this.puff(ev.x, ev.y, ev.color ?? COLORS.danger, 8);
+        this.ring(ev.x, ev.y, ev.color ?? COLORS.danger);
+        this.cameras.main.shake(100, 0.004);
+        sound.hit();
+      } else if (ev.k === 'bounce') {
+        this.impactSpark(ev.x, ev.y, 1, 0, ev.color ?? COLORS.player);
+        if (this.time.now - this.lastBounceSound > 45) {
+          this.lastBounceSound = this.time.now;
+          sound.bounce();
+        }
+      } else if (ev.k === 'explode') {
+        this.explode(ev.x, ev.y, ev.color ?? COLORS.enemy);
+      } else if (ev.k === 'crate') {
+        this.puff(ev.x, ev.y, COLORS.crate, 10);
+      }
+    }
+  }
+
   private drawFrame(time: number): void {
     const g = this.fx;
     g.clear();
 
     if (this.phase === 'playing' || this.phase === 'ready') {
-      if (!this.versus && this.p1.alive) {
+      if (this.lanMode) {
+        const mine = this.lanRole === 'guest' ? this.p2 : this.p1;
+        if (mine?.alive) this.drawAimGuide(g, mine, this.lanRole === 'guest' ? COLORS.player2 : COLORS.player, 0.5);
+      } else if (!this.versus && this.p1.alive) {
         this.drawAimGuide(g, this.p1, COLORS.player, 0.62);
       } else if (this.versus) {
         if (this.p1.alive) this.drawAimGuide(g, this.p1, COLORS.player, 0.34);
@@ -1233,6 +1562,12 @@ export class GameScene extends Phaser.Scene {
       g.strokePath();
     }
   }
+}
+
+/** Shortest-path angle interpolation, used to smooth networked tanks. */
+function angleLerp(current: number, target: number, t: number): number {
+  const diff = Phaser.Math.Angle.Wrap(target - current);
+  return current + diff * Math.min(1, Math.max(0, t));
 }
 
 function turnToward(current: number, target: number, rate: number, dt: number): number {
