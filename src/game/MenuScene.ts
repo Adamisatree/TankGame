@@ -57,7 +57,7 @@ export class MenuScene extends Phaser.Scene {
     this.layer.line(80, GAME_H - 80, 230, GAME_H - 80, { width: 1.4, jitter: 2.2 });
     this.layer.line(80, GAME_H - 66, 180, GAME_H - 66, { width: 1.4, jitter: 2.2 });
 
-    const a = new Tank(this, 205, GAME_H - 205, -0.6, 'player', 8);
+    const a = new Tank(this, 205, GAME_H - 205, -0.6, 'p1', 8);
     const b = new Tank(this, GAME_W - 215, 210, Math.PI + 0.5, 'enemy', 8);
     a.turretAngle = -1.2;
     b.turretAngle = Math.PI * 0.8;

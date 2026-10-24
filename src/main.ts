@@ -4,6 +4,7 @@ import { GAME_H, GAME_W } from './game/config';
 import { GameScene } from './game/GameScene';
 import { MenuScene } from './game/MenuScene';
 import { OVERLAY_EVENT, type OverlayState } from './game/events';
+import { DIFFICULTIES, settings, type Difficulty, type GameMode } from './game/settings';
 import { sound } from './game/Sound';
 
 const overlay = document.getElementById('overlay') as HTMLDivElement;
@@ -28,12 +29,10 @@ const game = new Phaser.Game({
   scene: [MenuScene, GameScene],
 });
 
-const gameScene = (): GameScene => game.scene.getScene('Game') as GameScene;
+const gameScene = (): GameScene | null => (game.scene.getScene('Game') as GameScene | null) ?? null;
 
 let state: OverlayState = { kind: 'start' };
 
-
-// A little hand-drawn tank + ricochet diagram for the title card.
 const DOODLE = `
   <svg class="doodle" viewBox="0 0 260 96" aria-hidden="true">
     <g fill="none" stroke="#26221d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -54,21 +53,101 @@ const DOODLE = `
   </svg>
 `;
 
-const CONTROLS = `
+const SOLO_CONTROLS = `
   <ul class="controls">
-    <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 驾驶 / 转向</li>
+    <li><kbd>WASD</kbd> 驾驶 / 转向</li>
     <li><kbd>鼠标</kbd> 瞄准炮塔</li>
     <li><kbd>左键</kbd><kbd>空格</kbd> 开火</li>
-    <li><kbd>右键</kbd><kbd>Shift</kbd> 慢速微调</li>
+    <li><kbd>Shift</kbd> 慢速微调</li>
   </ul>
 `;
+
+const VERSUS_CONTROLS = `
+  <ul class="controls two-col">
+    <li><b class="p1">P1</b> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 驾驶 · <kbd>Q</kbd><kbd>E</kbd> 微调炮口 · <kbd>空格</kbd> 开火</li>
+    <li><b class="p2">P2</b> <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> 驾驶 · <kbd>,</kbd><kbd>.</kbd> 微调炮口 · <kbd>Enter</kbd> 开火</li>
+  </ul>
+`;
+
+function settingsPanel(): string {
+  const d = DIFFICULTIES[settings.difficulty];
+  return `
+    <div class="settings">
+      <div class="setting-row">
+        <span class="setting-label">模式</span>
+        <div class="segmented" role="group" aria-label="游戏模式">
+          <button type="button" data-mode="solo" class="${settings.mode === 'solo' ? 'on' : ''}">单人闯关</button>
+          <button type="button" data-mode="versus" class="${settings.mode === 'versus' ? 'on' : ''}">本地双人</button>
+        </div>
+      </div>
+      <div class="setting-row ${settings.mode === 'versus' ? 'is-muted' : ''}">
+        <span class="setting-label">难度</span>
+        <div class="segmented" role="group" aria-label="难度">
+          ${Object.values(DIFFICULTIES)
+            .map(
+              (p) =>
+                `<button type="button" data-diff="${p.key}" class="${settings.difficulty === p.key ? 'on' : ''}">${p.label}</button>`
+            )
+            .join('')}
+        </div>
+      </div>
+      <div class="setting-note">${settings.mode === 'versus' ? '双人模式：每人 3 条命，先被击毁的一方输掉这一局。' : d.blurb}</div>
+      <label class="setting-row toggle ${settings.mode === 'versus' ? 'is-muted' : ''}">
+        <input type="checkbox" id="auto-dodge" ${settings.autoDodge ? 'checked' : ''} ${settings.mode === 'versus' ? 'disabled' : ''} />
+        <span class="switch" aria-hidden="true"></span>
+        <span class="toggle-text">
+          <b>自动躲弹</b>
+          <em>车身自动躲炮弹、自动贴墙找角度，你只管瞄准和开火（游戏中按 <kbd>G</kbd> 可随时切换）</em>
+        </span>
+      </label>
+    </div>
+  `;
+}
+
+function controlsForMode(): string {
+  return settings.mode === 'versus' ? VERSUS_CONTROLS : SOLO_CONTROLS;
+}
+
+function bindSettings(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      settings.mode = btn.dataset.mode as GameMode;
+      sound.resume();
+      sound.ui();
+      render({ kind: 'start' });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      settings.difficulty = btn.dataset.diff as Difficulty;
+      sound.ui();
+      render({ kind: 'start' });
+    });
+  });
+  const auto = root.querySelector<HTMLInputElement>('#auto-dodge');
+  auto?.addEventListener('change', () => {
+    settings.autoDodge = auto.checked;
+    sound.ui();
+  });
+}
+
+function startMatch(): void {
+  sound.resume();
+  sound.ui();
+  game.scene.stop('Menu');
+  if (game.scene.isActive('Game')) {
+    gameScene()?.restartGame();
+  } else {
+    game.scene.start('Game');
+  }
+  render({ kind: 'hidden' });
+}
 
 function render(next: OverlayState): void {
   state = next;
 
   if (next.kind === 'hidden') {
     overlay.classList.add('hidden');
-    // Drop the buttons so a stray Space/Enter can't re-trigger a hidden action.
     card.innerHTML = '';
     (document.activeElement as HTMLElement | null)?.blur();
     sound.resume();
@@ -84,66 +163,83 @@ function render(next: OverlayState): void {
       <h1>坦克大作战<span class="accent">!</span></h1>
       ${DOODLE}
       <div class="rule"></div>
-      <p>你驾驶一台铅笔涂出来的小坦克。子弹碰到任何墙壁都会<strong>反弹</strong>，
-      所以别站在自己的弹道上——拐角、墙角和反弹，都是你的武器。</p>
-      ${CONTROLS}
+      <p>子弹碰到任何墙壁都会<strong>反弹</strong>——包括你自己的炮弹。站在自己的弹道上，一样会被自己打到。</p>
+      ${settingsPanel()}
+      ${controlsForMode()}
       <div class="actions">
         <button class="primary" id="btn-start">开始游戏</button>
         <span class="hint">或按 Enter</span>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
       </div>
-      <div class="tip"><span class="dot"></span> 命中 3 次击毁敌方坦克 · 你共有 3 条命 · 共 3 个关卡 · 建议使用电脑键盘游玩</div>
+      <div class="tip"><span class="dot"></span> ${
+        settings.mode === 'versus'
+          ? '双人：先被打光 3 条命的一方输 · 3 张地图轮换'
+          : `单人：你有 ${DIFFICULTIES[settings.difficulty].lives} 条命，击毁敌方坦克 ${DIFFICULTIES[settings.difficulty].enemyLives} 次即可过关 · 共 3 关`
+      }</div>
     `;
+    bindSettings(card);
   } else if (next.kind === 'paused') {
     card.innerHTML = `
       <div class="kicker">Paused</div>
       <h1>暂停中</h1>
       <div class="rule"></div>
-      <p>喘口气。瞄准那条虚线——它会把子弹弹到哪里，画得清清楚楚。</p>
-      ${CONTROLS}
+      <p>绿色虚线是真实的反弹路径，拐角上的小圈就是反弹点。</p>
+      ${settingsPanel()}
+      ${controlsForMode()}
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
         <button id="btn-restart">重新开始</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
       </div>
-      <div class="tip"><span class="dot"></span> 按 P 或 Esc 也可以继续</div>
+      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 更改模式/难度后点“重新开始”生效</div>
     `;
+    bindSettings(card);
   } else if (next.kind === 'gameover') {
     card.innerHTML = `
       <div class="kicker">Game Over</div>
       <h1>被击毁了</h1>
       <div class="rule"></div>
-      <p>弹道不等人。下一次，把敌人的反弹线也算进去。</p>
+      <p>下次记得别停在自己的反弹线上。</p>
       <div class="stateline">
         <span>得分 <b>${next.score}</b></span>
         <span>倒在 <b>${next.level}</b></span>
       </div>
       <div class="actions">
         <button class="primary" id="btn-restart">再玩一次</button>
-        <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
+        <button id="btn-menu">返回菜单</button>
       </div>
     `;
-  } else {
+  } else if (next.kind === 'victory') {
     card.innerHTML = `
       <div class="kicker">Mission Complete</div>
       <h1>全部击毁<span class="accent">!</span></h1>
       <div class="rule"></div>
-      <p>三关全部清空。你的炮弹和你的胆子都挺好用。</p>
+      <p>三关全部清空。想再难一点的话，去菜单换成「困难」试试。</p>
       <div class="stateline"><span>总得分 <b>${next.score}</b></span></div>
       <div class="actions">
         <button class="primary" id="btn-restart">再来一局</button>
-        <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
+        <button id="btn-menu">返回菜单</button>
+      </div>
+    `;
+  } else {
+    const p1Wins = next.winner === 'p1';
+    card.innerHTML = `
+      <div class="kicker">Local Versus</div>
+      <h1><span class="${p1Wins ? 'p1' : 'p2'}">${p1Wins ? 'P1' : 'P2'}</span> 获胜<span class="accent">!</span></h1>
+      <div class="rule"></div>
+      <p>${p1Wins ? 'P1' : 'P2'} 打光了对手的 3 条命。</p>
+      <div class="stateline">
+        <span class="p1">P1 剩余 <b>${next.p1Lives}</b></span>
+        <span class="p2">P2 剩余 <b>${next.p2Lives}</b></span>
+      </div>
+      <div class="actions">
+        <button class="primary" id="btn-restart">再来一局</button>
+        <button id="btn-menu">返回菜单</button>
       </div>
     `;
   }
 
-  document.getElementById('btn-start')?.addEventListener('click', () => {
-    sound.resume();
-    sound.ui();
-    game.scene.stop('Menu');
-    game.scene.start('Game');
-    render({ kind: 'hidden' });
-  });
+  document.getElementById('btn-start')?.addEventListener('click', startMatch);
 
   document.getElementById('btn-resume')?.addEventListener('click', () => {
     sound.ui();
@@ -158,6 +254,13 @@ function render(next: OverlayState): void {
     if (!game.scene.isActive('Game')) game.scene.start('Game');
     else gameScene()?.restartGame();
     render({ kind: 'hidden' });
+  });
+
+  document.getElementById('btn-menu')?.addEventListener('click', () => {
+    sound.ui();
+    game.scene.stop('Game');
+    game.scene.start('Menu');
+    render({ kind: 'start' });
   });
 
   document.getElementById('btn-mute')?.addEventListener('click', () => {
@@ -203,3 +306,5 @@ window.addEventListener('keydown', (event) => {
 // Unlock audio on the first interaction (browsers require a gesture).
 window.addEventListener('pointerdown', () => sound.resume(), { once: true });
 window.addEventListener('keydown', () => sound.resume(), { once: true });
+
+export { settings };

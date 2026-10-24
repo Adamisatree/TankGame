@@ -1,28 +1,31 @@
 import Phaser from 'phaser';
-import { planRicochetShot } from '../engine/ai';
+import { planRicochetShot, type ShotPlan } from '../engine/ai';
 import { advanceBullet, type BulletTarget } from '../engine/bullet';
 import { LEVELS, buildLayout, type Layout, type PlayRect } from '../engine/level';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../engine/physics';
-import { BULLET, COLORS, GAME_H, GAME_W, TANK } from './config';
+import { bulletThreatAt, pickHeading, steerTo, type ThreatBullet } from '../engine/steer';
+import { BULLET, COLORS, GAME_H, GAME_W, HIT_MERCY, TANK } from './config';
 import { OVERLAY_EVENT, type OverlayState } from './events';
 import { Sketch } from './Sketch';
-import { Tank } from './Tank';
+import { Tank, type TankId } from './Tank';
 import { makeTextures, paperBackground } from './art';
 import { sound } from './Sound';
+import { preset, settings, VERSUS_LIVES, type DifficultyPreset } from './settings';
 
 /** Drawing area, leaving room for the sketch HUD at the top and hints below. */
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
 
-type Phase = 'playing' | 'dying' | 'cleared' | 'over' | 'victory';
+type Phase = 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver';
 
 interface Bullet {
   x: number;
   y: number;
   vx: number;
   vy: number;
-  owner: 'player' | 'enemy';
+  owner: TankId;
   color: number;
   bounces: number;
+  maxBounces: number;
   life: number;
   dead: boolean;
   trail: { x: number; y: number }[];
@@ -46,12 +49,31 @@ interface Particle {
   angle: number;
 }
 
-type KeyMap = Record<'up' | 'down' | 'left' | 'right', Phaser.Input.Keyboard.Key>;
+interface DriveKeys {
+  up: Phaser.Input.Keyboard.Key;
+  down: Phaser.Input.Keyboard.Key;
+  left: Phaser.Input.Keyboard.Key;
+  right: Phaser.Input.Keyboard.Key;
+}
+
+interface AiDecision {
+  angle: number | null;
+  /** 0 = stand still. */
+  drive: number;
+  speed: number;
+  dodging: boolean;
+}
+
+const COLORS_BY_ID: Record<TankId, number> = {
+  p1: COLORS.player,
+  p2: COLORS.player2,
+  enemy: COLORS.enemy,
+};
 
 export class GameScene extends Phaser.Scene {
   private levelIndex = 0;
   private layout!: Layout;
-  private phase: Phase = 'playing';
+  private phase: Phase = 'ready';
   private paused = false;
 
   private wallsLayer!: Sketch;
@@ -62,40 +84,59 @@ export class GameScene extends Phaser.Scene {
   private scoreText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
   private bannerText!: Phaser.GameObjects.Text;
+  private modeText!: Phaser.GameObjects.Text;
 
-  private player!: Tank;
-  private enemy!: Tank;
+  private p1!: Tank;
+  private p2?: Tank;
+  private enemy?: Tank;
   private crates: Crate[] = [];
   private bullets: Bullet[] = [];
   private particles: Particle[] = [];
 
-  private lives = 3;
   private score = 0;
-  private enemyHp = 3;
-  private readonly enemyHpMax = 3;
-
-  private fireCd = 0;
-  private enemyCd = 0;
-  private enemyCharge = 0;
-  private enemyAimDir = 0;
-  private enemyGraceUntil = 0;
-  private roamTarget = { x: 0, y: 0 };
-  private roamTimer = 0;
   private phaseTimer = 0;
+  private readyTimer = 0;
   private hudDirty = true;
   private lastBounceSound = 0;
+  private autoDodge = false;
 
-  private keys!: KeyMap;
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private spaceKey!: Phaser.Input.Keyboard.Key;
+  // Solo AI state.
+  private aiThinkTimer = 0;
+  private aiDecision: AiDecision = { angle: null, drive: 0, speed: 0, dodging: false };
+  private aiReload = 0;
+  private aiCharge = 0;
+  private aiAimDir = 0;
+  private aiGraceUntil = 0;
+  private aiRoam = { x: 0, y: 0 };
+  private aiRoamTimer = 0;
+
+  // Input.
+  private wasd!: DriveKeys;
+  private arrows!: Phaser.Types.Input.Keyboard.CursorKeys;
+  private fire1!: Phaser.Input.Keyboard.Key;
+  private fire2!: Phaser.Input.Keyboard.Key;
+  private trimLeft1!: Phaser.Input.Keyboard.Key;
+  private trimRight1!: Phaser.Input.Keyboard.Key;
+  private trimLeft2!: Phaser.Input.Keyboard.Key;
+  private trimRight2!: Phaser.Input.Keyboard.Key;
   private shiftKey!: Phaser.Input.Keyboard.Key;
   private pauseKey!: Phaser.Input.Keyboard.Key;
   private escKey!: Phaser.Input.Keyboard.Key;
   private muteKey!: Phaser.Input.Keyboard.Key;
+  private autoKey!: Phaser.Input.Keyboard.Key;
+
+  private fireCd1 = 0;
+  private fireCd2 = 0;
 
   constructor() {
     super('Game');
   }
+
+  private get versus(): boolean {
+    return settings.mode === 'versus';
+  }
+
+  // ------------------------------------------------------------------ setup
 
   create(): void {
     makeTextures(this);
@@ -106,92 +147,132 @@ export class GameScene extends Phaser.Scene {
     this.fx = this.add.graphics().setDepth(30);
     this.hud = new Sketch(this, 40);
 
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keys = this.input.keyboard!.addKeys({
-      up: 'W',
-      down: 'S',
-      left: 'A',
-      right: 'D',
-    }) as KeyMap;
-    this.spaceKey = this.input.keyboard!.addKey('SPACE');
-    this.shiftKey = this.input.keyboard!.addKey('SHIFT');
-    this.pauseKey = this.input.keyboard!.addKey('P');
-    this.escKey = this.input.keyboard!.addKey('ESC');
-    this.muteKey = this.input.keyboard!.addKey('M');
+    const kb = this.input.keyboard!;
+    this.wasd = kb.addKeys({ up: 'W', down: 'S', left: 'A', right: 'D' }) as DriveKeys;
+    this.arrows = kb.createCursorKeys();
+    this.fire1 = kb.addKey('SPACE');
+    this.fire2 = kb.addKey('ENTER');
+    this.trimLeft1 = kb.addKey('Q');
+    this.trimRight1 = kb.addKey('E');
+    this.trimLeft2 = kb.addKey('COMMA');
+    this.trimRight2 = kb.addKey('PERIOD');
+    this.shiftKey = kb.addKey('SHIFT');
+    this.pauseKey = kb.addKey('P');
+    this.escKey = kb.addKey('ESC');
+    this.muteKey = kb.addKey('M');
+    this.autoKey = kb.addKey('G');
 
-    this.levelText = this.hud.text(GAME_W / 2, 42, '', 26, COLORS.ink);
-    this.scoreText = this.hud.text(GAME_W - 48, 42, '', 24, COLORS.ink, 'right');
-    this.hintText = this.hud.text(
-      GAME_W / 2,
-      GAME_H - 24,
-      'WASD / 方向键 驾驶   ·   鼠标瞄准   ·   左键 / 空格 开火   ·   右键或 Shift 慢速微调   ·   P 暂停',
-      16,
-      COLORS.ink
-    );
+    this.levelText = this.hud.text(GAME_W / 2, 40, '', 24, COLORS.ink);
+    this.scoreText = this.hud.text(GAME_W - 48, 40, '', 22, COLORS.ink, 'right');
+    this.modeText = this.hud.text(PLAY_RECT.x + 8, 40, '', 18, COLORS.ink, 'left');
+    this.modeText.setAlpha(0.55);
+    this.hintText = this.hud.text(GAME_W / 2, GAME_H - 24, '', 16, COLORS.ink);
     this.hintText.setAlpha(0.55);
     this.bannerText = this.hud.text(GAME_W / 2, GAME_H / 2, '', 64, COLORS.ink);
     this.bannerText.setAlpha(0);
-
     this.input.mouse?.disableContextMenu();
 
-    this.lives = 3;
     this.score = 0;
-    this.levelIndex = 0;
     this.paused = false;
-    this.phase = 'playing';
+    this.autoDodge = settings.autoDodge;
+    this.levelIndex = 0;
     this.loadLevel(0);
     this.emitOverlay({ kind: 'hidden' });
   }
 
-  // ------------------------------------------------------------------ level
+  private emitOverlay(state: OverlayState, error: Error | null = null): void {
+    void error;
+    this.game.events.emit(OVERLAY_EVENT, state);
+  }
+
+  private tanks(): Tank[] {
+    return [this.p1, this.p2, this.enemy].filter((t): t is Tank => !!t);
+  }
+
+  private humans(): Tank[] {
+    return [this.p1, this.p2].filter((t): t is Tank => !!t);
+  }
+
+  private refreshHeaderText(): void {
+    this.hintText.setText(
+      this.versus
+        ? 'P1: WASD 驾驶 · Q/E 微调炮口 · 空格 开火      P2: 方向键 驾驶 · ,/. 微调炮口 · Enter 开火      P 暂停'
+        : 'WASD / 方向键 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · Shift 慢速 · G 自动躲弹 · P 暂停'
+    );
+    this.modeText.setText(
+      this.versus ? '双人对战' : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}`
+    );
+  }
 
   private loadLevel(index: number): void {
     this.levelIndex = index;
+    this.refreshHeaderText();
     const level = LEVELS[index];
     this.layout = buildLayout(level, PLAY_RECT);
 
-    this.player?.destroy();
-    this.enemy?.destroy();
+    for (const tank of this.tanks()) tank.destroy();
+    this.p2 = undefined;
+    this.enemy = undefined;
 
-    this.player = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'player', 20);
-    this.enemy = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'enemy', 22);
+    const d = preset();
+
+    this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
+    this.p1.lives = this.versus ? VERSUS_LIVES : d.lives;
+
+    if (this.versus) {
+      this.p2 = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'p2', 22);
+      this.p2.lives = VERSUS_LIVES;
+    } else {
+      this.enemy = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'enemy', 22);
+      this.enemy.lives = d.enemyLives;
+    }
 
     this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
     this.bullets = [];
     this.particles = [];
-    this.enemyHp = this.enemyHpMax;
-    this.enemyCharge = 0;
-    this.enemyCd = 1.2;
-    this.enemyGraceUntil = this.time.now + level.enemyGrace * 1000;
-    this.fireCd = 0;
-    this.roamTimer = 0;
-    this.phase = 'playing';
+    this.fireCd1 = 0;
+    this.fireCd2 = 0;
+
+    this.aiThinkTimer = 0;
+    this.aiDecision = { angle: null, drive: 0, speed: 0, dodging: false };
+    this.aiReload = 0.9;
+    this.aiCharge = 0;
+    this.aiGraceUntil = this.time.now + d.grace * 1000;
+    this.aiRoamTimer = 0;
+
+    this.phase = 'ready';
+    this.readyTimer = 1.1;
     this.phaseTimer = 0;
 
     this.drawTerrain();
     this.drawCrates();
     this.hudDirty = true;
-    this.levelText.setText(level.name);
-    this.showBanner(level.name, 1.6);
+    this.levelText.setText(this.versus ? '双人对战 · 纸上方厅' : level.name);
+    this.showBanner(this.versus ? '准备！' : level.name, 1.1);
   }
 
-  /** Pauses the simulation while the DOM overlay is up. */
+  /** Called by the DOM overlay. */
   setPaused(paused: boolean): void {
     this.paused = paused;
   }
 
+  /** Called by the DOM overlay to restart with the current settings. */
   restartGame(): void {
-    this.lives = 3;
     this.score = 0;
     this.bullets = [];
     this.particles = [];
-    this.loadLevel(0);
     this.paused = false;
+    this.autoDodge = settings.autoDodge;
+    this.loadLevel(0);
     this.emitOverlay({ kind: 'hidden' });
   }
 
-  private emitOverlay(state: OverlayState): void {
-    this.game.events.emit(OVERLAY_EVENT, state);
+  setAutoDodge(on: boolean): void {
+    this.autoDodge = on;
+    settings.autoDodge = on;
+    this.hudDirty = true;
+    this.refreshHeaderText();
+    this.showBanner(on ? '自动躲弹：开' : '自动躲弹：关', 0.9);
   }
 
   private showBanner(text: string, seconds: number): void {
@@ -228,7 +309,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private drawHeart(cx: number, cy: number, size: number, filled: boolean): void {
+  private drawHeart(cx: number, cy: number, size: number, filled: boolean, color: number = COLORS.danger): void {
     const g = this.hud;
     const pts = [
       { x: cx, y: cy + size * 0.85 },
@@ -241,35 +322,56 @@ export class GameScene extends Phaser.Scene {
       { x: cx + size, y: cy - size * 0.05 },
     ];
     if (filled) {
-      g.graphics.fillStyle(COLORS.danger, 0.28);
+      g.graphics.fillStyle(color, 0.28);
       g.graphics.beginPath();
       g.graphics.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) g.graphics.lineTo(pts[i].x, pts[i].y);
       g.graphics.closePath();
       g.graphics.fillPath();
     }
-    g.poly(pts, { width: 2.4, color: filled ? COLORS.danger : COLORS.ink, jitter: 0.7 });
+    g.poly(pts, { width: 2.4, color: filled ? color : COLORS.ink, jitter: 0.7 });
   }
 
   private drawHud(): void {
-    const lvl = LEVELS[this.levelIndex];
-    this.levelText.setText(lvl.name);
-    this.scoreText.setText(`得分  ${String(this.score).padStart(5, '0')}`);
+    this.hud.clear();
+    this.hud.line(PLAY_RECT.x, 72, PLAY_RECT.x + PLAY_RECT.w, 72, { width: 1.6, jitter: 1.6 });
+    this.hud.line(PLAY_RECT.x, 75, PLAY_RECT.x + PLAY_RECT.w, 75, { width: 1.1, jitter: 1.4 });
 
-    {
-      this.hud.clear();
-      // Header rule.
-      this.hud.line(PLAY_RECT.x, 72, PLAY_RECT.x + PLAY_RECT.w, 72, { width: 1.6, jitter: 1.6 });
-      this.hud.line(PLAY_RECT.x, 75, PLAY_RECT.x + PLAY_RECT.w, 75, { width: 1.1, jitter: 1.4 });
-      // Lives.
-      for (let i = 0; i < 3; i++) this.drawHeart(PLAY_RECT.x + 10 + i * 34, 42, 13, i < this.lives);
-      // Enemy hull pips.
-      for (let i = 0; i < this.enemyHpMax; i++) {
-        const x = PLAY_RECT.x + PLAY_RECT.w - 6 - i * 22;
-        const on = i < this.enemyHp;
-        this.hud.fillCircle(x, 60, 6, on ? COLORS.enemy : COLORS.paper, on ? 0.75 : 1);
-        this.hud.circle(x, 60, 6, { width: 1.8, color: on ? COLORS.enemy : COLORS.ink, jitter: 0.6, passes: 2 });
+    const total = (tank: Tank): number => {
+      if (this.versus) return VERSUS_LIVES;
+      return tank.id === 'p1' ? preset().lives : preset().enemyLives;
+    };
+
+    // Left side: player one.
+    const p1Hearts = total(this.p1);
+    for (let i = 0; i < p1Hearts; i++) {
+      this.drawHeart(PLAY_RECT.x + 10 + i * 30, 40, 12, i < this.p1.lives, COLORS.player);
+    }
+
+    if (this.versus && this.p2) {
+      const n = total(this.p2);
+      for (let i = 0; i < n; i++) {
+        this.drawHeart(PLAY_RECT.x + PLAY_RECT.w - 10 - i * 30, 40, 12, i < this.p2.lives, COLORS.player2);
       }
+      this.scoreText.setText('');
+    } else if (this.enemy) {
+      for (let i = 0; i < this.enemy.lives; i++) {
+        const x = PLAY_RECT.x + PLAY_RECT.w - 8 - i * 22;
+        this.hud.fillCircle(x, 60, 6, COLORS.enemy, 0.7);
+        this.hud.circle(x, 60, 6, { width: 1.8, color: COLORS.enemy, jitter: 0.6, passes: 2 });
+      }
+      for (let i = this.enemy.lives; i < total(this.enemy); i++) {
+        const x = PLAY_RECT.x + PLAY_RECT.w - 8 - i * 22;
+        this.hud.circle(x, 60, 6, { width: 1.5, color: COLORS.ink, jitter: 0.6, passes: 1 });
+      }
+      this.scoreText.setText(`得分  ${String(this.score).padStart(5, '0')}`);
+    }
+
+    // Auto-dodge badge.
+    if (!this.versus && this.autoDodge) {
+      const x = GAME_W / 2;
+      this.hud.circle(x - 38, 40, 5, { width: 1.6, color: COLORS.player, jitter: 0.5 });
+      this.hud.fillCircle(x - 38, 40, 2.4, COLORS.player, 0.9);
     }
     this.hudDirty = false;
   }
@@ -286,6 +388,9 @@ export class GameScene extends Phaser.Scene {
       sound.setMuted(!sound.muted);
       this.showBanner(sound.muted ? '静音' : '开启声音', 0.8);
     }
+    if (!this.versus && Phaser.Input.Keyboard.JustDown(this.autoKey)) {
+      this.setAutoDodge(!this.autoDodge);
+    }
 
     if (this.paused) {
       this.fx.clear();
@@ -294,40 +399,60 @@ export class GameScene extends Phaser.Scene {
 
     if (this.hudDirty) this.drawHud();
 
-    if (this.phase === 'playing') {
-      this.updatePlayer(dt);
-      this.updateEnemy(dt);
+    if (this.phase === 'ready') {
+      this.readyTimer -= dt;
+      if (this.readyTimer <= 0) this.phase = 'playing';
+    } else if (this.phase === 'playing') {
+      this.updateHuman(this.p1, dt, 1);
+      if (this.versus && this.p2) this.updateHuman(this.p2, dt, 2);
+      if (this.enemy) this.updateAi(dt);
     }
+
     this.updateBullets(dt);
     this.updateParticles(dt);
-    this.updatePhase(dt, time);
+    this.updatePhase(dt);
     this.drawFrame(time);
-    this.player?.sync(time);
-    this.enemy?.sync(time);
+    for (const tank of this.tanks()) tank.sync(time);
   }
 
   private togglePause(): void {
-    if (this.phase === 'over' || this.phase === 'victory') return;
+    if (this.phase === 'over' || this.phase === 'victory' || this.phase === 'versusOver') return;
     this.paused = !this.paused;
     sound.ui();
     this.emitOverlay(this.paused ? { kind: 'paused' } : { kind: 'hidden' });
   }
 
-  private updatePhase(dt: number, _time: number): void {
-    if (this.phase === 'playing' || this.phase === 'over' || this.phase === 'victory') return;
+  private updatePhase(dt: number): void {
+    if (this.phase === 'ready' || this.phase === 'playing' || this.phase === 'over' || this.phase === 'victory' || this.phase === 'versusOver') {
+      return;
+    }
 
     this.phaseTimer -= dt;
     if (this.phaseTimer > 0) return;
 
     if (this.phase === 'dying') {
-      if (this.lives > 0) {
-        this.respawnPlayer();
+      if (this.versus) {
+        const losers = this.humans().filter((t) => t.lives <= 0);
+        if (losers.length > 0) {
+          this.phase = 'versusOver';
+          const p1Dead = this.p1.lives <= 0;
+          const winner: 'p1' | 'p2' = p1Dead ? 'p2' : 'p1';
+          this.emitOverlay({ kind: 'versusOver', winner, p1Lives: this.p1.lives, p2Lives: this.p2?.lives ?? 0 });
+          sound.lose();
+          return;
+        }
+        for (const tank of this.humans()) if (!tank.alive) this.respawn(tank);
+      } else if (this.p1.lives > 0) {
+        this.respawn(this.p1);
       } else {
         this.phase = 'over';
         this.emitOverlay({ kind: 'gameover', score: this.score, level: LEVELS[this.levelIndex].name });
         sound.lose();
       }
-    } else if (this.phase === 'cleared') {
+      return;
+    }
+
+    if (this.phase === 'cleared') {
       if (this.levelIndex + 1 < LEVELS.length) {
         this.loadLevel(this.levelIndex + 1);
       } else {
@@ -338,94 +463,136 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  // ------------------------------------------------------------------ player
+  // ------------------------------------------------------------------ humans
 
-  private updatePlayer(dt: number): void {
-    if (!this.player.alive) return;
+  private updateHuman(tank: Tank, dt: number, which: 1 | 2): void {
+    if (!tank.alive) return;
 
-    const p = this.player;
-    const pointer = this.input.activePointer;
-    const aimMode = this.shiftKey.isDown || pointer.rightButtonDown();
+    const keys = which === 1 ? this.wasd : this.arrows;
+    const trimLeft = which === 1 ? this.trimLeft1 : this.trimLeft2;
+    const trimRight = which === 1 ? this.trimRight1 : this.trimRight2;
+    const fireKey = which === 1 ? this.fire1 : this.fire2;
 
-    // Body: turn + drive.
-    const turn = (this.cursors.right.isDown || this.keys.right.isDown ? 1 : 0) - (this.cursors.left.isDown || this.keys.left.isDown ? 1 : 0);
-    const drive =
-      (this.cursors.up.isDown || this.keys.up.isDown ? 1 : 0) - (this.cursors.down.isDown || this.keys.down.isDown ? 1 : 0);
+    let turn = (keys.right.isDown ? 1 : 0) - (keys.left.isDown ? 1 : 0);
+    let drive = (keys.up.isDown ? 1 : 0) - (keys.down.isDown ? 1 : 0);
 
-    const turnRate = TANK.turnRate * (aimMode ? 0.75 : 1);
-    p.bodyAngle += turn * turnRate * dt;
-
-    const speed = aimMode
-      ? drive > 0
-        ? TANK.tacticalSpeed
-        : TANK.tacticalReverse
-      : drive > 0
-        ? TANK.driveSpeed
-        : TANK.reverseSpeed;
-
-    const v = drive * speed;
-    p.vx = Math.cos(p.bodyAngle) * v;
-    p.vy = Math.sin(p.bodyAngle) * v;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-
-    const pushed = this.resolveTankWalls(p);
-    if (pushed) {
-      p.vx *= 0.2;
-      p.vy *= 0.2;
+    // Solo P1: the optional autopilot handles the hull so you can just aim.
+    const manual = turn !== 0 || drive !== 0;
+    if (which === 1 && !this.versus && this.autoDodge && !manual) {
+      const auto = this.autopilotMove(tank);
+      turn = auto.turn;
+      drive = auto.drive;
     }
 
-    // Turret: follow the mouse quickly.
-    const mx = pointer.worldX || GAME_W / 2;
-    const my = pointer.worldY || GAME_H / 2;
-    const want = Math.atan2(my - p.y, mx - p.x);
-    p.turretAngle = turnToward(p.turretAngle, want, 13, dt);
+    const slow = which === 1 && this.shiftKey.isDown;
+    const aimMode = slow && !this.versus;
+    tank.bodyAngle += turn * TANK.turnRate * (aimMode ? 0.8 : 1) * dt;
 
-    // Aiming visual: a slight settle of the hull when the brakes are on.
+    const fwd = aimMode ? TANK.tacticalSpeed : TANK.driveSpeed;
+    const rev = aimMode ? TANK.tacticalReverse : TANK.reverseSpeed;
+    const speed = drive > 0 ? fwd : rev;
+    const v = drive * speed;
+    tank.vx = Math.cos(tank.bodyAngle) * v;
+    tank.vy = Math.sin(tank.bodyAngle) * v;
+    tank.x += tank.vx * dt;
+    tank.y += tank.vy * dt;
+    if (this.resolveTankWalls(tank)) {
+      tank.vx *= 0.2;
+      tank.vy *= 0.2;
+    }
+
+    // Aiming: mouse in solo, turret trim in versus.
+    if (!this.versus) {
+      const pointer = this.input.activePointer;
+      const mx = pointer.worldX || GAME_W / 2;
+      const my = pointer.worldY || GAME_H / 2;
+      const want = Math.atan2(my - tank.y, mx - tank.x);
+      tank.turretAngle = turnToward(tank.turretAngle, want, 14, dt);
+    } else {
+      const trim = (trimRight.isDown ? 1 : 0) - (trimLeft.isDown ? 1 : 0);
+      if (trim !== 0) {
+        tank.turretAngle = Phaser.Math.Angle.Wrap(tank.turretAngle + trim * 1.9 * dt);
+      }
+    }
+
     this.separateTanks();
 
-    // Fire.
-    this.fireCd -= dt;
-    const wantFire = pointer.leftButtonDown() || this.spaceKey.isDown;
-    if (wantFire && this.fireCd <= 0) {
-      this.firePlayer();
+    if (which === 1) {
+      this.fireCd1 -= dt;
+      if (this.fireCd1 <= 0 && (fireKey.isDown || (!this.versus && this.input.activePointer.leftButtonDown()))) {
+        this.fire(tank);
+        this.fireCd1 = 0.24;
+      }
+    } else {
+      this.fireCd2 -= dt;
+      if (this.fireCd2 <= 0 && fireKey.isDown) {
+        this.fire(tank);
+        this.fireCd2 = 0.24;
+      }
     }
 
+    if (!this.versus && this.input.activePointer.rightButtonDown() && which === 1) {
+      // right mouse = tactical slow mode is already handled by Shift
+    }
   }
 
-  private respawnPlayer(): void {
-    const p = this.player;
-    p.x = this.layout.player.x;
-    p.y = this.layout.player.y;
-    p.bodyAngle = this.layout.player.angle;
-    p.turretAngle = this.layout.player.angle;
-    p.alive = true;
-    p.invulnerableUntil = this.time.now + 2000;
-    p.vx = 0;
-    p.vy = 0;
-    p.sync(this.time.now);
-    this.enemyGraceUntil = this.time.now + 1200;
+  /** Auto-dodge: choose the safest heading, ignore walls we would hit. */
+  private autopilotMove(tank: Tank): { turn: number; drive: number } {
+    const heading = pickHeading({
+      x: tank.x,
+      y: tank.y,
+      radius: tank.radius,
+      bodyAngle: tank.bodyAngle,
+      walls: this.layout.walls,
+      crates: this.crates.filter((c) => c.alive).map((c) => c.box),
+      bullets: this.threats(),
+      threatWeight: 1.7,
+      stepDistance: 72,
+      samples: 16,
+    });
+
+    if (heading.move === 0 || Number.isNaN(heading.angle)) return { turn: 0, drive: 0 };
+    const st = steerTo(heading.angle, tank.bodyAngle);
+    return { turn: st.turn, drive: st.drive };
+  }
+
+  private respawn(tank: Tank): void {
+    const spawn = tank.id === 'p2' ? this.layout.enemy : this.layout.player;
+    tank.x = spawn.x;
+    tank.y = spawn.y;
+    tank.bodyAngle = spawn.angle;
+    tank.turretAngle = spawn.angle;
+    tank.vx = 0;
+    tank.vy = 0;
+    tank.setAlive(true, this.time.now);
+    tank.invulnerableUntil = this.time.now + 2200;
+    tank.sync(this.time.now);
     this.phase = 'playing';
     this.phaseTimer = 0;
-    this.showBanner('继续！', 0.9);
+    if (!this.versus) this.aiGraceUntil = Math.max(this.aiGraceUntil, this.time.now + 1400);
+    this.showBanner(`${tank.id === 'p1' ? 'P1' : 'P2'} 继续！`, 0.9);
   }
 
   private separateTanks(): void {
-    const a = this.player;
-    const b = this.enemy;
-    if (!b.alive) return;
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const d = Math.hypot(dx, dy);
-    const min = a.radius + b.radius + 2;
-    if (d > 1e-4 && d < min) {
-      const push = (min - d) / 2;
-      a.x -= (dx / d) * push;
-      a.y -= (dy / d) * push;
-      b.x += (dx / d) * push;
-      b.y += (dy / d) * push;
-      this.resolveTankWalls(a);
-      this.resolveTankWalls(b);
+    const list = this.tanks().filter((t) => t.alive);
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i];
+        const b = list[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d = Math.hypot(dx, dy);
+        const min = a.radius + b.radius + 2;
+        if (d > 1e-4 && d < min) {
+          const push = (min - d) / 2;
+          a.x -= (dx / d) * push;
+          a.y -= (dy / d) * push;
+          b.x += (dx / d) * push;
+          b.y += (dy / d) * push;
+          this.resolveTankWalls(a);
+          this.resolveTankWalls(b);
+        }
+      }
     }
   }
 
@@ -453,39 +620,56 @@ export class GameScene extends Phaser.Scene {
     return pushed;
   }
 
-  private firePlayer(): void {
-    const p = this.player;
-    if (!p.alive) return;
-    const m = p.muzzle(44);
-    this.spawnBullet(m.x, m.y, p.turretAngle, 'player');
-    this.fireCd = 0.27;
-    this.burst(m.x, m.y, p.turretAngle, 'player');
-    this.cameras.main.shake(70, 0.0022);
-    sound.fire();
-    // The hull gets a nudge backwards.
-    p.x -= Math.cos(p.turretAngle) * 1.6;
-    p.y -= Math.sin(p.turretAngle) * 1.6;
-    this.resolveTankWalls(p);
+  // ------------------------------------------------------------------ firing
+
+  private fire(tank: Tank): void {
+    if (!tank.alive) return;
+    const dir = tank.turretAngle;
+    const speed = tank.id === 'enemy' ? preset().shellSpeed : BULLET.speedPlayer;
+    const maxBounces = tank.id === 'enemy' ? Math.max(2, preset().maxBounces + 1) : BULLET.maxBounces;
+
+    // Keep the muzzle outside any neighbouring hull so shells never spawn inside a tank.
+    let len = 44;
+    for (const other of this.tanks()) {
+      if (other === tank || !other.alive) continue;
+      while (len > 26) {
+        const mx = tank.x + Math.cos(dir) * len;
+        const my = tank.y + Math.sin(dir) * len;
+        if (Math.hypot(mx - other.x, my - other.y) > other.radius + BULLET.radius + 5) break;
+        len -= 4;
+      }
+    }
+
+    const m = tank.muzzle(len, dir);
+    this.spawnBullet(m.x, m.y, dir, tank.id, speed, maxBounces);
+    this.burst(m.x, m.y, dir, tank.id);
+    this.cameras.main.shake(60, 0.002);
+    if (tank.id === 'enemy') sound.enemyFire();
+    else sound.fire();
+
+    tank.x -= Math.cos(dir) * 1.4;
+    tank.y -= Math.sin(dir) * 1.4;
+    this.resolveTankWalls(tank);
   }
 
-  private spawnBullet(x: number, y: number, dir: number, owner: 'player' | 'enemy'): void {
-    const speed = owner === 'player' ? BULLET.speedPlayer : BULLET.speedEnemy;
+  private spawnBullet(x: number, y: number, dir: number, owner: TankId, speed: number, maxBounces: number): void {
     this.bullets.push({
       x,
       y,
       vx: Math.cos(dir) * speed,
       vy: Math.sin(dir) * speed,
       owner,
-      color: owner === 'player' ? COLORS.player : COLORS.enemy,
+      color: COLORS_BY_ID[owner],
       bounces: 0,
+      maxBounces,
       life: BULLET.lifetime,
       dead: false,
       trail: [],
     });
   }
 
-  private burst(x: number, y: number, dir: number, owner: 'player' | 'enemy'): void {
-    const color = owner === 'player' ? COLORS.player : COLORS.enemy;
+  private burst(x: number, y: number, dir: number, owner: TankId): void {
+    const color = COLORS_BY_ID[owner];
     for (let i = 0; i < 7; i++) {
       const a = dir + (Math.random() - 0.5) * 0.9;
       const sp = 90 + Math.random() * 190;
@@ -502,108 +686,197 @@ export class GameScene extends Phaser.Scene {
         angle: 0,
       });
     }
-    this.particles.push({
-      x,
-      y,
-      vx: 0,
-      vy: 0,
-      life: 0.22,
-      max: 0.22,
-      size: 7,
-      color: COLORS.ink,
-      kind: 'ring',
-      angle: 0,
-    });
+    this.particles.push({ x, y, vx: 0, vy: 0, life: 0.22, max: 0.22, size: 7, color: COLORS.ink, kind: 'ring', angle: 0 });
   }
 
-  // ------------------------------------------------------------------ enemy
+  // ------------------------------------------------------------------ AI
 
-  private updateEnemy(dt: number): void {
+  private threats(): ThreatBullet[] {
+    return this.bullets
+      .filter((b) => !b.dead)
+      .map((b) => ({
+        x: b.x,
+        y: b.y,
+        vx: b.vx,
+        vy: b.vy,
+        bounces: b.bounces,
+        maxBounces: b.maxBounces,
+        radius: BULLET.radius,
+      }));
+  }
+
+  private updateAi(dt: number): void {
     const e = this.enemy;
-    if (!e.alive) return;
+    if (!e || !e.alive) return;
+    const d = preset();
 
-    this.roamTimer -= dt;
-    const dx = this.roamTarget.x - e.x;
-    const dy = this.roamTarget.y - e.y;
-    if (this.roamTimer <= 0 || Math.hypot(dx, dy) < 60) this.pickRoamTarget();
+    this.aiThinkTimer -= dt;
+    if (this.aiThinkTimer <= 0) {
+      // Weaker presets take longer to react.
+      this.aiThinkTimer = 0.34 - d.dodgeSkill * 0.22;
+      this.aiDecision = this.think(e, d);
+    }
 
-    const desired = Math.atan2(this.roamTarget.y - e.y, this.roamTarget.x - e.x);
-    e.bodyAngle = turnToward(e.bodyAngle, desired, 2.1, dt);
-
-    const speed = this.enemyCharge > 0 ? 55 : 118;
-    e.vx = Math.cos(e.bodyAngle) * speed;
-    e.vy = Math.sin(e.bodyAngle) * speed;
+    const decision = this.aiDecision;
+    if (decision.angle !== null) {
+      const st = steerTo(decision.angle, e.bodyAngle);
+      e.bodyAngle += st.turn * TANK.turnRate * 0.95 * dt;
+      const v = st.drive * decision.speed;
+      e.vx = Math.cos(e.bodyAngle) * v;
+      e.vy = Math.sin(e.bodyAngle) * v;
+    } else {
+      e.vx = 0;
+      e.vy = 0;
+    }
     e.x += e.vx * dt;
     e.y += e.vy * dt;
-
-    if (this.resolveTankWalls(e)) {
-      this.roamTimer = 0;
-    }
+    if (this.resolveTankWalls(e)) this.aiThinkTimer = 0;
     this.separateTanks();
 
-    // Turret: aim at the plan, otherwise track the player.
-    const targetAngle =
-      this.enemyCharge > 0 && this.player.alive
-        ? this.enemyAimDir
-        : Math.atan2(this.player.y - e.y, this.player.x - e.x);
-    e.turretAngle = turnToward(e.turretAngle, targetAngle, this.enemyCharge > 0 ? 6.5 : 1.9, dt);
+    // Turret: snap onto the telegraph direction, otherwise track the nearest human.
+    const target = this.p1.alive ? this.p1 : this.p2 ?? this.p1;
+    const track = Math.atan2(target.y - e.y, target.x - e.x);
+    const want = this.aiCharge > 0 ? this.aiAimDir : track;
+    e.turretAngle = turnToward(e.turretAngle, want, this.aiCharge > 0 ? 7 : 2.4, dt);
 
-    this.updateEnemyFire(dt);
+    this.updateAiFire(dt, d, target);
   }
 
-  private pickRoamTarget(): void {
-    const r = this.layout.rect;
-    for (let i = 0; i < 24; i++) {
-      const x = r.x + 40 + Math.random() * (r.w - 80);
-      const y = r.y + 40 + Math.random() * (r.h - 80);
-      if (Math.hypot(x - this.player.x, y - this.player.y) < 140) continue;
-      let blocked = false;
-      for (const box of this.layout.walls) {
-        if (circleBox(x, y, 34, box)) {
-          blocked = true;
-          break;
-        }
-      }
-      if (blocked) continue;
-      this.roamTarget = { x, y };
-      this.roamTimer = 2.2 + Math.random() * 2;
-      return;
-    }
-    this.roamTarget = { x: this.layout.enemy.x, y: this.layout.enemy.y };
-    this.roamTimer = 1.4;
-  }
+  private think(e: Tank, d: DifficultyPreset): AiDecision {
+    const bullets = this.threats();
+    const crates = this.crates.filter((c) => c.alive).map((c) => c.box);
+    const threat = bulletThreatAt(e.x, e.y, e.radius, bullets, this.layout.walls, 1.05);
 
-  private updateEnemyFire(dt: number): void {
-    const e = this.enemy;
-    if (!this.player.alive) return;
-
-    if (this.enemyCharge > 0) {
-      this.enemyCharge -= dt;
-      if (this.enemyCharge <= 0) {
-        const level = LEVELS[this.levelIndex];
-        const m = e.muzzle(44, this.enemyAimDir);
-        this.spawnBullet(m.x, m.y, this.enemyAimDir, 'enemy');
-        this.burst(m.x, m.y, this.enemyAimDir, 'enemy');
-        sound.enemyFire();
-        this.enemyCd = level.enemyReload * (0.85 + Math.random() * 0.35);
+    // 1) Survival first: dodge shells that are about to arrive.
+    const scared = threat.danger * (0.35 + d.dodgeSkill) > 0.13;
+    if (scared) {
+      const escape = pickHeading({
+        x: e.x,
+        y: e.y,
+        radius: e.radius,
+        bodyAngle: e.bodyAngle,
+        walls: this.layout.walls,
+        crates,
+        bullets,
+        threatWeight: 1.4 + d.dodgeSkill,
+        avoid: this.p1.alive ? { x: this.p1.x, y: this.p1.y, radius: 70 } : null,
+        avoidWeight: 0.6,
+        stepDistance: 74,
+        samples: 16,
+      });
+      if (!Number.isNaN(escape.angle) && escape.move > 0) {
+        return { angle: escape.angle, drive: 1, speed: d.enemySpeed * 1.15, dodging: true };
       }
-      return;
+      return { angle: null, drive: 0, speed: 0, dodging: true };
     }
 
-    this.enemyCd -= dt;
-    if (this.enemyCd > 0 || this.time.now < this.enemyGraceUntil) return;
+    // 2) Line up a shot whenever the reload allows it.
+    const target = this.p1.alive ? this.p1 : this.p2 ?? this.p1;
+    if (this.aiCharge <= 0 && this.aiReload <= 0) {
+      const plan = this.planShot(e, target, d);
+      if (plan) {
+        this.aiAimDir = plan.dir;
+        this.aiCharge = d.telegraph;
+        return { angle: null, drive: 0, speed: 0, dodging: false };
+      }
+    }
 
-    const m = e.muzzle(46);
-    const plan = planRicochetShot(m.x, m.y, this.player.x, this.player.y, this.layout.walls, {
-      radius: BULLET.radius,
-      targetRadius: 26,
-      maxBounces: 3,
-      maxLength: 2400,
-      samples: 64,
+    // 3) Otherwise reposition: keep mid range, look for a clean bank shot.
+    this.aiRoamTimer -= 0.1;
+    if (this.aiRoamTimer <= 0 || Math.hypot(this.aiRoam.x - e.x, this.aiRoam.y - e.y) < 50) {
+      this.aiRoam = this.pickRoamSpot(target);
+      this.aiRoamTimer = 1.6 + Math.random() * 1.4;
+    }
+
+    const heading = pickHeading({
+      x: e.x,
+      y: e.y,
+      radius: e.radius,
+      bodyAngle: e.bodyAngle,
+      walls: this.layout.walls,
+      crates,
+      bullets,
+      threatWeight: 0.7 + d.dodgeSkill,
+      target: this.aiRoam,
+      targetWeight: 1,
+      avoid: { x: target.x, y: target.y, radius: 150 },
+      avoidWeight: 0.5,
+      stepDistance: 76,
+      samples: 16,
     });
 
-    this.enemyAimDir = plan ? plan.dir : Math.atan2(this.player.y - m.y, this.player.x - m.x);
-    this.enemyCharge = 0.55;
+    if (Number.isNaN(heading.angle) || heading.move === 0) {
+      return { angle: null, drive: 0, speed: 0, dodging: false };
+    }
+    return { angle: heading.angle, drive: 1, speed: d.enemySpeed, dodging: false };
+  }
+
+  private pickRoamSpot(target: Tank): { x: number; y: number } {
+    const r = this.layout.rect;
+    let best = { x: this.enemy!.x, y: this.enemy!.y };
+    let bestScore = -Infinity;
+    for (let i = 0; i < 18; i++) {
+      const x = r.x + 60 + Math.random() * (r.w - 120);
+      const y = r.y + 60 + Math.random() * (r.h - 120);
+      if (this.layout.walls.some((w) => circleBox(x, y, 34, w))) continue;
+      const distToTarget = Math.hypot(x - target.x, y - target.y);
+      // Prefer mid-range spots (bank-shot lanes live there) and open space.
+      const rangeScore = -Math.abs(distToTarget - 330) * 0.6;
+      const openScore = Math.min(140, nearestGap(x, y, this.layout.walls)) * 0.8;
+      const score = rangeScore + openScore + Math.random() * 40;
+      if (score > bestScore) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+    return best;
+  }
+
+  private planShot(shooter: Tank, target: Tank, d: DifficultyPreset): ShotPlan | null {
+    const m = shooter.muzzle(46);
+    const opts = {
+      radius: BULLET.radius,
+      targetRadius: 28,
+      maxBounces: d.maxBounces,
+      maxLength: 2400,
+      samples: 72,
+    };
+    let plan = planRicochetShot(m.x, m.y, target.x, target.y, this.layout.walls, opts);
+    if (plan && d.leadTarget) {
+      // Aim where the target will be once the shell arrives.
+      const travel = plan.length / d.shellSpeed;
+      const px = target.x + target.vx * travel;
+      const py = target.y + target.vy * travel;
+      const lead = planRicochetShot(m.x, m.y, px, py, this.layout.walls, opts);
+      if (lead) plan = lead;
+    }
+    return plan;
+  }
+
+  private updateAiFire(dt: number, d: DifficultyPreset, target: Tank): void {
+    const e = this.enemy;
+    if (!e) return;
+
+    if (this.aiCharge > 0) {
+      this.aiCharge -= dt;
+      if (this.aiCharge <= 0) {
+        this.fire(e);
+        const level = LEVELS[this.levelIndex];
+        const levelScale = level.enemyReload / 2.1;
+        this.aiReload = d.reload * levelScale * (0.9 + Math.random() * 0.2);
+      }
+      return;
+    }
+
+    if (this.aiReload > 0) this.aiReload -= dt;
+    if (this.aiReload > 0) return;
+    if (this.time.now < this.aiGraceUntil) return;
+    if (!target.alive) return;
+    if (this.time.now < target.invulnerableUntil) return;
+
+    const plan = this.planShot(e, target, d);
+    this.aiAimDir = plan ? plan.dir : Math.atan2(target.y - e.y, target.x - e.x);
+    this.aiCharge = d.telegraph;
   }
 
   // ------------------------------------------------------------------ bullets
@@ -621,21 +894,18 @@ export class GameScene extends Phaser.Scene {
       b.trail.push({ x: b.x, y: b.y });
       if (b.trail.length > 7) b.trail.shift();
 
-      const targets: BulletTarget[] = [];
-      if (b.owner === 'player') {
-        if (this.enemy.alive) {
-          targets.push({ id: 'enemy', x: this.enemy.x, y: this.enemy.y, radius: this.enemy.radius });
-        }
-      } else if (this.player.alive) {
-        targets.push({ id: 'player', x: this.player.x, y: this.player.y, radius: this.player.radius });
-      }
+      // Every live tank is a target – including the one that fired it, so a
+      // shell coming back off a wall can hit its owner.
+      const targets: BulletTarget[] = this.tanks()
+        .filter((t) => t.alive)
+        .map((t) => ({ id: t.id, x: t.x, y: t.y, radius: t.radius }));
 
       const events = advanceBullet(b, dt, {
         walls: this.layout.walls,
         crates: this.crates,
         targets,
         radius: BULLET.radius,
-        maxBounces: BULLET.maxBounces,
+        maxBounces: b.maxBounces,
       });
 
       for (const ev of events) {
@@ -653,8 +923,8 @@ export class GameScene extends Phaser.Scene {
           break;
         } else if (ev.kind === 'tank') {
           b.dead = true;
-          if (ev.id === 'enemy') this.hitEnemy();
-          else this.hitPlayer();
+          const victim = this.tanks().find((t) => t.id === ev.id);
+          if (victim) this.damage(victim, b.owner);
           break;
         } else {
           b.dead = true;
@@ -662,7 +932,6 @@ export class GameScene extends Phaser.Scene {
         }
       }
 
-      // A little spark trail.
       if (!b.dead && Math.random() < 0.5) {
         this.particles.push({
           x: b.x,
@@ -682,60 +951,49 @@ export class GameScene extends Phaser.Scene {
     this.bullets = this.bullets.filter((b) => !b.dead);
   }
 
-  private hitEnemy(): void {
-    const e = this.enemy;
-    if (!e.alive || this.phase !== 'playing') return;
-    this.enemyHp--;
-    e.damage = this.enemyHpMax - this.enemyHp;
-    e.redraw();
-    this.enemyHp = Math.max(0, this.enemyHp);
-    this.score += 150;
-    this.hudDirty = true;
-    this.cameras.main.shake(110, 0.004);
-    this.cameras.main.flash(80, 220, 200, 170);
-    this.puff(e.x, e.y, COLORS.enemy, 10);
-    this.ring(e.x, e.y, COLORS.enemy);
-    sound.hit();
-
-    if (this.enemyHp <= 0) {
-      e.alive = false;
-      this.score += 1000;
-      this.hudDirty = true;
-      this.explode(e.x, e.y, COLORS.enemy);
-      // Leftover enemy shells must not spoil the victory lap.
-      this.bullets = this.bullets.filter((b) => b.owner === 'player');
-      this.phase = 'cleared';
-      this.phaseTimer = 1.5;
-      this.showBanner('击毁！', 1.2);
-    }
-  }
-
-  private hitPlayer(): void {
-    const p = this.player;
-    if (!p.alive || this.phase !== 'playing') return;
-    if (this.time.now < p.invulnerableUntil) {
-      this.puff(p.x, p.y, COLORS.player, 3);
+  private damage(victim: Tank, attacker: TankId): void {
+    if (!victim.alive || this.phase !== 'playing') return;
+    if (this.time.now < victim.invulnerableUntil) {
+      this.puff(victim.x, victim.y, victim.color, 3);
       sound.ping();
       return;
     }
 
-    this.lives--;
+    const self = attacker === victim.id;
+    victim.lives = Math.max(0, victim.lives - 1);
+    victim.damage += 1;
+    victim.redraw();
     this.hudDirty = true;
-    this.explode(p.x, p.y, COLORS.player);
-    sound.explode();
-    this.cameras.main.shake(260, 0.009);
-    this.cameras.main.flash(140, 210, 120, 90);
 
-    if (this.lives > 0) {
-      p.alive = false;
-      this.phase = 'dying';
-      this.phaseTimer = 1.1;
-      this.bullets = this.bullets.filter((b) => b.owner === 'player');
-      this.showBanner(`被击中！剩余 ${this.lives}`, 1.2);
+    if (!this.versus && victim.id !== 'p1') this.score += 150;
+
+    this.cameras.main.shake(self ? 150 : 120, self ? 0.006 : 0.004);
+    this.cameras.main.flash(90, 220, 200, 170);
+    this.puff(victim.x, victim.y, victim.color, 10);
+    this.ring(victim.x, victim.y, victim.color);
+    sound.hit();
+
+    if (self) {
+      this.showBanner('被自己的炮弹打到了！', 1.0);
+    }
+
+    if (victim.lives <= 0) {
+      victim.setAlive(false, this.time.now);
+      this.explode(victim.x, victim.y, victim.color);
+      this.bullets = this.bullets.filter((b) => b.owner === attacker);
+      if (victim.id === 'enemy') {
+        this.score += 1000;
+        this.hudDirty = true;
+        this.phase = 'cleared';
+        this.phaseTimer = 1.5;
+        this.showBanner('击毁！', 1.2);
+      } else {
+        this.phase = 'dying';
+        this.phaseTimer = 1.15;
+        if (!this.versus) this.showBanner(`被击中！剩余 ${victim.lives === 0 ? 0 : victim.lives}`, 1.1);
+      }
     } else {
-      p.alive = false;
-      this.phase = 'dying';
-      this.phaseTimer = 1.2;
+      victim.invulnerableUntil = this.time.now + HIT_MERCY * 1000;
     }
   }
 
@@ -790,18 +1048,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private ring(x: number, y: number, color: number): void {
-    this.particles.push({
-      x,
-      y,
-      vx: 0,
-      vy: 0,
-      life: 0.35,
-      max: 0.35,
-      size: 10,
-      color,
-      kind: 'ring',
-      angle: 0,
-    });
+    this.particles.push({ x, y, vx: 0, vy: 0, life: 0.35, max: 0.35, size: 10, color, kind: 'ring', angle: 0 });
   }
 
   private explode(x: number, y: number, color: number): void {
@@ -843,45 +1090,46 @@ export class GameScene extends Phaser.Scene {
     const g = this.fx;
     g.clear();
 
-    // Aim guide: the player's incoming ricochet, dashed and fading.
-    if (this.phase === 'playing' && this.player.alive) this.drawAimGuide(g);
+    if (this.phase === 'playing' || this.phase === 'ready') {
+      if (!this.versus && this.p1.alive) {
+        this.drawAimGuide(g, this.p1, COLORS.player, 0.62);
+      } else if (this.versus) {
+        if (this.p1.alive) this.drawAimGuide(g, this.p1, COLORS.player, 0.34);
+        if (this.p2?.alive) this.drawAimGuide(g, this.p2, COLORS.player2, 0.34);
+      }
+    }
 
-    // Enemy telegraph: a short dotted hint of where it is about to shoot.
-    if (this.enemyCharge > 0 && this.enemy.alive) {
-      const m = this.enemy.muzzle(44, this.enemyAimDir);
-      const len = 90 + (0.55 - this.enemyCharge) * 120;
+    if (this.enemy?.alive && this.aiCharge > 0) {
+      const m = this.enemy.muzzle(46, this.aiAimDir);
+      const len = 110 + (preset().telegraph - this.aiCharge) * 150;
       this.dashedLine(
         g,
         m.x,
         m.y,
-        m.x + Math.cos(this.enemyAimDir) * len,
-        m.y + Math.sin(this.enemyAimDir) * len,
+        m.x + Math.cos(this.aiAimDir) * len,
+        m.y + Math.sin(this.aiAimDir) * len,
         COLORS.enemy,
-        0.55,
+        0.6,
         5,
         6,
-        1.4
+        1.6
       );
     }
 
-    // Bullets with trails.
     for (const b of this.bullets) {
       for (let i = 0; i < b.trail.length; i++) {
         const t = b.trail[i];
-        const a = (i / b.trail.length) * 0.35;
-        g.fillStyle(b.color, a);
+        g.fillStyle(b.color, (i / b.trail.length) * 0.35);
         g.fillCircle(t.x, t.y, BULLET.radius * (0.35 + (i / b.trail.length) * 0.7));
       }
       g.fillStyle(COLORS.ink, 0.85);
       g.fillCircle(b.x, b.y, BULLET.radius + 1.6);
       g.fillStyle(b.color, 1);
       g.fillCircle(b.x, b.y, BULLET.radius);
-      // Tiny highlight so it reads as a drawn "b" pellet.
       g.fillStyle(COLORS.white, 0.8);
       g.fillCircle(b.x - 1.4, b.y - 1.4, 1.2);
     }
 
-    // Particles.
     for (const p of this.particles) {
       const k = Math.max(0, p.life / p.max);
       if (p.kind === 'spark') {
@@ -905,9 +1153,8 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Hand-drawn reticle at the pointer.
     const pointer = this.input.activePointer;
-    if (this.phase === 'playing' && (pointer.worldX > 0 || pointer.worldY > 0)) {
+    if (!this.versus && this.phase === 'playing' && (pointer.worldX > 0 || pointer.worldY > 0)) {
       const x = pointer.worldX;
       const y = pointer.worldY;
       g.lineStyle(1.6, COLORS.ink, 0.5);
@@ -920,21 +1167,34 @@ export class GameScene extends Phaser.Scene {
         g.strokePath();
       }
     }
+
+    // Warning pip when a shell is closing in on a human.
+    if (this.phase === 'playing') {
+      for (const tank of this.humans()) {
+        if (!tank.alive) continue;
+        const threat = bulletThreatAt(tank.x, tank.y, tank.radius, this.threats(), this.layout.walls, 0.55);
+        if (threat.danger > 0.25) {
+          const pulse = 0.35 + Math.sin(time / 90) * 0.2;
+          g.lineStyle(2.4, COLORS.danger, Math.max(0.15, pulse));
+          g.strokeCircle(tank.x, tank.y, tank.radius + 12);
+        }
+      }
+    }
   }
 
-  private drawAimGuide(g: Phaser.GameObjects.Graphics): void {
-    const start = this.player.muzzle(44);
+  private drawAimGuide(g: Phaser.GameObjects.Graphics, tank: Tank, color: number, baseAlpha: number): void {
+    const start = tank.muzzle(44);
     let px = start.x;
     let py = start.y;
-    let dx = Math.cos(this.player.turretAngle);
-    let dy = Math.sin(this.player.turretAngle);
-    const wallHitRange = 2200;
+    let dx = Math.cos(tank.turretAngle);
+    let dy = Math.sin(tank.turretAngle);
+    const range = 2200;
 
     for (let b = 0; b <= 4; b++) {
-      const hit = sweepCircleBox(px, py, BULLET.radius, dx * wallHitRange, dy * wallHitRange, this.layout.walls);
-      const len = hit ? wallHitRange - hit.remaining : wallHitRange;
-      const alpha = 0.6 - b * 0.12;
-      this.dashedLine(g, px, py, px + dx * len, py + dy * len, COLORS.player, Math.max(0.12, alpha), 14, 9, b === 0 ? 2.4 : 1.8);
+      const hit = sweepCircleBox(px, py, BULLET.radius, dx * range, dy * range, this.layout.walls);
+      const len = hit ? range - hit.remaining : range;
+      const alpha = Math.max(0.1, baseAlpha - b * baseAlpha * 0.22);
+      this.dashedLine(g, px, py, px + dx * len, py + dy * len, color, alpha, 14, 9, b === 0 ? 2.3 : 1.7);
       px += dx * len;
       py += dy * len;
       if (!hit) break;
@@ -943,7 +1203,7 @@ export class GameScene extends Phaser.Scene {
       dy = r.y;
       px += hit.nx * 0.6;
       py += hit.ny * 0.6;
-      g.lineStyle(1.4, COLORS.player, 0.5);
+      g.lineStyle(1.4, color, alpha + 0.1);
       g.strokeCircle(px, py, 4);
     }
   }
@@ -980,4 +1240,16 @@ function turnToward(current: number, target: number, rate: number, dt: number): 
   const step = rate * dt;
   if (Math.abs(diff) <= step) return target;
   return current + Math.sign(diff) * step;
+}
+
+function nearestGap(px: number, py: number, walls: Box[]): number {
+  let best = 140;
+  for (const b of walls) {
+    const ix = px < b.x ? b.x : px > b.x + b.w ? b.x + b.w : px;
+    const iy = py < b.y ? b.y : py > b.y + b.h ? b.y + b.h : py;
+    const inside = px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h;
+    const d = inside ? 0 : Math.hypot(px - ix, py - iy);
+    if (d < best) best = d;
+  }
+  return best;
 }

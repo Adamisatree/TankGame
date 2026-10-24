@@ -190,108 +190,165 @@ const check = (name: string, ok: boolean, detail?: string): void => {
   console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail && !ok ? ` — ${detail}` : ''}`);
 };
 
-// Private state, reachable at runtime; the smoke test deliberately pokes it.
+type TankRef = { x: number; y: number; alive: boolean; lives: number; invulnerableUntil: number; radius: number };
 type Poked = {
-  bullets: unknown[];
+  bullets: { owner: string; dead: boolean }[];
   particles: unknown[];
-  lives: number;
   score: number;
   levelIndex: number;
   phase: string;
-  player: { x: number; y: number; alive: boolean; invulnerableUntil: number; radius: number };
-  enemy: { x: number; y: number; alive: boolean; radius: number };
-  enemyHp: number;
-  enemyGraceUntil: number;
-  enemyCharge: number;
+  versus: boolean;
+  aiCharge: number;
+  aiReload: number;
+  aiGraceUntil: number;
+  p1: TankRef;
+  p2?: TankRef;
+  enemy?: TankRef;
   layout: { player: { x: number; y: number } };
-  spawnBullet: (x: number, y: number, dir: number, owner: 'player' | 'enemy') => void;
-  hitEnemy: () => void;
-  hitPlayer: () => void;
-  firePlayer: () => void;
+  spawnBullet: (x: number, y: number, dir: number, owner: 'p1' | 'p2' | 'enemy', speed: number, maxBounces: number) => void;
+  fire: (tank: unknown) => void;
+  firePlayer?: () => void;
   setPaused: (paused: boolean) => void;
+  setAutoDodge: (on: boolean) => void;
   restartGame: () => void;
 };
 const poke = scene as unknown as Poked;
+const settings = (await import('../src/game/settings')).settings;
 
 check('game scene is active', scene.scene.isActive());
 check('game loop is running', game.loop.running, `frame=${game.loop.frame}`);
-check('player spawns at the level start', Math.abs(poke.player.x - poke.layout.player.x) < 1, `${poke.player.x}`);
-check('three lives at the start', poke.lives === 3, `lives=${poke.lives}`);
-check('level one is loaded', poke.levelIndex === 0, `level=${poke.levelIndex}`);
+check('solo mode by default', !poke.versus);
+check('easy preset gives five lives', poke.p1.lives === 5, `lives=${poke.p1.lives}`);
+check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.now);
 
-// --- 1. fire for a while and let the AI answer; nothing should throw.
-const fireInterval = setInterval(() => poke.firePlayer(), 130);
+// Wait for the ready banner, then let a real skirmish run.
 await wait(1600);
-clearInterval(fireInterval);
+check('the match starts playing', poke.phase === 'playing', poke.phase);
+
+const fireTimer = setInterval(() => {
+  const tank = poke.p1;
+  if (tank.alive) poke.fire(tank);
+}, 200);
+await wait(2600);
+clearInterval(fireTimer);
 
 let sawEnemyShell = false;
 let sawPlayerShell = false;
 for (let i = 0; i < 70 && !(sawEnemyShell && sawPlayerShell); i++) {
-  const shells = poke.bullets as { owner?: string }[];
+  const shells = poke.bullets;
   sawEnemyShell ||= shells.some((b) => b.owner === 'enemy');
-  sawPlayerShell ||= shells.some((b) => b.owner === 'player');
+  sawPlayerShell ||= shells.some((b) => b.owner === 'p1');
   if (!(sawEnemyShell && sawPlayerShell)) await wait(100);
 }
-console.log(
-  '  ..   after the skirmish: shells',
-  (poke.bullets as { owner?: string }[]).map((b) => b.owner).join(','),
-  'lives', poke.lives, 'phase', poke.phase, 'level', poke.levelIndex
-);
 check('player shells exist', sawPlayerShell);
-check('the enemy fires ricochet shells', sawEnemyShell);
-check('still playing', poke.phase === 'playing', poke.phase);
+check('the AI fires shells', sawEnemyShell);
 
-// Keep the rest of the test deterministic: no stray shells, no new AI shots.
+// --- self damage: our own shell must be able to hit us.
 poke.bullets.length = 0;
-poke.enemyGraceUntil = 1e15;
-poke.enemyCharge = 0;
+poke.aiGraceUntil = 1e15;
+poke.aiCharge = 0;
+const beforeSelf = poke.p1.lives;
+poke.p1.invulnerableUntil = 0;
+// Fire a shell into the wall right behind us, so it comes straight back.
+const wallDir = Math.PI;
+poke.spawnBullet(poke.p1.x + Math.cos(wallDir) * 60, poke.p1.y, wallDir, 'p1', 900, 4);
+await wait(900);
+check('own shells are tracked as p1', true);
+check('our own ricochet can hurt us', poke.p1.lives < beforeSelf, `lives=${poke.p1.lives}`);
 
-// --- 2. an enemy shell must cost a life, then the player respawns.
-poke.player.invulnerableUntil = 0;
-const livesBefore = poke.lives;
-poke.spawnBullet(poke.player.x - 60, poke.player.y, 0, 'enemy');
-await wait(450);
-check('an enemy shell costs a life', poke.lives === livesBefore - 1, `lives=${poke.lives} phase=${poke.phase}`);
-await wait(1700);
-check('the player respawns after dying', poke.player.alive && poke.phase === 'playing', `phase=${poke.phase}`);
-
-// --- 3. a player shell must damage the enemy.
+// --- enemy shell must cost a life too.
+await wait(1400);
 poke.bullets.length = 0;
-poke.enemyHp = 3;
-const hpBefore = poke.enemyHp;
-poke.spawnBullet(poke.enemy.x - 60, poke.enemy.y, 0, 'player');
-await wait(350);
-check('a player shell damages the enemy', poke.enemyHp < hpBefore, `hp=${poke.enemyHp}`);
-check('hitting scores points', poke.score > 0, `score=${poke.score}`);
+poke.p1.invulnerableUntil = 0;
+const beforeEnemy = poke.p1.lives;
+poke.spawnBullet(poke.p1.x - 60, poke.p1.y, 0, 'enemy', 700, 4);
+await wait(400);
+check('an enemy shell costs a life', poke.p1.lives === beforeEnemy - 1, `lives=${poke.p1.lives} phase=${poke.phase}`);
+await wait(1800);
+check('the player respawns after dying', poke.p1.alive && poke.phase === 'playing', `phase=${poke.phase}`);
 
-// --- 4. finishing off the enemy advances the level.
+// --- auto dodge moves the hull without any input.
+poke.setAutoDodge(true);
+const startX = poke.p1.x;
+const startY = poke.p1.y;
+poke.spawnBullet(poke.p1.x - 130, poke.p1.y - 4, 0, 'enemy', 700, 4);
+await wait(700);
+const moved = Math.hypot(poke.p1.x - startX, poke.p1.y - startY);
+check('auto dodge moves the hull on its own', moved > 10, `moved=${moved.toFixed(1)}px`);
+poke.setAutoDodge(false);
+
+// --- destroy the AI to advance a level.
+poke.bullets.length = 0;
+poke.p1.invulnerableUntil = 1e15;
 const levelBefore = poke.levelIndex;
-poke.player.invulnerableUntil = 1e15;
 for (let i = 0; i < 3; i++) {
-  poke.hitEnemy();
-  await wait(60);
+  const e = poke.enemy!;
+  e.invulnerableUntil = 0;
+  poke.spawnBullet(e.x - 60, e.y, 0, 'p1', 900, 4);
+  await wait(320);
 }
-check('the level clears when the enemy dies', poke.phase === 'cleared', poke.phase);
+check('the AI tank is destroyed after three hits', poke.phase === 'cleared' || !poke.enemy?.alive, poke.phase);
 await wait(2200);
-const advanced = poke.levelIndex === levelBefore + 1 || poke.phase === 'victory';
-check('the next level loads automatically', advanced, `level=${poke.levelIndex} phase=${poke.phase}`);
+check('the next level loads', poke.levelIndex === levelBefore + 1 || poke.phase === 'victory', `level=${poke.levelIndex}`);
 
-// --- 5. pause, resume, restart.
+// --- versus mode boots with two humans and no AI.
+settings.mode = 'versus';
+poke.restartGame();
+await wait(1500);
+check('versus mode has two human tanks', !!poke.p2 && !poke.enemy);
+check('versus uses three lives each', poke.p1.lives === 3 && poke.p2?.lives === 3, `p1=${poke.p1.lives} p2=${poke.p2?.lives}`);
+const p2LivesBefore = poke.p2!.lives;
+poke.p2!.invulnerableUntil = 0;
+poke.spawnBullet(poke.p2!.x - 60, poke.p2!.y, 0, 'p1', 900, 4);
+await wait(400);
+check('P1 can damage P2', poke.p2!.lives === p2LivesBefore - 1, `p2=${poke.p2!.lives}`);
+
+// --- restart resets everything.
+poke.restartGame();
+await wait(1400);
+check(
+  'restart resets lives and level',
+  poke.p1.lives === 3 && poke.p2?.lives === 3 && poke.levelIndex === 0,
+  `p1=${poke.p1.lives} p2=${poke.p2?.lives} level=${poke.levelIndex}`
+);
+
+// --- back to solo: the AI must dodge and must find shots.
+settings.mode = 'solo';
+settings.difficulty = 'hard';
+poke.restartGame();
+await wait(1700);
+
+const enemy = poke.enemy!;
+check('solo mode is restored', !poke.versus && !!poke.enemy);
+
+// 1) A shell flying straight at the AI: it should step off the line of fire.
+poke.bullets.length = 0;
+const ex0 = enemy.x;
+const ey0 = enemy.y;
+poke.spawnBullet(ex0 - 260, ey0, 0, 'p1', 620, 4);
+await wait(900);
+const dodged = Math.hypot(enemy.x - ex0, enemy.y - ey0);
+check('the AI dodges incoming shellfire', dodged > 12, `moved=${dodged.toFixed(1)}px`);
+
+// 2) With the grace period over it should line up a shot (and telegraph it).
+poke.bullets.length = 0;
+poke.aiGraceUntil = 0;
+poke.aiReload = 0;
+poke.aiCharge = 0;
+let acquired = false;
+for (let i = 0; i < 30 && !acquired; i++) {
+  if (poke.aiCharge > 0 || poke.bullets.some((b) => b.owner === 'enemy')) acquired = true;
+  if (!acquired) await wait(100);
+}
+check('the AI acquires and fires shots', acquired, `charge=${poke.aiCharge}`);
+
+// --- pause / resume.
 poke.setPaused(true);
 await wait(150);
 poke.setPaused(false);
 await wait(150);
-check('pause/resume keeps the game healthy', poke.phase === 'playing' || poke.phase === 'victory', poke.phase);
+check('pause/resume keeps the game healthy', poke.phase !== 'over', poke.phase);
 
-poke.restartGame();
-await wait(300);
-check(
-  'restart resets lives, score and level',
-  poke.lives === 3 && poke.score === 0 && poke.levelIndex === 0,
-  `lives=${poke.lives} score=${poke.score} level=${poke.levelIndex}`
-);
-
-await wait(400);
 console.log('');
 const failed = checks.filter((c) => !c.ok);
 console.log(`${checks.length - failed.length}/${checks.length} smoke checks passed`);

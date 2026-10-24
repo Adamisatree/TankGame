@@ -1,8 +1,20 @@
 import Phaser from 'phaser';
-import { COLORS } from './config';
+import { COLORS, FONT } from './config';
 import { Sketch } from './Sketch';
 
-export type TankKind = 'player' | 'enemy';
+export type TankId = 'p1' | 'p2' | 'enemy';
+
+const COLORS_BY_ID: Record<TankId, number> = {
+  p1: COLORS.player,
+  p2: COLORS.player2,
+  enemy: COLORS.enemy,
+};
+
+const LABEL_BY_ID: Record<TankId, string> = {
+  p1: 'P1',
+  p2: 'P2',
+  enemy: 'CPU',
+};
 
 const HULL: { x: number; y: number }[] = [
   { x: -18, y: -13 },
@@ -14,35 +26,37 @@ const HULL: { x: number; y: number }[] = [
 ];
 
 /**
- * A tank is two hand-drawn layers (hull + turret) that are drawn once and then
- * rotated. The hull follows the driving direction, the turret follows the aim.
+ * A tank is a hand-drawn hull plus a turret. Both are drawn once and then
+ * rotated; the turret is a separate layer so it can aim independently.
  */
 export class Tank {
   readonly scene: Phaser.Scene;
-  readonly kind: TankKind;
+  readonly id: TankId;
   readonly color: number;
-  readonly radius: number;
+  readonly radius = 22;
 
   x: number;
   y: number;
   bodyAngle: number;
   turretAngle: number;
 
-  /** Hull speed, px/s. Kept for the enemy lead calculation. */
+  /** Hull velocity, px/s – used to lead shots and to dodge. */
   vx = 0;
   vy = 0;
   alive = true;
   invulnerableUntil = 0;
+  /** How many hits this tank has taken (drawn as tally marks). */
   damage = 0;
+  lives = 3;
 
   private hull: Sketch;
   private turret: Sketch;
+  private tag: Phaser.GameObjects.Text;
 
-  constructor(scene: Phaser.Scene, x: number, y: number, angle: number, kind: TankKind, depth = 20) {
+  constructor(scene: Phaser.Scene, x: number, y: number, angle: number, id: TankId, depth = 20) {
     this.scene = scene;
-    this.kind = kind;
-    this.color = kind === 'player' ? COLORS.player : COLORS.enemy;
-    this.radius = 22;
+    this.id = id;
+    this.color = COLORS_BY_ID[id];
     this.x = x;
     this.y = y;
     this.bodyAngle = angle;
@@ -50,6 +64,16 @@ export class Tank {
 
     this.hull = new Sketch(scene, depth);
     this.turret = new Sketch(scene, depth + 1);
+    this.tag = scene.add
+      .text(x, y - 38, LABEL_BY_ID[id], {
+        fontFamily: FONT,
+        fontSize: '15px',
+        color: `#${this.color.toString(16).padStart(6, '0')}`,
+      })
+      .setOrigin(0.5)
+      .setDepth(depth + 2)
+      .setAlpha(0.85);
+
     this.redraw();
     this.sync();
   }
@@ -57,25 +81,28 @@ export class Tank {
   setDepth(depth: number): void {
     this.hull.setDepth(depth);
     this.turret.setDepth(depth + 1);
+    this.tag.setDepth(depth + 2);
   }
 
-  /** Hidden while destroyed; blinks while respawning and invulnerable. */
-  private applyInvulnVisual(now: number): void {
+  private applyVisual(now: number): void {
     if (!this.alive) {
       this.hull.setAlpha(0);
       this.turret.setAlpha(0);
+      this.tag.setAlpha(0);
       return;
     }
     const invuln = this.invulnerableUntil > now;
     const blink = invuln ? (Math.floor(now / 90) % 2 === 0 ? 0.35 : 1) : 1;
     this.hull.setAlpha(blink);
     this.turret.setAlpha(blink);
+    this.tag.setAlpha(0.85 * blink);
   }
 
   sync(now = this.scene.time.now): void {
     this.hull.graphics.setPosition(this.x, this.y).setRotation(this.bodyAngle);
     this.turret.graphics.setPosition(this.x, this.y).setRotation(this.turretAngle);
-    this.applyInvulnVisual(now);
+    this.tag.setPosition(this.x, this.y - 38);
+    this.applyVisual(now);
   }
 
   redraw(): void {
@@ -115,7 +142,7 @@ export class Tank {
     for (const rx of [-14, 11]) g.circle(rx, 0, 1.7, { width: 1.6, jitter: 0.3, passes: 1 });
 
     // Damage tally: one red cross per hit taken.
-    for (let i = 0; i < this.damage; i++) {
+    for (let i = 0; i < Math.min(3, this.damage); i++) {
       const dx = -15 + i * 9;
       g.line(dx - 3, -4, dx + 3, 4, { color: COLORS.danger, width: 2.4, jitter: 0.5 });
       g.line(dx + 3, -4, dx - 3, 4, { color: COLORS.danger, width: 2.4, jitter: 0.5 });
@@ -146,19 +173,8 @@ export class Tank {
     t.circle(0, 0, 4.5, { width: 2, jitter: 0.5, passes: 1 });
     // A little pennant so friend/foe reads at a glance even in mono.
     t.line(-3, -10, -5, -17, { width: 2.4, jitter: 0.4 });
-    if (this.kind === 'player') {
-      t.graphics.fillStyle(COLORS.player, 0.6);
-      t.graphics.fillTriangle(-5, -17, 6, -14.5, -5, -12);
-      t.poly(
-        [
-          { x: -5, y: -17 },
-          { x: 6, y: -14.5 },
-          { x: -5, y: -12 },
-        ],
-        { width: 2, jitter: 0.4 }
-      );
-    } else {
-      t.graphics.fillStyle(COLORS.enemy, 0.65);
+    if (this.id === 'enemy') {
+      t.graphics.fillStyle(this.color, 0.65);
       t.graphics.fillTriangle(-5, -12, 5, -12, 0, -18.5);
       t.poly(
         [
@@ -169,16 +185,33 @@ export class Tank {
         ],
         { width: 2, jitter: 0.4 }
       );
+    } else {
+      t.graphics.fillStyle(this.color, 0.6);
+      t.graphics.fillTriangle(-5, -17, 6, -14.5, -5, -12);
+      t.poly(
+        [
+          { x: -5, y: -17 },
+          { x: 6, y: -14.5 },
+          { x: -5, y: -12 },
+        ],
+        { width: 2, jitter: 0.4 }
+      );
     }
   }
 
   /** Muzzle position in world space. */
-  muzzle(length = 42, angle = this.turretAngle): { x: number; y: number } {
+  muzzle(length = 44, angle = this.turretAngle): { x: number; y: number } {
     return { x: this.x + Math.cos(angle) * length, y: this.y + Math.sin(angle) * length };
+  }
+
+  setAlive(alive: boolean, now: number): void {
+    this.alive = alive;
+    this.applyVisual(now);
   }
 
   destroy(): void {
     this.hull.destroy();
     this.turret.destroy();
+    this.tag.destroy();
   }
 }

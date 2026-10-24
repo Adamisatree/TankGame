@@ -5,11 +5,12 @@
  *
  *   npx tsx scripts/render.ts [outDir]
  */
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
 import { JSDOM } from 'jsdom';
 
 const outDir = process.argv[2] ?? '/tmp/tank-shots';
+mkdirSync(outDir, { recursive: true });
 
 const dom = new JSDOM('<!doctype html><html><body><div id="game"></div></body></html>', {
   pretendToBeVisual: true,
@@ -182,53 +183,73 @@ const shoot = async (name: string): Promise<void> => {
   console.log('wrote', `${outDir}/${name}.png`, buffer.length, 'bytes');
 };
 
+const settings = (await import('../src/game/settings')).settings;
 await wait(1200);
-await shoot('01-menu');
-console.log('menu frame captured');
 
 game.scene.stop('Menu');
+settings.mode = 'solo';
+settings.difficulty = 'easy';
+settings.autoDodge = false;
 game.scene.start('Game');
-await wait(2400);
+await wait(2600);
 
-const scene = game.scene.getScene('Game') as InstanceType<typeof GameScene>;
-const pointer = scene.input.activePointer;
-const poked = scene as unknown as {
-  firePlayer: () => void;
-  player: { x: number; y: number; turretAngle: number };
+type Scene = {
+  input: { activePointer: { worldX: number; worldY: number; x: number; y: number } };
+  fire: (tank: unknown) => void;
+  p1: { x: number; y: number; turretAngle: number };
   enemy: { x: number; y: number };
-  bullets: unknown[];
+  setAutoDodge: (on: boolean) => void;
 };
-
-// Point the reticle at the wall above the enemy so the guide shows a bank shot.
-poked.player.turretAngle = -0.95;
+const scene = game.scene.getScene('Game') as unknown as Scene;
+const pointer = scene.input.activePointer;
 pointer.worldX = 690;
 pointer.worldY = 250;
 pointer.x = 690;
 pointer.y = 250;
+scene.p1.turretAngle = -0.95;
 await wait(500);
-await shoot('02-aim-and-guide');
+await shoot('02-solo-aim');
 
-// A few shells in flight, ricocheting between the walls.
-poked.player.turretAngle = -0.62;
+scene.p1.turretAngle = -0.62;
 for (let i = 0; i < 3; i++) {
-  poked.firePlayer();
+  scene.fire(scene.p1);
   await wait(80);
 }
 await wait(220);
-await shoot('03-bullets-in-flight');
+await shoot('03-solo-shells');
 
-await wait(1100);
-await shoot('04-combat');
+// Auto-dodge on: the hull should be sliding around on its own.
+scene.setAutoDodge(true);
+await wait(1400);
+await shoot('04-auto-dodge');
+
+// Local versus: two human tanks with their own dashed guides.
+settings.mode = 'versus';
+settings.difficulty = 'normal';
+const gs = game.scene.getScene('Game') as unknown as { restartGame: () => void };
+gs.restartGame();
+await wait(2200);
+await shoot('05-versus');
+
+settings.mode = 'solo';
+settings.autoDodge = false;
 
 // A compact JPEG for the README.
 {
   const { loadImage } = await import('@napi-rs/canvas');
   const canvas = game.canvas as unknown as { __native?: NativeCanvas };
-  const src = await loadImage(canvas.__native!.toBuffer('image/png'));
-  const jpg = createCanvas(1280, 720);
-  jpg.getContext('2d').drawImage(src as unknown as never, 0, 0, 1280, 720);
-  writeFileSync(`${outDir}/preview.jpg`, jpg.toBuffer('image/jpeg', 82));
-  console.log('wrote', `${outDir}/preview.jpg`);
+  for (const [src, name] of [
+    ['03-solo-shells', 'preview'],
+    ['05-versus', 'versus'],
+  ] as const) {
+    const file = `${outDir}/${src}.png`;
+    const img = await loadImage(file);
+    const jpg = createCanvas(1280, 720);
+    jpg.getContext('2d').drawImage(img as unknown as never, 0, 0, 1280, 720);
+    writeFileSync(`${outDir}/${name}.jpg`, jpg.toBuffer('image/jpeg', 82));
+    console.log('wrote', `${outDir}/${name}.jpg`);
+  }
+  void canvas;
 }
 
 console.log('errors:', errors.length ? errors : 'none');

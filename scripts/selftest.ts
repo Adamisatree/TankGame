@@ -5,6 +5,7 @@
 import { planRicochetShot, trace, segmentCircleT } from '../src/engine/ai';
 import { advanceBullet, type BulletBody, type CrateBox } from '../src/engine/bullet';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../src/engine/physics';
+import { bulletThreatAt, nearestWallGap, pickHeading, steerTo } from '../src/engine/steer';
 import { LEVELS, buildLayout } from '../src/engine/level';
 
 let passed = 0;
@@ -162,6 +163,73 @@ const sealed = [
 ];
 const impossible = planRicochetShot(200, 300, 440, 300, sealed, { targetRadius: 22, maxBounces: 3 });
 check('sealed target has no firing solution', impossible === null, JSON.stringify(impossible));
+
+console.log('dodging');
+
+// A shell flying straight at us from the left.
+const incoming = [{ x: 100, y: 200, vx: 600, vy: 0, bounces: 0, maxBounces: 4, radius: 4.5 }];
+const openField: Box[] = room;
+const inLineOfFire = bulletThreatAt(300, 200, 22, incoming, openField);
+check('a shell aimed at us registers as danger', inLineOfFire.danger > 0.3, `danger=${inLineOfFire.danger.toFixed(2)}`);
+check('it reports a plausible time of arrival', inLineOfFire.eta > 0 && inLineOfFire.eta < 1.2, `eta=${inLineOfFire.eta.toFixed(2)}`);
+
+const offToTheSide = bulletThreatAt(300, 340, 22, incoming, openField);
+check('a shell passing far away is not dangerous', offToTheSide.danger === 0, `danger=${offToTheSide.danger}`);
+
+const nothing = bulletThreatAt(300, 200, 22, [], openField);
+check('no shells means no danger', nothing.danger === 0 && nothing.eta === Infinity);
+
+// A shell that will bounce off the right wall and come back towards us.
+const bankShell = [{ x: 300, y: 110, vx: 500, vy: 0, bounces: 0, maxBounces: 4, radius: 4.5 }];
+const predicted = bulletThreatAt(200, 110, 22, bankShell, [
+  { x: 0, y: 0, w: 400, h: 20 },
+  { x: 380, y: 0, w: 20, h: 400 },
+  { x: 0, y: 380, w: 400, h: 20 },
+  { x: 0, y: 0, w: 20, h: 400 },
+]);
+check('banked shell paths are predicted, not just straight lines', predicted.danger > 0.2, `danger=${predicted.danger.toFixed(2)}`);
+
+const escape = pickHeading({
+  x: 300,
+  y: 200,
+  radius: 22,
+  bodyAngle: 0,
+  walls: openField,
+  bullets: incoming,
+  threatWeight: 1.5,
+  stepDistance: 70,
+  samples: 16,
+});
+check('the dodge picks a heading away from the shell', !Number.isNaN(escape.angle), JSON.stringify(escape));
+check(
+  'the chosen spot is safer than standing still',
+  escape.threat < inLineOfFire.danger,
+  `chosen=${escape.threat.toFixed(2)} still=${inLineOfFire.danger.toFixed(2)}`
+);
+check('the dodge is inside the arena', escape.x > 20 && escape.x < 380 && escape.y > 20 && escape.y < 380);
+
+const boxedIn = pickHeading({
+  x: 40,
+  y: 40,
+  radius: 22,
+  bodyAngle: 0,
+  walls: room,
+  bullets: [],
+  threatWeight: 1,
+  stepDistance: 70,
+  samples: 16,
+});
+check('a cornered tank still gets a legal move', Number.isNaN(boxedIn.angle) || (boxedIn.x > 20 && boxedIn.y > 20), JSON.stringify(boxedIn));
+
+const forward = steerTo(0, 0);
+check('steering straight ahead drives forward', forward.drive === 1 && forward.turn === 0);
+const backwards = steerTo(Math.PI, 0);
+check('a target behind us is reached by reversing', backwards.drive === -1, JSON.stringify(backwards));
+const right = steerTo(Math.PI / 2, 0);
+check('a target to the right turns right', right.turn > 0, JSON.stringify(right));
+
+check('wall gap is measured from the surface', Math.abs(nearestWallGap(100, 100, room) - 80) < 1, `${nearestWallGap(100, 100, room)}`);
+check('wall gap is capped so it stays a local heuristic', nearestWallGap(200, 200, room) === 140, `${nearestWallGap(200, 200, room)}`);
 
 console.log('levels');
 for (const [i, level] of LEVELS.entries()) {
