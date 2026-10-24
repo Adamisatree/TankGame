@@ -60,7 +60,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: TankGame-portable-html
-          path: release/*.html
+          path: release/TankGame-*-portable.html
 
   macos:
     name: macOS (dmg, Apple Silicon + Intel)
