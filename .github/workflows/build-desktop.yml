@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   windows:
@@ -25,19 +26,27 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        shell: bash
         run: npm ci
 
       - name: Type-check and test
+        shell: bash
         run: |
           npm run typecheck
           npm run selftest
           npm run lantest
 
       - name: Build the game
-        run: npm run build:desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build:desktop 2>&1 | tee build.log
 
       - name: Package Windows app
-        run: npx electron-builder --win --publish never
+        shell: bash
+        run: |
+          set -o pipefail
+          npx electron-builder --win --publish never 2>&1 | tee -a build.log
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,14 +54,29 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: TankGame-windows
-          path: |
-            release/desktop/*.exe
+          path: release/desktop/*.exe
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
           name: TankGame-portable-html
           path: release/*.html
+
+      - name: Report failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let log = '';
+            try { log = fs.readFileSync('build.log', 'utf8'); } catch (e) { log = 'no build.log'; }
+            const tail = log.slice(-2500);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number || 2,
+              body: 'WINDOWS BUILD FAILED\n```\n' + tail + '\n```',
+            });
 
   macos:
     name: macOS (dmg, Apple Silicon + Intel)
@@ -66,13 +90,20 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        shell: bash
         run: npm ci
 
       - name: Build the game
-        run: npm run build:desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build:desktop 2>&1 | tee build.log
 
       - name: Package macOS app
-        run: npx electron-builder --mac --publish never
+        shell: bash
+        run: |
+          set -o pipefail
+          npx electron-builder --mac --publish never 2>&1 | tee -a build.log
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -84,6 +115,22 @@ jobs:
             release/desktop/*.dmg
             release/desktop/*.zip
           if-no-files-found: error
+
+      - name: Report failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let log = '';
+            try { log = fs.readFileSync('build.log', 'utf8'); } catch (e) { log = 'no build.log'; }
+            const tail = log.slice(-2500);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number || 2,
+              body: 'MAC BUILD FAILED\n```\n' + tail + '\n```',
+            });
 
   release:
     name: Attach builds to a release
