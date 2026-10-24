@@ -27,8 +27,9 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（Intel / AMD） | [TankGame-1.0.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-x64-setup.exe) |
-| Windows（ARM 笔记本） | [TankGame-1.0.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-arm64-setup.exe) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.0.0-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.0.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.0.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-arm64-setup.exe) |
 | Windows 免安装（解压即用） | [TankGame-1.0.0-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-portable.exe) |
 | Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.0.0-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-arm64.dmg) |
 | Mac（Intel） | [TankGame-1.0.0-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-x64.dmg) |
