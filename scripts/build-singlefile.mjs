@@ -64,8 +64,13 @@ if (inlineScripts) {
 const html = head + body;
 
 await mkdir(outDir, { recursive: true });
-const target = join(outDir, '坦克大作战.html');
-await writeFile(target, html, 'utf8');
+const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
+const chinese = join(outDir, '坦克大作战.html');
+// GitHub release assets keep ASCII names far more reliably.
+const ascii = join(outDir, `TankGame-${version}-portable.html`);
+await writeFile(chinese, html, 'utf8');
+await writeFile(ascii, html, 'utf8');
+const target = chinese;
 
 const leftovers = [...html.matchAll(/(?:src|href)="(?!data:|#|https?:)([^"]+)"/g)].map((m) => m[1]);
 const scriptEnds = (html.match(/<\/script>/g) ?? []).length;

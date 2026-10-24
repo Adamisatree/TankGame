@@ -77,8 +77,7 @@
             "x64"
           ]
         }
-      ],
-      "artifactName": "TankGame-${version}-${arch}-setup.${ext}"
+      ]
     },
     "nsis": {
       "oneClick": false,

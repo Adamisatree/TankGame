@@ -14,7 +14,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-`release/坦克大作战.html` 是一个**完全自包含**的网页（1.5 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.0.0-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-portable.html)（仓库里也有一份：`release/坦克大作战.html`）是一个**完全自包含**的网页（1.5 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -27,11 +27,11 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（Intel / AMD） | `TankGame-*-x64-setup.exe` |
-| Windows（ARM 笔记本） | `TankGame-*-arm64-setup.exe` |
-| Windows 免安装 | `TankGame-*-portable.exe` |
-| Mac（M1/M2/M3/M4） | `TankGame-*-arm64.dmg` |
-| Mac（Intel） | `TankGame-*-x64.dmg` |
+| Windows（Intel / AMD） | [TankGame-1.0.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-x64-setup.exe) |
+| Windows（ARM 笔记本） | [TankGame-1.0.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.0.0-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.0.0-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.0.0-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.0.0/TankGame-1.0.0-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
