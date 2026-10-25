@@ -141,7 +141,53 @@ const room = {
   started: false,
   /** How many teams team-mode uses. The host can add/remove teams in the lobby. */
   teamCount: 2,
+  /**
+   * The map the room will play. The host pushes the file itself, the server
+   * keeps it so late joiners get the same one, and every guest must confirm it
+   * before `begin` is accepted.
+   */
+  map: null,
+  mapHash: '',
+  /** Seats that have confirmed they hold the current map. */
+  mapAcks: new Set(),
 };
+
+/** Same cap as `MAX_MAP_BYTES` in src/net/protocol.ts. */
+const MAX_MAP_BYTES = 48 * 1024;
+
+/** Guests that still need to confirm the room's map. */
+function mapPending() {
+  if (!room.map) return [];
+  return [...room.players.keys()].filter((id) => id !== 'p1' && !room.mapAcks.has(id));
+}
+
+function mapStatus() {
+  return {
+    t: 'map-status',
+    waiting: mapPending(),
+    ready: [...room.mapAcks].filter((id) => id !== 'p1' && room.players.has(id)),
+  };
+}
+
+/** True when the payload is a map file we are willing to relay. */
+function isMapPayload(map) {
+  if (!map || typeof map !== 'object') return false;
+  if (map.format !== 'tankmap') return false;
+  try {
+    return JSON.stringify(map).length <= MAX_MAP_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** Host pushed a map: cache it, hand it to the guests, forget old acks. */
+function setRoomMap(map, hash) {
+  room.map = map;
+  room.mapHash = typeof hash === 'string' ? hash : '';
+  room.mapAcks.clear();
+  broadcast({ t: 'map', map: room.map, hash: room.mapHash });
+  console.log(`[lan] map ${map.id ?? '?'} rev ${map.rev ?? '?'} -> room`);
+}
 let totalPlayers = 0;
 let currentPort = 0;
 
@@ -283,6 +329,7 @@ function unlink(ws) {
   ws.playerId = null;
   ws.role = null;
   if (wasHost) room.host = null;
+  room.mapAcks.delete(id);
   send(ws, { t: 'bye' });
   // Tell the survivors exactly who left. An explicit surrender was already
   // broadcast by the message handler; a dropped socket only reports "left".
@@ -343,6 +390,12 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           ws.team = 0;
           ws.ready = true;
           room.players.set('p1', ws);
+          // The host owns the room's map: drop whatever the last host left
+          // behind, then take the map it announces (if any).
+          room.map = null;
+          room.mapHash = '';
+          room.mapAcks.clear();
+          if (isMapPayload(msg.map)) setRoomMap(msg.map, msg.mapHash);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
           announceRoster();
@@ -377,6 +430,11 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         console.log(`[lan] guest ${id} joined (${room.players.size}/${room.capacity})`);
         // The host is the one client that may see a seat's skill, but even it
         // gets that from the roster, not from this notification.
+        // A map picked before this guest walked in still has to reach it.
+        if (room.map) {
+          room.mapAcks.delete(id);
+          send(ws, { t: 'map', map: room.map, hash: room.mapHash });
+        }
         if (room.host) send(room.host, { t: 'peer', state: 'joined', id, version: ws.version });
         announceRoster();
         pair();
@@ -410,6 +468,39 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         if (ws.role === 'guest' && room.host) {
           send(room.host, { t: 'input', from: ws.playerId, input: msg.input, seq: msg.seq });
         }
+        return;
+      }
+
+      // Host changed the room's map: relay it and require fresh confirmations.
+      if (msg.t === 'map') {
+        if (ws.role !== 'host') return;
+        if (!isMapPayload(msg.map)) {
+          send(ws, { t: 'lobby-error', reason: 'map-failed', waiting: [], detail: '地图文件太大或格式不对' });
+          return;
+        }
+        setRoomMap(msg.map, msg.mapHash);
+        send(ws, mapStatus());
+        return;
+      }
+
+      // Guest confirmed (or refused) the room's map.
+      if (msg.t === 'map-ack') {
+        if (ws.role !== 'guest' || !room.map) return;
+        if (msg.id !== room.map.id || msg.hash !== room.mapHash) {
+          send(room.host, { t: 'lobby-error', reason: 'map-failed', waiting: [ws.playerId], detail: '版本对不上' });
+          return;
+        }
+        if (msg.ok === false) {
+          send(room.host, {
+            t: 'lobby-error',
+            reason: 'map-failed',
+            waiting: [ws.playerId],
+            detail: typeof msg.reason === 'string' ? msg.reason.slice(0, 40) : '收到了地图但存不下来',
+          });
+          return;
+        }
+        room.mapAcks.add(ws.playerId);
+        send(room.host, mapStatus());
         return;
       }
 
@@ -480,6 +571,14 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
             send(ws, { t: 'lobby-error', reason: 'empty-team', teams: sizes });
             return;
           }
+        }
+        // Every guest must hold the room's map before the first snapshot flies:
+        // otherwise it would play a different arena than the host.
+        const missing = mapPending();
+        if (missing.length) {
+          send(ws, { t: 'lobby-error', reason: 'map-pending', waiting: missing });
+          send(ws, mapStatus());
+          return;
         }
         room.started = true;
         // Everyone (host included) learns the room is live.

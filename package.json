@@ -1,7 +1,7 @@
 {
   "name": "tank-duel",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "description": "手绘风反弹坦克对战游戏：单人、本地双人、局域网联机",
   "scripts": {
@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "selftest": "tsx scripts/selftest.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "test:map": "tsx scripts/maptest.ts",
     "lan": "npm run build && node server/lan-server.mjs",
     "serve": "node server/lan-server.mjs",
     "lantest": "tsx scripts/lantest.ts",
@@ -23,7 +24,7 @@
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
     "test:desktop": "tsx scripts/desktop-test.ts",
-    "verify": "npm run selftest && npm run lantest && npm run test:update && npm run build && npm run test:desktop && npm run build:single && npm run verify:single",
+    "verify": "npm run selftest && npm run lantest && npm run test:map && npm run test:update && npm run build && npm run test:desktop && npm run build:single && npm run verify:single",
     "maps": "tsx scripts/map-sheet.ts",
     "multitest": "tsx scripts/multitest.ts"
   },

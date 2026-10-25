@@ -22,6 +22,8 @@ export interface LobbyMatch {
 
 export type OverlayState =
   | { kind: 'start' }
+  /** Map editor, working on a copy of this map. */
+  | { kind: 'mapEditor'; map: import('../maps/format').MapFile }
   /** Room lobby: everyone waits here until the host starts. */
   | {
       kind: 'lobby';
@@ -35,6 +37,16 @@ export type OverlayState =
       hostId: string;
       match: LobbyMatch;
       roomUrl: string;
+      /** The map the room will play, and whether every seat has it yet. */
+      map?: {
+        name: string;
+        custom: boolean;
+        waiting: number;
+        /** Seats that have confirmed the map (guests, or just you). */
+        ready: number;
+        total: number;
+        synced: boolean;
+      } | null;
     }
   | { kind: 'hidden' }
   | { kind: 'paused' }

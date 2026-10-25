@@ -4,7 +4,13 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
+
+/**
+ * Hard cap on a transferred map blob. A 40×24 grid map is a few kilobytes, so
+ * anything near this is either a bug or an attempt to stall the room.
+ */
+export const MAX_MAP_BYTES = 48 * 1024;
 
 export type NetRole = 'host' | 'guest';
 
@@ -89,6 +95,18 @@ export interface NetEvent {
   color?: number;
 }
 
+/**
+ * The host's map, pushed into the room before a match may start. Receivers
+ * normalise the file, store it in their own library and hash it back, so a
+ * damaged or stale copy is caught before the first shot is fired.
+ */
+export interface MapTransfer {
+  /** The whole map file (see `maps/format.ts`). */
+  map: unknown;
+  /** FNV-1a hash of the canonical map, computed by the sender. */
+  hash: string;
+}
+
 export interface Snapshot {
   t: 'state';
   seq: number;
@@ -109,6 +127,8 @@ export interface Snapshot {
  */
 export type LobbyMessage =
   | { t: 'skill'; skill: string }
+  /** Guest → server: "I have the host's map" (or why I could not take it). */
+  | { t: 'map-ack'; id: string; rev: number; hash: string; ok: boolean; reason?: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'team'; id: string; team: number }
   | { t: 'teams'; count: number }
@@ -118,8 +138,10 @@ export type LobbyMessage =
 
 export type HostMessage =
   | Snapshot
-  | { t: 'start'; level: number }
-  | { t: 'restart'; level: number }
+  /** Host → room: the map everyone will play (also cached by the server). */
+  | ({ t: 'map' } & MapTransfer)
+  | { t: 'start'; level: number; levelId?: string }
+  | { t: 'restart'; level: number; levelId?: string }
   | { t: 'chat'; text: string }
   /** A player left on purpose; everyone else sees it as a surrender. */
   | { t: 'surrender'; by: string }
@@ -133,6 +155,8 @@ export type HostMessage =
       timeLimit?: number;
       friendlyFire?: boolean;
       selfDamage?: boolean;
+      /** Which map the room plays; the guest resolves it by id, not by index. */
+      levelId?: string;
       /** 内测 balance knobs, so every machine simulates the same physics. */
       tuning?: Record<string, number>;
     };
@@ -178,14 +202,32 @@ export type ServerMessage =
       config?: Record<string, unknown>;
     }
   /** The host started the match; carries the final rules and roster. */
-  | { t: 'begin'; config?: Record<string, unknown>; roster?: RosterEntry[]; mode?: 'ffa' | 'team'; teams?: number }
+  | {
+      t: 'begin';
+      config?: Record<string, unknown>;
+      roster?: RosterEntry[];
+      mode?: 'ffa' | 'team';
+      teams?: number;
+    }
   | { t: 'config'; config: Record<string, unknown>; tuning?: Record<string, number> }
   | { t: 'peer'; state: 'joined' | 'left'; id?: string; host?: boolean; skill?: string; version?: string }
   | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
   | { t: 'surrender'; by: string }
   | { t: 'input'; input: TankInput; seq: number; from?: string }
+  /** The host's map arrived; store it, then answer with `map-ack`. */
+  | ({ t: 'map' } & MapTransfer)
+  /** Host only: how many seats have confirmed the map, and who has not. */
+  | { t: 'map-status'; waiting: string[]; ready: string[] }
   /** The host tried to start but the lobby is not valid yet. */
-  | { t: 'lobby-error'; reason: 'empty-team'; teams: number[] }
+  | {
+      t: 'lobby-error';
+      reason: 'empty-team' | 'map-pending' | 'map-failed';
+      teams?: number[];
+      /** Seats still missing a map confirmation. */
+      waiting?: string[];
+      /** Human-readable reason for `map-failed`. */
+      detail?: string;
+    }
   | { t: 'bye' }
   | { t: 'replaced' };
 

@@ -7,6 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import WebSocket from 'ws';
 import { createLanServer } from '../server/lan-server.mjs';
+import { emptyMap, mapHash } from '../src/maps/format';
 
 const checks: { name: string; ok: boolean; detail?: string }[] = [];
 function check(name: string, ok: boolean, detail?: string): void {
@@ -173,6 +174,83 @@ host2.send({ t: 'state', seq: 42, level: 1, phase: 'playing', score: 5, crates: 
 check('second match relays state', await waitFor(() => guest2.messages.some((m) => m.t === 'state' && m.seq === 42)));
 host2.close();
 guest2.close();
+
+// --- map transfer: the host pushes the file, every guest confirms it
+await sleep(120);
+{
+  const roomMap = emptyMap({ name: '联机测试图' });
+  const mapMsg = { t: 'map', map: roomMap, hash: mapHash(roomMap) };
+  const host3 = await open(wsUrl);
+  host3.send({ t: 'join', role: 'host', map: roomMap, mapHash: mapHash(roomMap) });
+  await waitFor(() => host3.messages.some((m) => m.t === 'joined'));
+
+  const guest3 = await open(wsUrl);
+  guest3.send({ t: 'join', role: 'guest' });
+  check('a joining guest receives the room map', await waitFor(() => guest3.messages.some((m) => m.t === 'map')));
+  // Seat ids grow across the whole process, so read ours instead of assuming p2.
+  const seat3 = guest3.messages.find((m) => m.t === 'joined')?.id as string;
+  const arrived = guest3.messages.find((m) => m.t === 'map');
+  check('the map arrives with its id', arrived?.map?.id === roomMap.id, JSON.stringify(arrived?.map?.id));
+  check('the map arrives with the host hash', arrived?.hash === mapMsg.hash, `${arrived?.hash} vs ${mapMsg.hash}`);
+  check('the map arrives with its geometry', JSON.stringify(arrived?.map?.walls) === JSON.stringify(roomMap.walls));
+
+  // Starting before the guest confirms has to be refused.
+  host3.send({ t: 'begin' });
+  check('begin is refused while the map is unconfirmed', await waitFor(() => host3.messages.some((m) => m.t === 'lobby-error')));
+  const pending = host3.messages.find((m) => m.t === 'lobby-error');
+  check('the refusal says the map is pending', pending?.reason === 'map-pending', JSON.stringify(pending));
+  check('the refusal names the seat that owes an ack', Array.isArray(pending?.waiting) && pending.waiting.includes(seat3), JSON.stringify(pending?.waiting));
+  check('nobody was pulled into a match', !guest3.messages.some((m) => m.t === 'begin'));
+
+  // A wrong hash must be reported to the host, not silently accepted.
+  guest3.send({ t: 'map-ack', id: roomMap.id, rev: roomMap.rev, hash: 'deadbeef', ok: true });
+  check('a mismatched hash is reported', await waitFor(() => host3.messages.some((m) => m.t === 'lobby-error' && m.reason === 'map-failed')));
+  check('the mismatch names the seat', host3.messages.find((m) => m.reason === 'map-failed')?.waiting?.includes(seat3));
+
+  // The real ack unlocks the start.
+  guest3.send({ t: 'map-ack', id: roomMap.id, rev: roomMap.rev, hash: mapMsg.hash, ok: true });
+  check('the host sees the confirmation', await waitFor(() => host3.messages.some((m) => m.t === 'map-status' && m.ready.includes(seat3))));
+  host3.send({ t: 'begin' });
+  check('begin works once the map is confirmed', await waitFor(() => guest3.messages.some((m) => m.t === 'begin')));
+
+  // A guest may not push a map into the room.
+  const beforeBroadcast = guest3.messages.length;
+  guest3.send({ t: 'map', map: emptyMap({ name: '捣乱' }), hash: 'x' });
+  await sleep(120);
+  check('only the host can set the room map', !guest3.messages.slice(beforeBroadcast).some((m) => m.t === 'map'));
+
+  // A newcomer still gets the map (the server caches it).
+  const guest4 = await open(wsUrl);
+  guest4.send({ t: 'join', role: 'guest' });
+  check('a late guest also receives the map', await waitFor(() => guest4.messages.some((m) => m.t === 'map')));
+  check('the late guest gets the same map', guest4.messages.find((m) => m.t === 'map')?.map?.id === roomMap.id);
+  guest4.close();
+
+  // An oversized blob is refused rather than relayed. (Kept under the socket's
+  // 64 KB frame cap so this exercises the app-level limit, not the transport.)
+  const huge = { ...emptyMap({ name: '太大' }), extra: { pad: 'x'.repeat(52 * 1024) } };
+  host3.send({ t: 'map', map: huge, hash: 'huge' });
+  check('an oversized map is refused', await waitFor(() => host3.messages.some((m) => m.t === 'lobby-error' && m.reason === 'map-failed' && String(m.detail).includes('太大'))));
+  check('the room keeps its previous map', guest3.messages.filter((m) => m.t === 'map').pop()?.map?.id === roomMap.id);
+
+  host3.close();
+  guest3.close();
+}
+
+// --- rooms without a custom map still start instantly
+await sleep(120);
+{
+  const host5 = await open(wsUrl);
+  host5.send({ t: 'join', role: 'host' });
+  await waitFor(() => host5.messages.some((m) => m.t === 'joined'));
+  const guest5 = await open(wsUrl);
+  guest5.send({ t: 'join', role: 'guest' });
+  await waitFor(() => guest5.messages.some((m) => m.t === 'paired'));
+  host5.send({ t: 'begin' });
+  check('a built-in map room starts without any ack', await waitFor(() => guest5.messages.some((m) => m.t === 'begin')));
+  host5.close();
+  guest5.close();
+}
 
 await sleep(100);
 await server.close();
