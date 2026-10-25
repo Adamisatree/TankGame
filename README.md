@@ -39,6 +39,9 @@
 > 安装包没有做代码签名（个人项目拿不到证书），所以：
 > - Windows：首次运行 SmartScreen 会拦一下 → 点「更多信息」→「仍要运行」；
 > - macOS：首次打开提示「无法验证开发者」→ 右键点图标选「打开」，或执行 `xattr -dr com.apple.quarantine /Applications/TankGame.app`。
+>
+> 装不上、提示「证书损坏 / 无法验证签名 / 已损坏」、更新器说校验失败？
+> 看 [证书与安装包问题排查（含 Q&A）](docs/troubleshoot-signing.md)。
 
 ### 3. 开发模式
 
