@@ -130,6 +130,67 @@ squeeze.send({ t: 'join', role: 'guest', version: info.version });
 check('a smaller capacity shuts the door early', await waitFor(() => squeeze.messages.some((m) => m.t === 'reject'), 2000), JSON.stringify(squeeze.messages.slice(-2)));
 squeeze.close();
 
+// --- 7b. Lobby: per-seat skills, teams, ready, begin.
+{
+  const lastRoster = () => host.messages.filter((m) => m.t === 'roster').pop();
+
+  // The room starts in the lobby.
+  check('the room reports a lobby state', lastRoster()?.started === false, JSON.stringify(lastRoster()?.started));
+
+  // Each player owns their own skill: the guest changes it, only their seat moves.
+  g2.send({ t: 'skill', skill: 'shield' });
+  check(
+    'a guest can change its own skill',
+    await waitFor(() => lastRoster()?.players.find((p: { id: string }) => p.id === 'p2')?.skill === 'shield', 1500)
+  );
+  check(
+    'nobody else\'s skill changes',
+    lastRoster()?.players.find((p: { id: string }) => p.id === 'p3')?.skill !== 'shield'
+  );
+
+  // Teams: only the host may re-seat a player.
+  host.send({ t: 'config', mode: 'team', capacity: 10, killTarget: 15, timeLimit: 480, friendlyFire: false, selfDamage: true });
+  await waitFor(() => lastRoster()?.mode === 'team', 1500);
+  // Pick a seat that actually exists in the (shrunken) room.
+  const others = (lastRoster()?.players ?? []).filter((p: { id: string; host?: boolean }) => !p.host);
+  const target = others[others.length - 1]?.id ?? 'p2';
+  const teamOf = () => lastRoster()?.players.find((p: { id: string }) => p.id === target)?.team;
+  const before = teamOf();
+  g2.send({ t: 'team', id: target, team: before === 0 ? 1 : 0 });
+  await new Promise((r) => setTimeout(r, 250));
+  check('a guest cannot move a player between teams', teamOf() === before, JSON.stringify({ target, before, after: teamOf() }));
+  const wanted = before === 0 ? 1 : 0;
+  host.send({ t: 'team', id: target, team: wanted });
+  check(
+    'the host can move a player between teams',
+    await waitFor(() => teamOf() === wanted, 1500),
+    JSON.stringify({ target, before, wanted, after: teamOf() })
+  );
+
+  // Ready state is per seat.
+  g2.send({ t: 'ready', ready: true });
+  check(
+    'a guest can mark itself ready',
+    await waitFor(() => lastRoster()?.players.find((p: { id: string }) => p.id === 'p2')?.ready === true, 1500)
+  );
+  check('the host counts as ready', lastRoster()?.players.find((p: { id: string }) => p.id === 'p1')?.ready === true);
+
+  // Only the host can start, and everyone is told.
+  g2.send({ t: 'begin' });
+  await new Promise((r) => setTimeout(r, 200));
+  check('a guest cannot start the match', lastRoster()?.started === false);
+  host.send({ t: 'begin' });
+  check('the host starts the match', await waitFor(() => lastRoster()?.started === true, 1500));
+  check(
+    'a begin message reaches the guests',
+    await waitFor(() => g2.messages.some((m) => m.t === 'begin'), 1500)
+  );
+  check(
+    'begin carries the final rules',
+    (g2.messages.filter((m) => m.t === 'begin').pop() as { config?: { mode?: string } })?.config?.mode === 'team'
+  );
+}
+
 // --- 8. Version gate still rejects a mismatched build in a multi-player room.
 const stale = await open(wsUrl);
 stale.send({ t: 'join', role: 'guest', version: '0.0.1-old' });

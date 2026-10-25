@@ -137,7 +137,14 @@ async function downloadWithMirrors(url, destPath, options = {}) {
   const { downloadWithFallback } = await import(
     pathToFileURL(join(__dirname, '..', 'shared', 'download.mjs')).href
   );
-  const candidates = core.urlCandidates(url, mirrors, options.mirrorId || settings.mirrorId);
+  const preferred = options.mirrorId || settings.mirrorId;
+  let candidates = core.urlCandidates(url, mirrors, preferred);
+  // When a mirror is chosen by hand, honour it. Quietly falling through to a
+  // different host was why the download "was not the source I picked".
+  if (preferred) candidates = candidates.filter((candidate) => candidate.id === preferred);
+  if (!candidates.length) {
+    return { ok: false, path: '', sha256: '', size: 0, source: null, errors: [`所选镜像 ${preferred} 不可用，请在更新面板改为「自动」`] };
+  }
   const result = await downloadWithFallback(url, destPath, {
     candidates,
     expectedSha: options.expectedSha,

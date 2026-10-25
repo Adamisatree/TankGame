@@ -7,7 +7,7 @@ import { OVERLAY_EVENT, type OverlayState } from './game/events';
 import { DIFFICULTIES, settings, type Difficulty, type GameMode } from './game/settings';
 import { sound } from './game/Sound';
 import { LEVELS, levelById, type Level } from './engine/level';
-import { SKILLS, type SkillId } from './game/skills';
+import { SKILLS, isSkillId, skillById, type SkillId } from './game/skills';
 import {
   ACTION_LABEL,
   GLOBAL_LABEL,
@@ -132,7 +132,21 @@ function skillPicker(): string {
     ).join('');
   };
 
-  const twoSeats = settings.mode === 'versus' || settings.mode === 'lan';
+  // LAN: you pick *your* skill here; everyone chooses for themselves in the
+  // room. Showing both seats let the host edit the guest's pick, which was wrong.
+  if (settings.mode === 'lan') {
+    const seat: 1 | 2 = settings.lanRole === 'host' ? 1 : 2;
+    return `
+      <div class="setting-block">
+        <div class="setting-head">
+          <span class="setting-label">你的召唤师技能</span>
+          <span class="setting-hint">只在房间界面里生效，别人改不了你的</span>
+        </div>
+        <div class="skill-cards">${cards(seat)}</div>
+      </div>`;
+  }
+
+  const twoSeats = settings.mode === 'versus';
   return `
     <div class="setting-block">
       <div class="setting-head">
@@ -239,8 +253,21 @@ function matchSettings(): string {
         <div class="chip-row">${chipRow('capacity', CAPACITY_CHOICES, (v) => `${v} 人`)}</div>
       </div>
       <div class="setting-row">
+        <span class="setting-label">结束方式</span>
+        <div class="chip-row">
+          ${(['kills', 'time', 'both'] as const)
+            .map(
+              (kind) =>
+                `<button type="button" class="chip ${m.winCondition === kind ? 'on' : ''}" data-match="winCondition" data-value="${kind}" ${hostOnly ? 'disabled' : ''}>${
+                  kind === 'kills' ? '打到人头' : kind === 'time' ? '时间到' : '两者任一'
+                }</button>`
+            )
+            .join('')}
+        </div>
+      </div>
+      <div class="setting-row">
         <span class="setting-label">人头目标</span>
-        <div class="chip-row">${chipRow('killTarget', KILL_TARGET_CHOICES, (v) => `${v} 杀`)}</div>
+        <div class="chip-row">${chipRow('killTarget', KILL_TARGET_CHOICES, (v) => (v === 0 ? '不限' : `${v} 杀`))}</div>
       </div>
       <div class="setting-row">
         <span class="setting-label">时间上限</span>
@@ -636,9 +663,18 @@ function bindSettings(root: HTMLElement): void {
   });
   root.querySelectorAll<HTMLButtonElement>('[data-match]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const key = btn.dataset.match as 'mode' | 'capacity' | 'killTarget' | 'timeLimit' | 'friendlyFire' | 'selfDamage';
+      const key = btn.dataset.match as
+        | 'mode'
+        | 'winCondition'
+        | 'capacity'
+        | 'killTarget'
+        | 'timeLimit'
+        | 'friendlyFire'
+        | 'selfDamage';
       const raw = btn.dataset.value ?? '';
       if (key === 'mode') settings.match.mode = raw === 'team' ? 'team' : 'ffa';
+      else if (key === 'winCondition')
+        settings.match.winCondition = raw === 'kills' || raw === 'time' ? raw : 'both';
       else if (key === 'friendlyFire' || key === 'selfDamage') settings.match[key] = raw === '1';
       else settings.match[key] = Number(raw);
       sound.ui();
@@ -681,6 +717,243 @@ function startMatch(): void {
   render({ kind: 'hidden' });
 }
 
+
+// ---------------------------------------------------------------- room lobby
+
+/**
+ * The room screen. Everyone lands here after joining: seats, each player's own
+ * skill, and (in team mode) hand-picked sides. The host starts the match; nobody
+ * is dropped into the arena before that.
+ */
+function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
+  const me = state.roster.find((seat) => seat.id === state.myId);
+  const teams = state.mode === 'team';
+  const readyCount = state.roster.filter((seat) => seat.ready).length;
+
+  const seatCards = state.roster
+    .map((seat) => {
+      const isMe = seat.id === state.myId;
+      const teamTone = teams ? `team-${seat.team}` : '';
+      const skill = isSkillId(seat.skill) ? skillById(seat.skill).name : '未选';
+      const teamButtons = state.isHost
+        ? `<div class="lobby-teams">
+             ${[0, 1]
+               .map(
+                 (team) =>
+                   `<button type="button" class="chip tiny ${seat.team === team ? 'on' : ''} team-${team}"
+                      data-lobby-team="${team}" data-lobby-id="${seat.id}">${team === 0 ? '红队' : '蓝队'}</button>`
+               )
+               .join('')}
+           </div>`
+        : '';
+      return `
+        <div class="lobby-seat ${isMe ? 'is-me' : ''} ${teamTone}">
+          <div class="lobby-seat-head">
+            <b>${seat.name}</b>
+            ${seat.host ? '<span class="lobby-tag">房主</span>' : ''}
+            ${isMe ? '<span class="lobby-tag me">你</span>' : ''}
+            <span class="lobby-ready ${seat.ready ? 'on' : ''}">${seat.ready ? '已准备' : '等待中'}</span>
+          </div>
+          <div class="lobby-seat-skill">技能：${skill}</div>
+          ${teamButtons}
+        </div>`;
+    })
+    .join('');
+
+  // Your own skill picker (never anyone else's – each player owns their choice).
+  const mySkills = SKILLS.map(
+    (skill) => `
+      <button type="button" class="skill-card compact ${me?.skill === skill.id ? 'on' : ''}" data-lobby-skill="${skill.id}">
+        <b>${skill.name}</b>
+        <span>${skill.blurb}</span>
+      </button>`
+  ).join('');
+
+  const ruleButtons = state.isHost
+    ? `
+      <div class="setting-row">
+        <span class="setting-label">玩法</span>
+        <div class="segmented">
+          <button type="button" data-lobby-mode="ffa" class="${state.mode === 'ffa' ? 'on' : ''}">乱斗</button>
+          <button type="button" data-lobby-mode="team" class="${state.mode === 'team' ? 'on' : ''}">分队</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">结束方式</span>
+        <div class="chip-row">
+          ${(['kills', 'time', 'both'] as const)
+            .map(
+              (kind) =>
+                `<button type="button" class="chip ${state.match.winCondition === kind ? 'on' : ''}" data-lobby-win="${kind}">${
+                  kind === 'kills' ? '打到人头' : kind === 'time' ? '时间到' : '两者任一'
+                }</button>`
+            )
+            .join('')}
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">人头目标</span>
+        <div class="chip-row">
+          ${KILL_TARGET_CHOICES.map(
+            (value) =>
+              `<button type="button" class="chip ${state.match.killTarget === value ? 'on' : ''}" data-lobby-kills="${value}">${
+                value === 0 ? '不限' : `${value} 杀`
+              }</button>`
+          ).join('')}
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">时间上限</span>
+        <div class="chip-row">
+          ${TIME_LIMIT_CHOICES.map(
+            (value) =>
+              `<button type="button" class="chip ${state.match.timeLimit === value ? 'on' : ''}" data-lobby-time="${value}">${
+                value === 0 ? '不限时' : `${value / 60} 分钟`
+              }</button>`
+          ).join('')}
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">伤害开关</span>
+        <div class="toggle-row">
+          <button type="button" class="chip ${state.match.friendlyFire ? 'on' : ''}" data-lobby-ff="${state.match.friendlyFire ? 0 : 1}">友伤：${state.match.friendlyFire ? '开' : '关'}</button>
+          <button type="button" class="chip ${state.match.selfDamage ? 'on' : ''}" data-lobby-sd="${state.match.selfDamage ? 0 : 1}">自伤：${state.match.selfDamage ? '开' : '关'}</button>
+        </div>
+      </div>`
+    : `<p class="lan-hint">规则由房主设置，进对局前会同步给你。</p>`;
+
+  return `
+    <div class="kicker">Room · ${state.roster.length}/${state.capacity}</div>
+    <h1>房间<span class="accent">!</span></h1>
+    <p class="lan-lead">${
+      state.isHost
+        ? '把房间地址发给朋友，等人齐了、都准备后点「开始对局」。'
+        : '等人齐；选好你的技能后点「准备」，房主开始对局。'
+    }</p>
+    ${state.roomUrl ? `<div class="lobby-url">房间地址 <b>${state.roomUrl}</b></div>` : ''}
+    <div class="lobby-seats">${seatCards || '<p class="lan-hint">还没有人加入…</p>'}</div>
+    <div class="setting-block">
+      <div class="setting-head">
+        <span class="setting-label">你的技能</span>
+        <span class="setting-hint">每人自己选，别人改不了你的</span>
+      </div>
+      <div class="skill-cards">${mySkills}</div>
+    </div>
+    ${state.isHost ? '<div class="lobby-auto"><button type="button" class="chip" id="lobby-auto-teams">自动分队</button></div>' : ''}
+    ${ruleButtons}
+    <div class="actions">
+      ${
+        state.isHost
+          ? `<button class="primary" id="lobby-start">开始对局</button>`
+          : `<button class="primary" id="lobby-ready">${me?.ready ? '取消准备' : '准备'}</button>`
+      }
+      <button class="ghost" id="lobby-leave">离开房间</button>
+      <span class="hint">${readyCount}/${state.roster.length} 已准备</span>
+    </div>
+  `;
+}
+
+function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobby' }>): void {
+  const scene = gameScene();
+  if (!scene) return;
+  const repaint = () => render({ ...state, roster: state.roster });
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-skill]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      const id = btn.dataset.lobbySkill;
+      if (!id || !isSkillId(id)) return;
+      scene.setMySkill(id);
+      state.roster = state.roster.map((seat) => (seat.id === state.myId ? { ...seat, skill: id } : seat));
+      repaint();
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-team]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!state.isHost) return;
+      sound.ui();
+      const id = btn.dataset.lobbyId;
+      const team = Number(btn.dataset.lobbyTeam ?? 0);
+      if (id) scene.setTeamOf(id, team);
+      state.roster = state.roster.map((seat) => (seat.id === id ? { ...seat, team } : seat));
+      repaint();
+    });
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-auto-teams')?.addEventListener('click', () => {
+    sound.ui();
+    scene.autoTeams();
+  });
+
+  const setMatch = (patch: Partial<typeof state.match>) => {
+    state.match = { ...state.match, ...patch };
+    scene.applyRoomConfig(state.match);
+    repaint();
+  };
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      setMatch({ mode: btn.dataset.lobbyMode === 'team' ? 'team' : 'ffa' });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-win]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      setMatch({ winCondition: (btn.dataset.lobbyWin ?? 'both') as 'kills' | 'time' | 'both' });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-kills]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      setMatch({ killTarget: Number(btn.dataset.lobbyKills ?? 0) });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-time]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      setMatch({ timeLimit: Number(btn.dataset.lobbyTime ?? 0) });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-ff]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      setMatch({ friendlyFire: btn.dataset.lobbyFf === '1' });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-sd]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      setMatch({ selfDamage: btn.dataset.lobbySd === '1' });
+    });
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-ready')?.addEventListener('click', () => {
+    sound.ui();
+    const me = state.roster.find((seat) => seat.id === state.myId);
+    const next = !me?.ready;
+    scene.setReady(next);
+    state.roster = state.roster.map((seat) => (seat.id === state.myId ? { ...seat, ready: next } : seat));
+    repaint();
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-start')?.addEventListener('click', () => {
+    sound.ui();
+    // Everyone has to be ready – the host waits instead of yanking people in.
+    const waiting = state.roster.filter((seat) => !seat.ready && !seat.host);
+    if (waiting.length) {
+      window.alert(`还有 ${waiting.length} 人没准备：${waiting.map((seat) => seat.name).join('、')}`);
+      return;
+    }
+    scene.startRoomMatch();
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-leave')?.addEventListener('click', () => {
+    sound.ui();
+    scene.quitMatch();
+  });
+}
+
 function render(next: OverlayState): void {
   state = next;
 
@@ -694,6 +967,12 @@ function render(next: OverlayState): void {
 
   overlay.classList.remove('hidden');
   card.setAttribute('data-state', next.kind);
+
+  if (next.kind === 'lobby') {
+    card.innerHTML = lobbyHtml(next);
+    bindLobby(card, next);
+    return;
+  }
 
   if (next.kind === 'start') {
     const mapName = settings.mapId === 'random' ? '随机地图' : levelById(settings.mapId).name;
@@ -815,7 +1094,7 @@ function render(next: OverlayState): void {
         <button id="btn-menu">返回菜单</button>
       </div>
     `;
-  } else {
+  } else if (next.kind === 'versusOver') {
     const p1Wins = next.winner === 'p1';
     card.innerHTML = `
       <div class="kicker">Versus</div>

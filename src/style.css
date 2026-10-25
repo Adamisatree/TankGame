@@ -845,6 +845,20 @@ b.p2 {
   background: #f6f1ff;
 }
 
+/* Selected chip. Without this rule every pre-match option looked identical,
+   so nobody could tell which head count / kill target was active. */
+.chip.on {
+  background: var(--player);
+  border-color: var(--player);
+  color: #fdfaf2;
+  box-shadow: 2px 2px 0 rgba(38, 34, 29, 0.55);
+  font-weight: 700;
+}
+
+.chip.on::after {
+  content: ' ✓';
+}
+
 .lan-scan-list {
   display: flex;
   flex-direction: column;
@@ -1207,4 +1221,113 @@ a.chip.ghost {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
+}
+
+/* ---------------------------------------------------------------- 房间大厅 */
+
+.lobby-seats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.lobby-seat {
+  border: 1.6px solid rgba(38, 34, 29, 0.3);
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: #fffaf0;
+  font-size: 13px;
+}
+
+.lobby-seat.is-me {
+  border-color: var(--player);
+  box-shadow: 0 0 0 2px rgba(63, 156, 143, 0.18);
+}
+
+.lobby-seat.team-0 {
+  border-left: 5px solid #d4552e;
+}
+
+.lobby-seat.team-1 {
+  border-left: 5px solid #2f6fb5;
+}
+
+.lobby-seat-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lobby-tag {
+  font-size: 10.5px;
+  padding: 0 5px;
+  border-radius: 7px;
+  background: rgba(38, 34, 29, 0.08);
+}
+
+.lobby-tag.me {
+  background: rgba(63, 156, 143, 0.18);
+}
+
+.lobby-ready {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.lobby-ready.on {
+  color: #2e7d5b;
+  font-weight: 700;
+}
+
+.lobby-seat-skill {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.lobby-teams {
+  display: flex;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.chip.tiny {
+  font-size: 11.5px;
+  padding: 1px 8px;
+}
+
+.chip.team-0.on {
+  background: #d4552e;
+  border-color: #d4552e;
+}
+
+.chip.team-1.on {
+  background: #2f6fb5;
+  border-color: #2f6fb5;
+}
+
+.lobby-url {
+  font-size: 13px;
+  margin: 6px 0 2px;
+  color: var(--muted);
+}
+
+.lobby-url b {
+  color: var(--ink);
+}
+
+.lobby-auto {
+  margin: 4px 0 8px;
+}
+
+.skill-card.compact {
+  min-width: 96px;
+  padding: 6px 8px;
+}
+
+.skill-card.compact span {
+  display: none;
 }

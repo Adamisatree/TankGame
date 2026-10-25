@@ -18,7 +18,13 @@ export interface LanHandlers {
   /** Host side: input from a guest, tagged with the seat it came from. */
   onInput?: (input: TankInput, from: string) => void;
   /** Everyone: the current player list (order = seat order). */
-  onRoster?: (players: { id: string; team: number; skill: string; host: boolean }[], capacity: number) => void;
+  onRoster?: (
+    players: { id: string; team: number; skill: string; host: boolean; ready?: boolean; name?: string }[],
+    capacity: number,
+    info: { started: boolean; mode: 'ffa' | 'team'; host: string | null; config: Record<string, unknown> | null }
+  ) => void;
+  /** The host started the match. */
+  onBegin?: (info: { mode: 'ffa' | 'team'; config: Record<string, unknown> | null }) => void;
   /** Everyone: the room's shared rules, as set by the host. */
   onConfig?: (config: MatchConfig, tuning?: Record<string, number>) => void;
   /** Our own seat in the room. */
@@ -169,6 +175,10 @@ export class LanClient {
           const hostTuning = raw.tuning && typeof raw.tuning === 'object' ? (raw.tuning as Record<string, number>) : undefined;
           this.handlers.onConfig?.({
             mode: raw.mode === 'team' ? 'team' : 'ffa',
+            winCondition:
+              raw.winCondition === 'kills' || raw.winCondition === 'time' || raw.winCondition === 'both'
+                ? raw.winCondition
+                : DEFAULT_MATCH.winCondition,
             capacity: num(raw.capacity, DEFAULT_MATCH.capacity),
             killTarget: num(raw.killTarget, DEFAULT_MATCH.killTarget),
             timeLimit: num(raw.timeLimit, DEFAULT_MATCH.timeLimit),
@@ -178,7 +188,18 @@ export class LanClient {
           break;
         }
         case 'roster':
-          this.handlers.onRoster?.(msg.players ?? [], msg.capacity ?? 0);
+          this.handlers.onRoster?.(msg.players ?? [], msg.capacity ?? 0, {
+            started: !!msg.started,
+            mode: msg.mode === 'team' ? 'team' : 'ffa',
+            host: msg.host ?? null,
+            config: (msg.config as Record<string, unknown> | undefined) ?? null,
+          });
+          break;
+        case 'begin':
+          this.handlers.onBegin?.({
+            mode: msg.mode === 'team' ? 'team' : 'ffa',
+            config: (msg.config as Record<string, unknown> | undefined) ?? null,
+          });
           break;
         case 'bye':
           this.handlers.onLog?.('连接结束');
@@ -220,6 +241,39 @@ export class LanClient {
         this.setStatus('closed', '连接已断开');
       }
     };
+  }
+
+  /** Lobby: announce what this seat picked / whether it is ready. */
+  setSkill(skill: string): void {
+    this.skill = skill;
+    this.sendRaw({ t: 'skill', skill });
+  }
+
+  setReady(ready: boolean): void {
+    this.sendRaw({ t: 'ready', ready });
+  }
+
+  setTeam(id: string, team: number): void {
+    this.sendRaw({ t: 'team', id, team });
+  }
+
+  autoTeams(): void {
+    this.sendRaw({ t: 'auto-teams' });
+  }
+
+  /** Host only: start the match for everyone. */
+  begin(): void {
+    this.sendRaw({ t: 'begin' });
+  }
+
+  /** Raw envelope for lobby messages that are not HostMessages. */
+  private sendRaw(message: Record<string, unknown>): void {
+    const payload = JSON.stringify(message);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (this.pending.length < 20) this.pending.push(payload);
+      return;
+    }
+    this.ws.send(payload);
   }
 
   /** 30Hz guest → host. */

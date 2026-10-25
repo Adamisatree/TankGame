@@ -137,6 +137,8 @@ const room = {
   mode: 'ffa',
   config: null,
   nextId: 2,
+  /** True once the host has started a match; a new join drops back to lobby. */
+  started: false,
 };
 let totalPlayers = 0;
 let currentPort = 0;
@@ -160,7 +162,14 @@ function broadcast(msg, exceptWs = null) {
 function roster() {
   const players = [];
   for (const [id, ws] of room.players) {
-    players.push({ id, skill: ws.skill ?? '', team: ws.team ?? 0, host: id === 'p1' });
+    players.push({
+      id,
+      name: ws.name || `P${id.replace(/^p/, '')}`,
+      skill: ws.skill ?? '',
+      team: ws.team ?? 0,
+      ready: id === 'p1' ? true : !!ws.ready,
+      host: id === 'p1',
+    });
   }
   return {
     t: 'roster',
@@ -168,6 +177,8 @@ function roster() {
     capacity: room.capacity,
     mode: room.mode,
     host: players.find((p) => p.host)?.id ?? null,
+    started: room.started,
+    config: room.config,
   };
 }
 
@@ -175,6 +186,10 @@ function teamForSeat(seat) {
   return room.mode === 'team' ? seat % 2 : seat;
 }
 
+/**
+ * Rebuilds teams from seat order. Only used when the host asks for auto
+ * balance – hand-picked teams (`team` messages) are kept as they are.
+ */
 function refreshTeams() {
   let seat = 0;
   for (const ws of room.players.values()) {
@@ -184,8 +199,16 @@ function refreshTeams() {
 }
 
 function announceRoster() {
-  refreshTeams();
+  // Teams are sticky: a host's hand-picked sides must survive every roster
+  // broadcast. New seats get a sensible default at join time instead.
   broadcast(roster());
+}
+
+/** Least-populated team, so a fresh seat keeps the sides roughly even. */
+function balancedTeam() {
+  const counts = [0, 0];
+  for (const ws of room.players.values()) counts[(ws.team ?? 0) === 1 ? 1 : 0] += 1;
+  return counts[0] <= counts[1] ? 0 : 1;
 }
 
 /** Legacy 1v1 pairing messages, kept so older clients (and the LAN tests) work. */
@@ -263,6 +286,8 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           ws.playerId = 'p1';
           ws.role = 'host';
           if (!previous) totalPlayers += 1;
+          ws.team = 0;
+          ws.ready = true;
           room.players.set('p1', ws);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
@@ -279,8 +304,13 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         const id = `p${room.nextId++}`;
         ws.playerId = id;
         ws.role = 'guest';
+        ws.team = room.mode === 'team' ? balancedTeam() : 0;
+        ws.ready = false;
         totalPlayers += 1;
         room.players.set(id, ws);
+        // Someone walked into the room: back to the lobby so everyone can
+        // pick sides and skills before the next match.
+        room.started = false;
         send(ws, {
           t: 'joined',
           role: 'guest',
@@ -301,9 +331,19 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       if (msg.t === 'config') {
         if (ws.role !== 'host') return;
         const capacity = Math.max(2, Math.min(10, Number(msg.capacity) || room.capacity));
+        const previousMode = room.mode;
         room.capacity = capacity;
         room.mode = msg.mode === 'team' ? 'team' : 'ffa';
         room.config = { ...msg, capacity };
+        if (room.mode !== previousMode) {
+          // Switching to team mode with everyone on team 0 is useless, so give
+          // the seats an even split as a starting point.
+          let seat = 0;
+          for (const player of room.players.values()) {
+            player.team = room.mode === 'team' ? seat % 2 : 0;
+            seat += 1;
+          }
+        }
         announceRoster();
         // Everyone needs the same rules, not just the roster.
         broadcast({ t: 'config', config: room.config });
@@ -320,6 +360,47 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       // Host → everyone: snapshots, level changes, match events.
       if (msg.t === 'state' || msg.t === 'start' || msg.t === 'restart' || msg.t === 'level' || msg.t === 'event') {
         if (ws.role === 'host') broadcast(msg, ws);
+        return;
+      }
+
+      // ---- lobby: each player owns their skill and ready state; the host owns
+      // teams and the start button.
+      if (msg.t === 'skill') {
+        if (!ws.playerId) return;
+        if (typeof msg.skill === 'string') ws.skill = msg.skill.slice(0, 24);
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'ready') {
+        if (!ws.playerId || ws.role === 'host') return;
+        ws.ready = !!msg.ready;
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'team') {
+        if (ws.role !== 'host') return;
+        const target = room.players.get(String(msg.id ?? ''));
+        if (!target) return;
+        target.team = Math.max(0, Math.min(9, Number(msg.team) || 0));
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'auto-teams') {
+        if (ws.role !== 'host') return;
+        refreshTeams();
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'begin') {
+        if (ws.role !== 'host') return;
+        room.started = true;
+        // Everyone (host included) learns the room is live.
+        broadcast({ t: 'begin', config: room.config, roster: roster().players, mode: room.mode });
+        announceRoster();
         return;
       }
 

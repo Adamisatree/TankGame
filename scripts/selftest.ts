@@ -388,7 +388,15 @@ check('reset restores the defaults', getBindings().solo.fire === defaults.solo.f
   check('the dead do not take damage', !R.canDamage(me, { ...mate, alive: false }, { friendlyFire: true, selfDamage: true }));
 
   // Match outcomes.
-  const cfg = { mode: 'ffa' as const, capacity: 6, killTarget: 10, timeLimit: 300, friendlyFire: false, selfDamage: true };
+  const cfg = {
+    mode: 'ffa' as const,
+    winCondition: 'both' as const,
+    capacity: 6,
+    killTarget: 10,
+    timeLimit: 300,
+    friendlyFire: false,
+    selfDamage: true,
+  };
   const line = (id: string, kills: number, team = 0) => ({ id, team, kills, deaths: 0, hp: 100, connected: true });
   check('no winner below the kill target', R.evaluateMatch([line('p1', 3), line('p2', 4)], cfg, 10).kind === 'running');
   const killWin = R.evaluateMatch([line('p1', 10), line('p2', 4)], cfg, 10);
@@ -398,6 +406,15 @@ check('reset restores the defaults', getBindings().solo.fire === defaults.solo.f
   const tie = R.evaluateMatch([line('p1', 4), line('p2', 4)], cfg, 300);
   check('time up on equal kills is a draw', tie.kind === 'draw');
   const teamCfg = { ...cfg, mode: 'team' as const, killTarget: 10 };
+
+  // v1.4 end conditions: unlimited kills, clock-only, kills-only.
+  const unlimited = { ...cfg, winCondition: 'time' as const, killTarget: 0, timeLimit: 300 };
+  check('kill target 0 never ends the match on kills', R.evaluateMatch([line('p1', 99), line('p2', 1)], unlimited, 10).kind === 'running');
+  check('a clock-only match still ends on time', R.evaluateMatch([line('p1', 99), line('p2', 1)], unlimited, 300).kind === 'win');
+  const killsOnly = { ...cfg, winCondition: 'kills' as const, timeLimit: 300 };
+  check('kills-only mode ignores the clock', R.evaluateMatch([line('p1', 3), line('p2', 1)], killsOnly, 999).kind === 'running');
+  check('kills-only mode still ends on the target', R.evaluateMatch([line('p1', 10), line('p2', 1)], killsOnly, 10).kind === 'win');
+  check('unlimited is offered to the host', R.KILL_TARGET_CHOICES.includes(0));
   const teamWin = R.evaluateMatch([line('p1', 6, 0), line('p2', 4, 0), line('p3', 3, 1), line('p4', 3, 1)], teamCfg, 30);
   check('team kills are summed', teamWin.kind === 'win' && teamWin.winners.includes('p1') && teamWin.winners.includes('p2'));
   const teamTie = R.evaluateMatch([line('p1', 5, 0), line('p3', 5, 1)], teamCfg, 300);

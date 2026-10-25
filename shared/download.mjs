@@ -5,9 +5,8 @@
  * HTTP servers: the fallback chain, the truncation check and the SHA-256 gate
  * are exactly the bits that break silently in the wild.
  */
-import { createHash } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdir, open, rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 /**
@@ -33,9 +32,35 @@ export async function downloadWithFallback(url, destPath, options = {}) {
   /** @type {string[]} */
   const errors = [];
   await mkdir(dirname(destPath), { recursive: true });
-  const partPath = `${destPath}.part`;
+
+  /**
+   * Open a temp file next to the destination.
+   *
+   * Windows hands out EPERM/EBUSY when antivirus or another process still holds
+   * a file we just closed, and it does so for *the same path* every time. So:
+   * a unique name per attempt, plus a short retry loop. The old code reused
+   * `<dest>.part` for every mirror, which is exactly how players ended up with
+   * "EPERM: operation not permitted, open '…setup.exe.part'".
+   */
+  const openPart = async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const partPath = `${destPath}.${randomBytes(4).toString('hex')}.part`;
+      try {
+        const handle = await open(partPath, 'wx');
+        return { handle, partPath };
+      } catch (err) {
+        const code = err && err.code;
+        if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw err;
+        await new Promise((resolve) => setTimeout(resolve, 120 + attempt * 180));
+      }
+    }
+    // Last resort: a sibling name with a timestamp, never reused.
+    const partPath = `${destPath}.${Date.now()}.part`;
+    return { handle: await open(partPath, 'wx'), partPath };
+  };
 
   for (const candidate of candidates) {
+    let partPath = '';
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -53,8 +78,9 @@ export async function downloadWithFallback(url, destPath, options = {}) {
       const hash = createHash('sha256');
       let received = 0;
 
-      await rm(partPath, { force: true });
-      const out = createWriteStream(partPath);
+      const opened = await openPart();
+      const handle = opened.handle;
+      partPath = opened.partPath;
       try {
         const reader = res.body.getReader();
         for (;;) {
@@ -63,17 +89,18 @@ export async function downloadWithFallback(url, destPath, options = {}) {
           if (!value) continue;
           received += value.byteLength;
           hash.update(value);
-          if (!out.write(Buffer.from(value))) {
-            await new Promise((resolve) => out.once('drain', resolve));
-          }
+          await handle.write(Buffer.from(value));
           onProgress?.({ received, total, url: candidate.url, id: candidate.id });
         }
-        await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())));
+        await handle.close();
       } catch (streamError) {
-        // A proxy that hangs up mid-file leaves the handle open; close it before
-        // the next candidate writes to the same .part path (Windows locks files).
-        out.destroy();
-        if (!out.closed) await new Promise((resolve) => out.once('close', resolve));
+        // Always close the handle, or the next candidate hits a locked file.
+        try {
+          await handle.close();
+        } catch {
+          /* already closed */
+        }
+        await rm(partPath, { force: true }).catch(() => {});
         throw streamError;
       }
 
@@ -91,17 +118,27 @@ export async function downloadWithFallback(url, destPath, options = {}) {
         continue;
       }
 
-      await rm(destPath, { force: true });
-      await rename(partPath, destPath);
+      // A half-written previous copy may still be locked; retry the swap.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          await rm(destPath, { force: true });
+          await rename(partPath, destPath);
+          break;
+        } catch (renameError) {
+          const code = renameError && renameError.code;
+          if (attempt === 3 || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw renameError;
+          await new Promise((resolve) => setTimeout(resolve, 150 + attempt * 250));
+        }
+      }
       return { ok: true, path: destPath, sha256, size: received, source: candidate, errors };
     } catch (err) {
       errors.push(`${candidate.id}: ${err instanceof Error ? err.message : String(err)}`);
+      if (partPath) await rm(partPath, { force: true }).catch(() => {});
     } finally {
       clearTimeout(timer);
     }
   }
 
-  await rm(partPath, { force: true });
   return { ok: false, path: '', sha256: '', size: 0, source: null, errors };
 }
 

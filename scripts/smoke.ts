@@ -237,6 +237,10 @@ type Poked = {
   pickups: { kind: string; x: number; y: number; respawn: number; pop: number }[];
   keys: Map<string, { keyCode: number; isDown: boolean }>;
   useSkill: (tank: unknown) => boolean;
+  startRoomMatch: () => void;
+  roster: { id: string; team: number; skill: string; ready?: boolean }[];
+  /** Anything else the tests poke at. */
+  [key: string]: unknown;
   skillP1: string;
   connected: boolean;
   skillReadyAt: number;
@@ -421,6 +425,12 @@ await new Promise<void>((resolve, reject) => {
   guest.once('error', reject);
 });
 guest.send(JSON.stringify({ t: 'join', role: 'guest' }));
+await wait(500);
+// v1.4: newcomers land in the room lobby; the host starts the match.
+const hostPhase = () => (poke as any).phase as string;
+check('the room opens in a lobby', hostPhase() === 'lobby', hostPhase());
+poke.startRoomMatch();
+await wait(500);
 
 const snapSeen = () => guestMsgs.filter((m) => m.t === 'state');
 await wait(700);
@@ -533,6 +543,9 @@ await new Promise<void>((resolve, reject) => {
   guest2.once('error', reject);
 });
 guest2.send(JSON.stringify({ t: 'join', role: 'guest' }));
+await wait(500);
+// A new seat drops the room back to the lobby until the host starts again.
+poke.startRoomMatch();
 await wait(700);
 check('the host renders a tank per seat', heatProbe.tanks().length >= 3, `tanks=${heatProbe.tanks().length}`);
 check(
@@ -548,6 +561,18 @@ guest2Msgs.length = 0;
 guest2.close();
 await wait(500);
 check('a departing seat is removed from the field', heatProbe.tanks().length === 2 && !heatProbe.byId('p3'), `tanks=${heatProbe.tanks().length}`);
+
+// --- every tank must fit where it spawns (no materialising inside a wall).
+{
+  const insideAny = (tank: { x: number; y: number }) =>
+    poke.layout.walls.some(
+      (box) =>
+        tank.x > box.x - 18 && tank.x < box.x + box.w + 18 && tank.y > box.y - 18 && tank.y < box.y + box.h + 18
+    );
+  const allTanks = (poke as any).tanks() as { x: number; y: number }[];
+  const stuck = allTanks.filter((tank) => insideAny(tank));
+  check('nobody spawns inside a wall', stuck.length === 0, `${stuck.length} stuck`);
+}
 
 // Host can end the match / restart and the guest is told.
 guestMsgs.length = 0;
