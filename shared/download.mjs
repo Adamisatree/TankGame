@@ -55,19 +55,27 @@ export async function downloadWithFallback(url, destPath, options = {}) {
 
       await rm(partPath, { force: true });
       const out = createWriteStream(partPath);
-      const reader = res.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        received += value.byteLength;
-        hash.update(value);
-        if (!out.write(Buffer.from(value))) {
-          await new Promise((resolve) => out.once('drain', resolve));
+      try {
+        const reader = res.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          received += value.byteLength;
+          hash.update(value);
+          if (!out.write(Buffer.from(value))) {
+            await new Promise((resolve) => out.once('drain', resolve));
+          }
+          onProgress?.({ received, total, url: candidate.url, id: candidate.id });
         }
-        onProgress?.({ received, total, url: candidate.url, id: candidate.id });
+        await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())));
+      } catch (streamError) {
+        // A proxy that hangs up mid-file leaves the handle open; close it before
+        // the next candidate writes to the same .part path (Windows locks files).
+        out.destroy();
+        if (!out.closed) await new Promise((resolve) => out.once('close', resolve));
+        throw streamError;
       }
-      await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())));
 
       const sha256 = hash.digest('hex');
       if (expectedSha && expectedSha !== sha256) {

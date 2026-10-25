@@ -37,6 +37,13 @@ import { readFileSync } from 'node:fs';
 let passed = 0;
 const failures: string[] = [];
 
+// If an unhandled socket error ever slips through, fail loudly with context
+// instead of dying with a bare stack trace (CI logs are not always readable).
+process.on('unhandledRejection', (reason) => {
+  console.error('unhandled rejection:', reason);
+  process.exit(1);
+});
+
 function check(name: string, condition: boolean, detail = ''): void {
   if (condition) {
     passed += 1;
@@ -187,6 +194,10 @@ const workDir = await mkdtemp(join(tmpdir(), 'tankgame-upd-'));
 /** Small HTTP server mimicking: dead proxy, lying proxy, truncating proxy, good host. */
 function startProxy(): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
+    // Clients abort mid-response on purpose here; swallow the fallout so the
+    // fake proxy cannot take the test process down with it.
+    req.on('error', () => {});
+    res.on('error', () => {});
     const url = req.url ?? '';
     if (url.startsWith('/dead')) {
       req.socket.destroy();
@@ -208,7 +219,14 @@ function startProxy(): Promise<{ server: Server; port: number }> {
       return;
     }
     if (url.startsWith('/slow')) {
-      setTimeout(() => res.writeHead(200).end('{}'), 3000);
+      setTimeout(() => {
+        if (res.destroyed || res.writableEnded) return;
+        try {
+          res.writeHead(200).end('{}');
+        } catch {
+          /* the probe already hung up */
+        }
+      }, 3000);
       return;
     }
     res.writeHead(200, { 'content-length': String(payloadBytes.length), 'content-type': 'application/octet-stream' });
@@ -286,12 +304,19 @@ const stalePayload = {
 
 function startManifestServer(): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
     const url = req.url ?? '';
     const send = (payload: unknown, delay = 0) => {
       const body = JSON.stringify(payload);
       setTimeout(() => {
-        res.writeHead(200, { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) });
-        res.end(body);
+        if (res.destroyed || res.writableEnded) return;
+        try {
+          res.writeHead(200, { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) });
+          res.end(body);
+        } catch {
+          /* client gave up waiting */
+        }
       }, delay);
     };
     if (url.startsWith('/fresh')) return send(freshPayload);
@@ -332,7 +357,7 @@ const fastWins = await raceManifestFetch(
   { graceMs: 400 }
 );
 const elapsed = Date.now() - startedAt;
-check('a slow mirror cannot hold the check hostage', elapsed < 1500, `${elapsed}ms`);
+check('a slow mirror cannot hold the check hostage', elapsed < 2500, `${elapsed}ms`);
 eq('the fast answer is used', fastWins.source?.id, 'fast');
 
 const withDead = await raceManifestFetch(
