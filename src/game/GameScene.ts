@@ -599,6 +599,21 @@ export class GameScene extends Phaser.Scene {
     this.repaintLobby();
   }
 
+  /**
+   * Host: push the room's map again. A guest that lost its ack (or walked in
+   * mid-push) would otherwise block the start forever.
+   */
+  resendRoomMap(): void {
+    if (this.lanRole !== 'host' || !this.lan) return;
+    const map = getMap(this.pickedMapId());
+    if (!map) return;
+    this.lan.sendMap(map);
+    this.mapReady = [];
+    this.mapWaiting = this.roster.filter((seat) => seat.id !== 'p1').map((seat) => seat.id);
+    this.showBanner('已重发地图，等待确认…', 1.6);
+    this.repaintLobby();
+  }
+
   // ------------------------------------------------------------------ maps
 
   /** The custom map this host picked for the room, or '' for a built-in. */

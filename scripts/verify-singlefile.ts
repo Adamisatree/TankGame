@@ -267,6 +267,8 @@ const checks: [string, boolean, string?][] = [
   ['the map format marker is compiled in', html.includes('tankmap')],
   ['the editor exports the map file type', html.includes('tankmap.json')],
   ['the room shows the map and its sync state', html.includes('lobby-map') && html.includes('地图确认')],
+  ['the host can re-send the map when an ack is lost', html.includes('重发地图')],
+  ['the editor card is not tilted (pointer must line up)', /#card\.wide\s*\{[^}]*transform:\s*none/.test(html)],
   ['map acknowledgements are part of the protocol', html.includes('map-ack') && html.includes('map-pending')],
   // v1.5: the editor actually opens, paints and saves from the menu.
   ['the menu offers a new-map button', !!mapNewButton],

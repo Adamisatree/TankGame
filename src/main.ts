@@ -1050,6 +1050,11 @@ function lobbyMapBlock(state: Extract<OverlayState, { kind: 'lobby' }>): string 
       <b class="lobby-map-name">${escapeHtml(map.name)}</b>
       <span class="lobby-map-tag">${map.custom ? '房主自建' : '内置'}</span>
       ${progress ? `<span class="lobby-map-sync">${escapeHtml(progress)}</span>` : ''}
+      ${
+        state.isHost && needSync && !map.synced
+          ? '<button type="button" class="chip tiny" id="lobby-map-resend">重发地图</button>'
+          : ''
+      }
     </div>`;
 }
 
@@ -1079,6 +1084,11 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
       state.roster = state.roster.map((seat) => (seat.id === id ? { ...seat, team } : seat));
       repaint();
     });
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-map-resend')?.addEventListener('click', () => {
+    sound.ui();
+    scene.resendRoomMap();
   });
 
   root.querySelector<HTMLButtonElement>('#lobby-auto-teams')?.addEventListener('click', () => {

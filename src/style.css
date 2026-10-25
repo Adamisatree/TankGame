@@ -1393,6 +1393,10 @@ a.chip.ghost {
   max-width: min(1120px, 96vw);
   max-height: calc(100vh - 28px);
   padding: 22px 26px 20px;
+  /* No sketch tilt in the editor: the canvas must line up with the pointer,
+     otherwise painting lands a cell off near the edges. */
+  transform: none;
+  animation: none;
 }
 
 .editor {
