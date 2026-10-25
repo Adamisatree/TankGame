@@ -1,18 +1,36 @@
 import Phaser from 'phaser';
 import { COLORS, FONT } from './config';
 import { MAX_HP } from './rules';
+import { afterShot, canFire, coldHeat, cool, type HeatState } from './heat';
 import { Sketch } from './Sketch';
 
-export type TankId = 'p1' | 'p2' | 'enemy';
+/**
+ * v1.3 multiplayer: a match can hold p1…p10, so the id is just a string. The
+ * three classic ids keep their usual colours; everything else is team-coloured.
+ */
+export type TankId = string;
 
 /** The gun is mounted on the hull: it can only swing this far off the nose. */
 export const TURRET_LIMIT = Phaser.Math.DegToRad(72);
 
-const COLORS_BY_ID: Record<TankId, number> = {
+const COLORS_BY_ID: Record<string, number> = {
   p1: COLORS.player,
   p2: COLORS.player2,
   enemy: COLORS.enemy,
+  p3: COLORS.player,
+  p4: COLORS.enemy,
+  p5: 0xd4a72e,
+  p6: 0x6f5aa8,
+  p7: 0x3f9c8f,
+  p8: 0xd4552e,
+  p9: 0x2f6fb5,
+  p10: 0xb8873f,
 };
+
+/** Per-seat colour in FFA – each of the ten seats gets its own pencil. */
+export function seatColor(id: string): number {
+  return COLORS_BY_ID[id] ?? COLORS.player;
+}
 
 /** Team colours used by LAN team mode / FFA fallback. */
 export const TEAM_COLORS = [COLORS.player, COLORS.player2, 0xd4a72e, COLORS.enemy];
@@ -21,7 +39,7 @@ export function teamColor(team: number): number {
   return TEAM_COLORS[(((team ?? 0) % TEAM_COLORS.length) + TEAM_COLORS.length) % TEAM_COLORS.length];
 }
 
-const LABEL_BY_ID: Record<TankId, string> = {
+const LABEL_BY_ID: Record<string, string> = {
   p1: 'P1',
   p2: 'P2',
   enemy: 'CPU',
@@ -72,6 +90,8 @@ export class Tank {
   team = 0;
   /** False while waiting to respawn. */
   awaitingRespawn = false;
+  /** Barrel heat: rises per shot, bleeds off, locks the gun at the cap. */
+  heat: HeatState = coldHeat();
 
   // ---- temporary states, all absolute timestamps (ms on the scene clock)
   /** Pickup shield: blocks damage. */
@@ -93,10 +113,18 @@ export class Tank {
   private bar: Sketch;
   private tag: Phaser.GameObjects.Text;
 
-  constructor(scene: Phaser.Scene, x: number, y: number, angle: number, id: TankId, depth = 20) {
+  constructor(
+    scene: Phaser.Scene,
+    x: number,
+    y: number,
+    angle: number,
+    id: TankId,
+    depth = 20,
+    color?: number
+  ) {
     this.scene = scene;
     this.id = id;
-    this.color = COLORS_BY_ID[id];
+    this.color = color ?? COLORS_BY_ID[id] ?? COLORS.player;
     this.x = x;
     this.y = y;
     this.bodyAngle = angle;
@@ -109,7 +137,7 @@ export class Tank {
     // Health bar floats above the tank.
     this.bar = new Sketch(scene, depth + 3);
     this.tag = scene.add
-      .text(x, y - 38, LABEL_BY_ID[id], {
+      .text(x, y - 38, LABEL_BY_ID[id] ?? id.toUpperCase(), {
         fontFamily: FONT,
         fontSize: '15px',
         color: `#${this.color.toString(16).padStart(6, '0')}`,
@@ -236,6 +264,25 @@ export class Tank {
 
   shielded(now = this.scene.time.now): boolean {
     return now < this.shieldUntil || now < this.invulnerableUntil;
+  }
+
+  /** True while the barrel is cool enough to shoot. */
+  canShoot(): boolean {
+    return canFire(this.heat);
+  }
+
+  /** Every shot adds heat; the shot that fills the bar locks the gun. */
+  addHeat(): void {
+    this.heat = afterShot(this.heat);
+  }
+
+  coolDown(dt: number): void {
+    this.heat = cool(this.heat, dt);
+  }
+
+  /** Respawning / new match: barrel back to cold. */
+  coldBarrel(): void {
+    this.heat = coldHeat();
   }
 
   /**
