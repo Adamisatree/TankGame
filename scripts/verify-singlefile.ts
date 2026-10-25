@@ -111,6 +111,10 @@ lanButton?.click();
 await new Promise((r) => setTimeout(r, 150));
 const hostRoom = doc.getElementById('lan-room');
 const roleButtons = doc.querySelectorAll('[data-lanrole]');
+// v1.3 rules panel only exists in the LAN panel, so sample it here.
+const capacityButtons = doc.querySelectorAll('[data-match="capacity"]').length;
+const hasFriendly = !!doc.querySelector('[data-match="friendlyFire"]');
+const hasSelf = !!doc.querySelector('[data-match="selfDamage"]');
 
 const guestButton = doc.querySelector('[data-lanrole="guest"]') as HTMLElement | null;
 guestButton?.click();
@@ -171,7 +175,10 @@ const checks: [string, boolean, string?][] = [
   ['the picker includes a random option', !!doc.querySelector('[data-map="random"]')],
   ['map previews draw from level data', doc.querySelectorAll('.map-svg').length >= 8],
   ['all four summoner skills are offered', doc.querySelectorAll('[data-skill]').length === 4],
-  ['the key editor lists every action', doc.querySelectorAll('.key-btn').length >= 9, `${doc.querySelectorAll('.key-btn').length}`],
+  ['the key editor lists every action', doc.querySelectorAll('.key-btn').length >= 7, `${doc.querySelectorAll('.key-btn').length}`],
+  ['the two gun-trim keys are gone', !('aimLeft' in ({} as Record<string, number>)) && doc.querySelectorAll('.key-btn').length < 9],
+  ['the rules panel offers 2–10 players', capacityButtons === 7, `${capacityButtons}`],
+  ['friendly fire and self damage are separate switches', hasFriendly && hasSelf],
   ['clicking a key starts capture', captureStarted],
   ['pressing a key rebinds it', rebindLabel === 'Z', rebindLabel],
   ['capture mode ends after rebinding', !!firstKey && !firstKey.classList.contains('capturing')],

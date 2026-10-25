@@ -8,6 +8,12 @@ export interface TankSpawn {
 }
 
 export interface Level {
+  /** v1.3: multiplayer levels may be larger than the screen (world pixels). */
+  world?: { w: number; h: number };
+  /** v1.3: respawn points for FFA / team matches. */
+  spawns?: { x: number; y: number; angle: number }[];
+  /** v1.3: how many players this map is comfortable with. */
+  seats?: number[];
   /** Stable id, used by the menu and by saved selections. */
   id: string;
   name: string;
@@ -40,6 +46,8 @@ export interface Layout {
   crates: Box[];
   player: TankSpawn;
   enemy: TankSpawn;
+  /** v1.3 multiplayer: every respawn point, best-away-first chosen at death. */
+  spawns: TankSpawn[];
 }
 
 const box = (x: number, y: number, w: number, h: number): Box => ({ x, y, w, h });
@@ -90,9 +98,13 @@ export function buildLayout(level: Level, rect: PlayRect, thickness = 14): Layou
     angle: s.angle,
   });
 
+  const fallbackSpawns: TankSpawn[] = [level.player, level.enemy];
+  const spawnPoints = (level.spawns && level.spawns.length >= 2 ? level.spawns : fallbackSpawns).map(place);
+
   return {
     rect,
     walls,
+    spawns: spawnPoints,
     crates: level.crates.map(project),
     player: place(level.player),
     enemy: place(level.enemy),
@@ -282,7 +294,147 @@ export const LEVELS: Level[] = [
     enemyGrace: 2.4,
     enemyReload: 1.9,
   },
+  // ------------------------------------------------------------ multiplayer
+  // v1.3: bigger arenas for 2–10 players. `world` is larger than the screen, so
+  // the camera follows the local tank; `spawns` gives every death somewhere
+  // sensible to come back (always more points than seats).
+  {
+    id: 'yard',
+    name: 'M1 · 后院',
+    blurb: '2–3 人的开阔后院：两排矮墙、四角栈板，打起来节奏最快。',
+    tags: ['multi', 'open'],
+    world: { w: 1800, h: 1200 },
+    seats: [2, 3, 4],
+    walls: sym(box(0.22, 0.3, 0.16, 0.05), box(0.3, 0.62, 0.05, 0.14), box(0.45, 0.45, 0.1, 0.1)),
+    crates: [box(0.4, 0.24, 0.05, 0.05), box(0.55, 0.7, 0.05, 0.05), box(0.15, 0.5, 0.05, 0.05)],
+    pickups: [
+      { x: 0.5, y: 0.34 },
+      { x: 0.2, y: 0.2 },
+      { x: 0.8, y: 0.8 },
+      { x: 0.5, y: 0.18 },
+      { x: 0.5, y: 0.82 },
+      { x: 0.18, y: 0.62 },
+    ],
+    player: { x: 0.5, y: 0.9, angle: UP },
+    enemy: { x: 0.5, y: 0.1, angle: DOWN },
+    spawns: [
+      { x: 0.5, y: 0.9, angle: UP },
+      { x: 0.5, y: 0.1, angle: DOWN },
+      { x: 0.1, y: 0.5, angle: 0 },
+      { x: 0.9, y: 0.5, angle: Math.PI },
+      { x: 0.2, y: 0.2, angle: Math.PI / 4 },
+      { x: 0.8, y: 0.8, angle: -Math.PI * 0.75 },
+    ],
+    enemyGrace: 2.4,
+    enemyReload: 1.9,
+  },
+  {
+    id: 'depot',
+    name: 'M2 · 货场',
+    blurb: '4–6 人的货场：三列集装箱把场地切成走廊，绕后特别赚。',
+    tags: ['multi', 'lanes'],
+    world: { w: 2400, h: 1600 },
+    seats: [4, 5, 6],
+    walls: sym(
+      box(0.16, 0.22, 0.05, 0.3),
+      box(0.3, 0.16, 0.05, 0.28),
+      box(0.16, 0.62, 0.3, 0.05),
+      box(0.36, 0.4, 0.16, 0.05)
+    ),
+    crates: [
+      box(0.26, 0.5, 0.05, 0.05),
+      box(0.6, 0.5, 0.05, 0.05),
+      box(0.46, 0.28, 0.05, 0.05),
+      box(0.46, 0.68, 0.05, 0.05),
+    ],
+    pickups: [
+      { x: 0.5, y: 0.5 },
+      { x: 0.5, y: 0.2 },
+      { x: 0.5, y: 0.8 },
+      { x: 0.2, y: 0.56 },
+      { x: 0.8, y: 0.44 },
+      { x: 0.26, y: 0.3 },
+      { x: 0.74, y: 0.7 },
+    ],
+    player: { x: 0.5, y: 0.92, angle: UP },
+    enemy: { x: 0.5, y: 0.08, angle: DOWN },
+    spawns: [
+      { x: 0.5, y: 0.92, angle: UP },
+      { x: 0.5, y: 0.08, angle: DOWN },
+      { x: 0.08, y: 0.5, angle: 0 },
+      { x: 0.92, y: 0.5, angle: Math.PI },
+      { x: 0.22, y: 0.22, angle: Math.PI / 4 },
+      { x: 0.78, y: 0.78, angle: -Math.PI * 0.75 },
+      { x: 0.78, y: 0.22, angle: Math.PI * 0.75 },
+      { x: 0.22, y: 0.78, angle: -Math.PI / 4 },
+    ],
+    enemyGrace: 2.4,
+    enemyReload: 1.9,
+  },
+  {
+    id: 'field',
+    name: 'M3 · 大战场',
+    blurb: '8–10 人的大图：中央废墟加四周散点，够跑、够绕，也够乱。',
+    tags: ['multi', 'large'],
+    world: { w: 3200, h: 2200 },
+    seats: [8, 10],
+    walls: sym(
+      box(0.3, 0.3, 0.16, 0.05),
+      box(0.3, 0.3, 0.05, 0.16),
+      box(0.14, 0.12, 0.05, 0.2),
+      box(0.42, 0.14, 0.16, 0.05),
+      box(0.2, 0.44, 0.12, 0.05)
+    ),
+    crates: [
+      box(0.5, 0.5, 0.05, 0.05),
+      box(0.34, 0.62, 0.05, 0.05),
+      box(0.66, 0.38, 0.05, 0.05),
+      box(0.24, 0.3, 0.05, 0.05),
+      box(0.76, 0.7, 0.05, 0.05),
+    ],
+    pickups: [
+      { x: 0.6, y: 0.5 },
+      { x: 0.5, y: 0.24 },
+      { x: 0.5, y: 0.76 },
+      { x: 0.12, y: 0.5 },
+      { x: 0.88, y: 0.5 },
+      { x: 0.26, y: 0.26 },
+      { x: 0.74, y: 0.74 },
+      { x: 0.74, y: 0.26 },
+      { x: 0.26, y: 0.74 },
+    ],
+    player: { x: 0.7, y: 0.9, angle: UP },
+    enemy: { x: 0.3, y: 0.1, angle: DOWN },
+    spawns: [
+      { x: 0.7, y: 0.9, angle: UP },
+      { x: 0.3, y: 0.1, angle: DOWN },
+      { x: 0.06, y: 0.5, angle: 0 },
+      { x: 0.94, y: 0.5, angle: Math.PI },
+      { x: 0.18, y: 0.18, angle: Math.PI / 4 },
+      { x: 0.82, y: 0.82, angle: -Math.PI * 0.75 },
+      { x: 0.82, y: 0.18, angle: Math.PI * 0.75 },
+      { x: 0.18, y: 0.82, angle: -Math.PI / 4 },
+      { x: 0.34, y: 0.5, angle: 0 },
+      { x: 0.66, y: 0.5, angle: Math.PI },
+      { x: 0.5, y: 0.34, angle: -Math.PI / 2 },
+      { x: 0.5, y: 0.66, angle: Math.PI / 2 },
+    ],
+    enemyGrace: 2.4,
+    enemyReload: 1.9,
+  },
 ];
+
+/** Maps built for many players (they carry a `world` bigger than the screen). */
+export const MULTI_LEVELS: Level[] = LEVELS.filter((level) => !!level.world);
+
+/** Best multiplayer map for a given head count. */
+export function levelForSeats(seats: number): Level {
+  const fitting = MULTI_LEVELS.filter((level) => (level.seats ?? [2]).includes(seats));
+  if (fitting.length) return fitting[0];
+  // In between seat counts (7, 9): take the largest map that is not oversized.
+  const sorted = [...MULTI_LEVELS].sort((a, b) => (a.seats?.[0] ?? 2) - (b.seats?.[0] ?? 2));
+  return sorted.find((level) => (level.seats?.[0] ?? 2) >= seats) ?? sorted[sorted.length - 1] ?? LEVELS[0];
+}
 
 export const DEFAULT_LEVEL_ID = LEVELS[0].id;
 

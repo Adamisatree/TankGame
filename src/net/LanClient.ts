@@ -21,6 +21,8 @@ export interface LanHandlers {
   /** The other player's summoner skill choice, announced when pairing. */
   onPeerSkill?: (skill: string) => void;
   onLog?: (line: string) => void;
+  /** The other side quit on purpose (not a dropped connection). */
+  onSurrender?: (by: string) => void;
 }
 
 /**
@@ -39,6 +41,8 @@ export class LanClient {
   private url: string;
   /** Summoner skill this machine picked; sent with the join message. */
   skill = '';
+  /** Messages queued while the socket was still connecting (e.g. a restart). */
+  private pending: string[] = [];
 
   constructor(role: NetRole, serverAddress: string, handlers: LanHandlers = {}) {
     this.role = role;
@@ -85,6 +89,14 @@ export class LanClient {
       );
       this.setStatus('waiting');
       this.handlers.onLog?.(`已连接 ${this.url}`);
+      // Anything asked for while we were still dialling goes out now.
+      for (const message of this.pending.splice(0)) {
+        try {
+          ws.send(message);
+        } catch {
+          /* socket died mid-flush */
+        }
+      }
     };
 
     ws.onmessage = (event) => {
@@ -109,6 +121,10 @@ export class LanClient {
           } catch {
             /* already gone */
           }
+          break;
+        case 'surrender':
+          // Relayed by the server when the other side quits on purpose.
+          this.handlers.onSurrender?.(msg.by);
           break;
         case 'joined':
           if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
@@ -184,8 +200,13 @@ export class LanClient {
   }
 
   send(message: HostMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.role !== 'host') return;
-    this.ws.send(JSON.stringify(message));
+    const payload = JSON.stringify(message);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Queue briefly: a restart fired right after connect() must not be lost.
+      if (this.pending.length < 20) this.pending.push(payload);
+      return;
+    }
+    this.ws.send(payload);
   }
 
   private clearRetry(): void {

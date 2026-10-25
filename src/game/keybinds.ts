@@ -7,7 +7,11 @@
  * local versus and LAN can each have their own layout.
  */
 
-export type SeatAction = 'up' | 'down' | 'left' | 'right' | 'fire' | 'aimLeft' | 'aimRight' | 'slow' | 'skill';
+/**
+ * v1.3 dropped the separate "swing the gun left/right" actions: turning the
+ * hull turns the gun with it, and the barrel only trims inside its arc.
+ */
+export type SeatAction = 'up' | 'down' | 'left' | 'right' | 'fire' | 'slow' | 'skill';
 export type GlobalAction = 'pause' | 'mute' | 'autoDodge';
 export type BindingContext = 'solo' | 'versus' | 'lan';
 
@@ -22,7 +26,7 @@ export interface BindingsFile {
   global: GlobalBindings;
 }
 
-export const SEAT_ACTIONS: SeatAction[] = ['up', 'down', 'left', 'right', 'fire', 'aimLeft', 'aimRight', 'slow', 'skill'];
+export const SEAT_ACTIONS: SeatAction[] = ['up', 'down', 'left', 'right', 'fire', 'slow', 'skill'];
 
 export const ACTION_LABEL: Record<SeatAction, string> = {
   up: '前进 / 加速',
@@ -30,9 +34,7 @@ export const ACTION_LABEL: Record<SeatAction, string> = {
   left: '左转',
   right: '右转',
   fire: '开火',
-  aimLeft: '炮口左调',
-  aimRight: '炮口右调',
-  slow: '慢速微调',
+  slow: '慢速微调（曲射/稳住）',
   skill: '召唤师技能',
 };
 
@@ -92,20 +94,21 @@ const ARROW_DRIVE = { up: K.UP, down: K.DOWN, left: K.LEFT, right: K.RIGHT };
 export function defaultBindings(): BindingsFile {
   return {
     version: 1,
-    solo: { ...WASD_DRIVE, fire: K.SPACE, aimLeft: K.Q, aimRight: K.E, slow: K.SHIFT, skill: K.F },
+    solo: { ...WASD_DRIVE, fire: K.SPACE, slow: K.SHIFT, skill: K.F },
     versus: {
-      p1: { ...WASD_DRIVE, fire: K.SPACE, aimLeft: K.Q, aimRight: K.E, slow: K.SHIFT, skill: K.R },
-      p2: { ...ARROW_DRIVE, fire: K.ENTER, aimLeft: K.COMMA, aimRight: K.PERIOD, slow: K.SHIFT, skill: K.SLASH },
+      p1: { ...WASD_DRIVE, fire: K.SPACE, slow: K.SHIFT, skill: K.R },
+      p2: { ...ARROW_DRIVE, fire: K.ENTER, slow: K.SHIFT, skill: K.SLASH },
     },
     lan: {
-      host: { ...WASD_DRIVE, fire: K.SPACE, aimLeft: K.Q, aimRight: K.E, slow: K.SHIFT, skill: K.F },
-      guest: { ...WASD_DRIVE, fire: K.SPACE, aimLeft: K.Q, aimRight: K.E, slow: K.SHIFT, skill: K.F },
+      host: { ...WASD_DRIVE, fire: K.SPACE, slow: K.SHIFT, skill: K.F },
+      guest: { ...WASD_DRIVE, fire: K.SPACE, slow: K.SHIFT, skill: K.F },
     },
     global: { pause: K.P, mute: K.M, autoDodge: K.G },
   };
 }
 
-const STORAGE_KEY = 'tankgame.bindings.v1';
+// v2: the aimLeft/aimRight actions are gone.
+const STORAGE_KEY = 'tankgame.bindings.v2';
 let current: BindingsFile | null = null;
 
 function sanitize(raw: unknown): BindingsFile {

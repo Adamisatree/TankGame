@@ -23,6 +23,7 @@ import {
   type SeatAction,
 } from './game/keybinds';
 import { DEFAULT_LAN_PORT } from './net/protocol';
+import { CAPACITY_CHOICES, KILL_TARGET_CHOICES, TIME_LIMIT_CHOICES } from './game/rules';
 import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
 import { APP_VERSION } from './version';
 import './update/types';
@@ -206,6 +207,60 @@ function lanPanel(): string {
         </div>
       </div>
       ${settings.lanRole === 'host' ? host : guest}
+      ${matchSettings()}
+    </div>`;
+}
+
+/** v1.3 pre-match rules: mode, head count, win conditions, damage switches. */
+function matchSettings(): string {
+  const m = settings.match;
+  const hostOnly = settings.lanRole !== 'host';
+  const chipRow = (name: 'capacity' | 'killTarget' | 'timeLimit', values: number[], labels: (v: number) => string): string =>
+    values
+      .map(
+        (value) =>
+          `<button type="button" class="chip ${Number(m[name as keyof typeof m]) === value ? 'on' : ''}"
+             data-match="${name}" data-value="${value}" ${hostOnly ? 'disabled' : ''}>${labels(value)}</button>`
+      )
+      .join('');
+
+  return `
+    <div class="match-panel">
+      <div class="setting-row">
+        <span class="setting-label">玩法</span>
+        <div class="segmented">
+          <button type="button" data-match="mode" data-value="ffa" class="${m.mode === 'ffa' ? 'on' : ''}" ${hostOnly ? 'disabled' : ''}>乱斗（各打各的）</button>
+          <button type="button" data-match="mode" data-value="team" class="${m.mode === 'team' ? 'on' : ''}" ${hostOnly ? 'disabled' : ''}>团队（红蓝对抗）</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">人数上限</span>
+        <div class="chip-row">${chipRow('capacity', CAPACITY_CHOICES, (v) => `${v} 人`)}</div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">人头目标</span>
+        <div class="chip-row">${chipRow('killTarget', KILL_TARGET_CHOICES, (v) => `${v} 杀`)}</div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">时间上限</span>
+        <div class="chip-row">${chipRow('timeLimit', TIME_LIMIT_CHOICES, (v) => (v === 0 ? '不限时' : `${v / 60} 分钟`))}</div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">伤害开关</span>
+        <div class="toggle-row">
+          <button type="button" class="chip ${m.friendlyFire ? 'on' : ''}" data-match="friendlyFire" data-value="${m.friendlyFire ? '0' : '1'}" ${hostOnly ? 'disabled' : ''}>
+            友伤：${m.friendlyFire ? '开' : '关'}
+          </button>
+          <button type="button" class="chip ${m.selfDamage ? 'on' : ''}" data-match="selfDamage" data-value="${m.selfDamage ? '0' : '1'}" ${hostOnly ? 'disabled' : ''}>
+            自伤（自己被弹打到自己）：${m.selfDamage ? '开' : '关'}
+          </button>
+        </div>
+      </div>
+      <p class="lan-hint">
+        ${hostOnly
+          ? '这些由房主设置，进房间后会同步给你，所有人看到的规则和人头都一样。'
+          : '你可以在开局前决定：人数 2–10、人头目标、时间上限，以及友伤和自伤两个独立开关；时间到人头相同就是平局。'}
+      </p>
     </div>`;
 }
 
@@ -527,15 +582,15 @@ function controlsForMode(): string {
     const c = b.versus.p2;
     return `
       <ul class="controls two-col">
-        <li><b class="p1">P1</b> ${k(a.up)}${k(a.left)}${k(a.down)}${k(a.right)} 驾驶 · ${k(a.aimLeft)}${k(a.aimRight)} 微调炮口 · ${k(a.fire)} 开火 · ${k(a.skill)} 技能</li>
-        <li><b class="p2">P2</b> ${k(c.up)}${k(c.left)}${k(c.down)}${k(c.right)} 驾驶 · ${k(c.aimLeft)}${k(c.aimRight)} 微调炮口 · ${k(c.fire)} 开火 · ${k(c.skill)} 技能</li>
+        <li><b class="p1">P1</b> ${k(a.up)}${k(a.left)}${k(a.down)}${k(a.right)} 驾驶（炮口跟着车体转） · ${k(a.fire)} 开火 · ${k(a.skill)} 技能</li>
+        <li><b class="p2">P2</b> ${k(c.up)}${k(c.left)}${k(c.down)}${k(c.right)} 驾驶（炮口跟着车体转） · ${k(c.fire)} 开火 · ${k(c.skill)} 技能</li>
       </ul>`;
   }
   const s = b.solo;
   return `
     <ul class="controls">
       <li>${k(s.up)}${k(s.left)}${k(s.down)}${k(s.right)} 驾驶 / 转向（炮口跟着车体转）</li>
-      <li><kbd>鼠标</kbd> 瞄准 · ${k(s.aimLeft)}${k(s.aimRight)} 微调炮口</li>
+      <li><kbd>鼠标</kbd> 瞄准（炮口只能在车头 ±72° 内偏转，车体转了炮口就跟着转）</li>
       <li>${k(s.fire)} 或 <kbd>左键</kbd> 开火 · ${k(s.slow)} 慢速微调</li>
       <li>${k(s.skill)} 召唤师技能 · <kbd>P</kbd> 暂停</li>
     </ul>`;
@@ -578,6 +633,18 @@ function bindSettings(root: HTMLElement): void {
       render({ kind: 'start' });
     });
   });
+  root.querySelectorAll<HTMLButtonElement>('[data-match]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.match as 'mode' | 'capacity' | 'killTarget' | 'timeLimit' | 'friendlyFire' | 'selfDamage';
+      const raw = btn.dataset.value ?? '';
+      if (key === 'mode') settings.match.mode = raw === 'team' ? 'team' : 'ffa';
+      else if (key === 'friendlyFire' || key === 'selfDamage') settings.match[key] = raw === '1';
+      else settings.match[key] = Number(raw);
+      sound.ui();
+      render(state);
+    });
+  });
+
   root.querySelectorAll<HTMLButtonElement>('[data-lanrole]').forEach((btn) => {
     btn.addEventListener('click', () => {
       settings.lanRole = btn.dataset.lanrole === 'guest' ? 'guest' : 'host';
@@ -663,9 +730,10 @@ function render(next: OverlayState): void {
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
         <button id="btn-restart">重新开始</button>
+        <button class="ghost" id="btn-quit">退出对局</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
       </div>
-      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 键位改完从下一局生效</div>
+      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 退出对局会直接结束这一局${settings.mode === 'lan' ? '，对手会看到「你已经投降」' : ''}</div>
     `;
     bindKeyEditor(card);
   } else if (next.kind === 'gameover') {
@@ -695,16 +763,49 @@ function render(next: OverlayState): void {
         <button id="btn-menu">返回菜单</button>
       </div>
     `;
+  } else if (next.kind === 'matchOver') {
+    const rows = next.scoreboard
+      .slice()
+      .sort((a, b) => b.kills - a.kills)
+      .map(
+        (line, index) => `
+        <div class="score-row ${next.winners.includes(line.id) ? 'winner' : ''}">
+          <span class="rank">${index + 1}</span>
+          <span class="name">${line.name}</span>
+          <span class="kills">${line.kills} 杀</span>
+          <span class="deaths">${line.deaths} 死</span>
+        </div>`
+      )
+      .join('');
+    const title = next.draw
+      ? '平局'
+      : next.surrenderBy
+        ? `${next.scoreboard.find((l) => l.id === next.surrenderBy)?.name ?? '对手'} 已经投降`
+        : `${next.winners
+            .map((id) => next.scoreboard.find((l) => l.id === id)?.name ?? id)
+            .join(' / ')} 获胜`;
+    const reason = next.draw ? '时间到，双方人头相同' : next.reason === 'kills' ? '达到人头目标' : next.reason === 'time' ? '时间到，人头领先' : '对手退出对局，本局判为投降';
+    card.innerHTML = `
+      <div class="kicker">Match Over</div>
+      <h1>${title}<span class="accent">${next.draw ? '' : '!'}</span></h1>
+      <div class="rule"></div>
+      <p>${reason}</p>
+      <div class="scoreboard">${rows}</div>
+      <div class="actions">
+        <button class="primary" id="btn-restart">再来一局</button>
+        <button id="btn-menu">返回菜单</button>
+      </div>
+    `;
   } else {
     const p1Wins = next.winner === 'p1';
     card.innerHTML = `
       <div class="kicker">Versus</div>
       <h1><span class="${p1Wins ? 'p1' : 'p2'}">${p1Wins ? 'P1' : 'P2'}</span> 获胜<span class="accent">!</span></h1>
       <div class="rule"></div>
-      <p>${p1Wins ? 'P1' : 'P2'} 打光了对手的 3 条命。</p>
+      <p>${p1Wins ? 'P1' : 'P2'} 把对手的血打空了。</p>
       <div class="stateline">
-        <span class="p1">P1 剩余 <b>${next.p1Lives}</b></span>
-        <span class="p2">P2 剩余 <b>${next.p2Lives}</b></span>
+        <span class="p1">P1 剩余血量 <b>${next.p1Lives}</b></span>
+        <span class="p2">P2 剩余血量 <b>${next.p2Lives}</b></span>
       </div>
       <div class="actions">
         <button class="primary" id="btn-restart">再来一局</button>
@@ -732,6 +833,17 @@ function render(next: OverlayState): void {
 
   document.getElementById('btn-menu')?.addEventListener('click', () => {
     sound.ui();
+    gameScene()?.quitMatch();
+    game.scene.stop('Game');
+    game.scene.start('Menu');
+    render({ kind: 'start' });
+  });
+
+  // "退出对局" in the pause menu: solo/versus just end, LAN reports a surrender
+  // and the opponent sees it in their own match-over screen.
+  document.getElementById('btn-quit')?.addEventListener('click', () => {
+    sound.ui();
+    gameScene()?.quitMatch();
     game.scene.stop('Game');
     game.scene.start('Menu');
     render({ kind: 'start' });

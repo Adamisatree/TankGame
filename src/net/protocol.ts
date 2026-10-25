@@ -4,7 +4,7 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export type NetRole = 'host' | 'guest';
 
@@ -28,7 +28,11 @@ export interface TankSnapshot {
   y: number;
   body: number;
   turret: number;
-  lives: number;
+  /** v1.3: health, not lives. */
+  hp: number;
+  kills: number;
+  deaths: number;
+  team: number;
   damage: number;
   alive: number;
   /** Milliseconds left on each effect (0 = inactive). */
@@ -97,13 +101,16 @@ export type HostMessage =
   | Snapshot
   | { t: 'start'; level: number }
   | { t: 'restart'; level: number }
-  | { t: 'chat'; text: string };
+  | { t: 'chat'; text: string }
+  /** A player left on purpose; everyone else sees it as a surrender. */
+  | { t: 'surrender'; by: string };
 
 export type ServerMessage =
   | { t: 'joined'; role: NetRole; guest?: boolean; host?: boolean; skill?: string; version?: string; peerVersion?: string }
   | { t: 'paired'; skill?: string }
   | { t: 'peer'; state: 'joined' | 'left'; skill?: string; version?: string }
   | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
+  | { t: 'surrender'; by: string }
   | { t: 'input'; input: TankInput; seq: number }
   | { t: 'bye' }
   | { t: 'replaced' };

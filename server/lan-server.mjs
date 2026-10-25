@@ -86,6 +86,9 @@ async function serveStatic(req, res) {
       port: currentPort,
       addresses: lanAddresses(),
       players: countPlayers(),
+      capacity: room.capacity,
+      mode: room.mode,
+      roster: roster().players,
     });
   }
 
@@ -119,36 +122,95 @@ async function serveStatic(req, res) {
   }
 }
 
-/** host <-> guest pairing; 1v1, newest host wins if two are waiting. */
-const room = { host: null, guest: null };
+/**
+ * v1.3: one room, up to 10 players.
+ *
+ * The host (p1) keeps the authoritative simulation; the server only relays.
+ * Seats are handed out on join (p2, p3, …), teams alternate, and everyone gets
+ * the same roster so every screen shows identical information.
+ */
+const room = {
+  host: null,
+  /** id -> socket, host included as 'p1'. */
+  players: new Map(),
+  capacity: 6,
+  mode: 'ffa',
+  config: null,
+  nextId: 2,
+};
 let totalPlayers = 0;
 let currentPort = 0;
 
 function countPlayers() {
-  return (room.host ? 1 : 0) + (room.guest ? 1 : 0);
+  return room.players.size;
 }
 
 function send(ws, msg) {
   if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
-/** The guest's menu choice travels with the pairing so the host can use it. */
+function broadcast(msg, exceptWs = null) {
+  for (const ws of room.players.values()) {
+    if (ws === exceptWs) continue;
+    send(ws, msg);
+  }
+}
+
+/** Public snapshot of the room – identical for every client. */
+function roster() {
+  const players = [];
+  for (const [id, ws] of room.players) {
+    players.push({ id, skill: ws.skill ?? '', team: ws.team ?? 0, host: id === 'p1' });
+  }
+  return {
+    t: 'roster',
+    players,
+    capacity: room.capacity,
+    mode: room.mode,
+    host: players.find((p) => p.host)?.id ?? null,
+  };
+}
+
+function teamForSeat(seat) {
+  return room.mode === 'team' ? seat % 2 : seat;
+}
+
+function refreshTeams() {
+  let seat = 0;
+  for (const ws of room.players.values()) {
+    ws.team = teamForSeat(seat);
+    seat += 1;
+  }
+}
+
+function announceRoster() {
+  refreshTeams();
+  broadcast(roster());
+}
+
+/** Legacy 1v1 pairing messages, kept so older clients (and the LAN tests) work. */
 function pair() {
-  if (!room.host || !room.guest) return;
-  send(room.host, { t: 'peer', state: 'joined', skill: room.guest.skill, version: room.guest.version });
-  send(room.guest, { t: 'paired', skill: room.host.skill });
+  const host = room.host;
+  const guest = [...room.players.entries()].find(([id]) => id !== 'p1')?.[1] ?? null;
+  if (!host || !guest) return;
+  send(host, { t: 'peer', state: 'joined', skill: guest.skill, version: guest.version });
+  send(guest, { t: 'paired', skill: host.skill });
   console.log('[lan] host <-> guest paired');
 }
 
-function unlink(ws, who) {
-  if (who === 'host') {
-    room.host = null;
-    send(room.guest, { t: 'peer', state: 'left' });
-  } else {
-    room.guest = null;
-    send(room.host, { t: 'peer', state: 'left' });
-  }
+function unlink(ws) {
+  const id = ws.playerId;
+  if (!id || !room.players.has(id)) return;
+  const wasHost = id === 'p1';
+  room.players.delete(id);
+  ws.playerId = null;
+  ws.role = null;
+  if (wasHost) room.host = null;
   send(ws, { t: 'bye' });
+  // Tell the survivors exactly who left. An explicit surrender was already
+  // broadcast by the message handler; a dropped socket only reports "left".
+  broadcast({ t: 'peer', state: 'left', id, host: wasHost });
+  announceRoster();
 }
 
 export function createLanServer({ port = Number(process.env.PORT) || 8787, host = '0.0.0.0', quiet = false } = {}) {
@@ -182,6 +244,7 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         const role = msg.role === 'host' ? 'host' : 'guest';
         ws.skill = typeof msg.skill === 'string' ? msg.skill : undefined;
         ws.version = typeof msg.version === 'string' ? msg.version : '';
+        ws.name = typeof msg.name === 'string' && msg.name ? msg.name.slice(0, 12) : '';
 
         // A guest from a different build cannot be played with – say why.
         if (role === 'guest' && ws.version && ws.version !== VERSION) {
@@ -190,45 +253,92 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           ws.role = null;
           return;
         }
+
         if (role === 'host') {
-          if (room.host && room.host !== ws) send(room.host, { t: 'replaced' });
+          // A reconnecting host takes the p1 seat back and keeps the guests –
+          // a restart in the middle of a match must not kick everybody.
+          const previous = room.players.get('p1');
+          if (previous && previous !== ws) send(previous, { t: 'replaced' });
           room.host = ws;
+          ws.playerId = 'p1';
           ws.role = 'host';
-          totalPlayers++;
-          send(ws, { t: 'joined', role: 'host', guest: !!room.guest, version: VERSION, peerVersion: room.guest?.version });
+          if (!previous) totalPlayers += 1;
+          room.players.set('p1', ws);
+          send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
-          pair();
-        } else {
-          if (room.guest && room.guest !== ws) send(room.guest, { t: 'replaced' });
-          room.guest = ws;
-          ws.role = 'guest';
-          totalPlayers++;
-          send(ws, { t: 'joined', role: 'guest', host: !!room.host, skill: room.host?.skill, version: VERSION, peerVersion: room.host?.version });
-          console.log('[lan] guest joined');
-          pair();
+          announceRoster();
+          return;
+        }
+
+        // Guests: refuse when the room is already full.
+        if (room.players.size >= room.capacity || !room.host) {
+          send(ws, { t: 'reject', reason: room.host ? 'full' : 'unknown', capacity: room.capacity });
+          console.log(`[lan] rejected guest: room ${room.players.size}/${room.capacity}`);
+          return;
+        }
+        const id = `p${room.nextId++}`;
+        ws.playerId = id;
+        ws.role = 'guest';
+        totalPlayers += 1;
+        room.players.set(id, ws);
+        send(ws, {
+          t: 'joined',
+          role: 'guest',
+          id,
+          host: true,
+          capacity: room.capacity,
+          version: VERSION,
+          peerVersion: room.host?.version,
+        });
+        console.log(`[lan] guest ${id} joined (${room.players.size}/${room.capacity})`);
+        if (room.host) send(room.host, { t: 'peer', state: 'joined', id, skill: ws.skill, version: ws.version });
+        announceRoster();
+        pair();
+        return;
+      }
+
+      // Host-owned room settings: capacity, mode, win conditions, damage switches.
+      if (msg.t === 'config') {
+        if (ws.role !== 'host') return;
+        const capacity = Math.max(2, Math.min(10, Number(msg.capacity) || room.capacity));
+        room.capacity = capacity;
+        room.mode = msg.mode === 'team' ? 'team' : 'ffa';
+        room.config = { ...msg, capacity };
+        announceRoster();
+        // Everyone needs the same rules, not just the roster.
+        broadcast({ t: 'config', config: room.config });
+        return;
+      }
+
+      if (msg.t === 'input') {
+        if (ws.role === 'guest' && room.host) {
+          send(room.host, { t: 'input', from: ws.playerId, input: msg.input, seq: msg.seq });
         }
         return;
       }
 
-      // Everything else is relayed to the other side of the room.
-      if (msg.t === 'input') {
-        if (ws.role === 'guest') send(room.host, { t: 'input', input: msg.input, seq: msg.seq });
+      // Host → everyone: snapshots, level changes, match events.
+      if (msg.t === 'state' || msg.t === 'start' || msg.t === 'restart' || msg.t === 'level' || msg.t === 'event') {
+        if (ws.role === 'host') broadcast(msg, ws);
         return;
       }
-      if (msg.t === 'state' || msg.t === 'start' || msg.t === 'restart' || msg.t === 'level') {
-        if (ws.role === 'host') send(room.guest, msg);
+
+      // Any player can walk away; the others must be told it was a surrender.
+      if (msg.t === 'surrender') {
+        broadcast({ t: 'surrender', by: ws.playerId ?? msg.by ?? 'p1' }, ws);
+        unlink(ws);
         return;
       }
+
       if (msg.t === 'leave') {
-        unlink(ws, ws.role);
-        ws.role = null;
+        unlink(ws);
       }
     });
 
     ws.on('close', () => {
-      if (ws.role) {
-        unlink(ws, ws.role);
-        console.log(`[lan] ${ws.role} disconnected`);
+      if (ws.playerId) {
+        unlink(ws);
+        console.log(`[lan] ${ws.playerId} disconnected (${room.players.size}/${room.capacity})`);
       }
       ws.role = null;
     });

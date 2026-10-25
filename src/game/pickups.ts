@@ -18,7 +18,7 @@ export const PICKUPS: Record<PickupKind, PickupDef> = {
   health: {
     kind: 'health',
     name: '医疗包',
-    blurb: '立刻回 1 条命（不超过上限）',
+    blurb: '立刻回 40 血（不超过 100）',
     color: 0xc0392b,
     duration: 0,
   },
@@ -32,7 +32,7 @@ export const PICKUPS: Record<PickupKind, PickupDef> = {
   shield: {
     kind: 'shield',
     name: '护盾',
-    blurb: '6 秒内免疫伤害',
+    blurb: '6 秒内挡下一次伤害（挡完就碎）',
     color: 0x2f6fb5,
     duration: 6,
   },
