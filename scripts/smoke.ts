@@ -213,6 +213,7 @@ type TankRef = {
   rageShots: number;
   aimAt: (angle: number) => void;
   turnHull: (delta: number) => void;
+  setHp: (hp: number) => void;
 };
 type Poked = {
   bullets: { owner: string; dead: boolean; x: number; y: number; vx: number; vy: number; dmg: number }[];

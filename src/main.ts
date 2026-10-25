@@ -23,6 +23,7 @@ import {
   type SeatAction,
 } from './game/keybinds';
 import { DEFAULT_LAN_PORT } from './net/protocol';
+import { CAPACITY_CHOICES, KILL_TARGET_CHOICES, TIME_LIMIT_CHOICES } from './game/rules';
 import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
 import { APP_VERSION } from './version';
 import './update/types';
@@ -206,6 +207,60 @@ function lanPanel(): string {
         </div>
       </div>
       ${settings.lanRole === 'host' ? host : guest}
+      ${matchSettings()}
+    </div>`;
+}
+
+/** v1.3 pre-match rules: mode, head count, win conditions, damage switches. */
+function matchSettings(): string {
+  const m = settings.match;
+  const hostOnly = settings.lanRole !== 'host';
+  const chipRow = (name: 'capacity' | 'killTarget' | 'timeLimit', values: number[], labels: (v: number) => string): string =>
+    values
+      .map(
+        (value) =>
+          `<button type="button" class="chip ${Number(m[name as keyof typeof m]) === value ? 'on' : ''}"
+             data-match="${name}" data-value="${value}" ${hostOnly ? 'disabled' : ''}>${labels(value)}</button>`
+      )
+      .join('');
+
+  return `
+    <div class="match-panel">
+      <div class="setting-row">
+        <span class="setting-label">玩法</span>
+        <div class="segmented">
+          <button type="button" data-match="mode" data-value="ffa" class="${m.mode === 'ffa' ? 'on' : ''}" ${hostOnly ? 'disabled' : ''}>乱斗（各打各的）</button>
+          <button type="button" data-match="mode" data-value="team" class="${m.mode === 'team' ? 'on' : ''}" ${hostOnly ? 'disabled' : ''}>团队（红蓝对抗）</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">人数上限</span>
+        <div class="chip-row">${chipRow('capacity', CAPACITY_CHOICES, (v) => `${v} 人`)}</div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">人头目标</span>
+        <div class="chip-row">${chipRow('killTarget', KILL_TARGET_CHOICES, (v) => `${v} 杀`)}</div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">时间上限</span>
+        <div class="chip-row">${chipRow('timeLimit', TIME_LIMIT_CHOICES, (v) => (v === 0 ? '不限时' : `${v / 60} 分钟`))}</div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">伤害开关</span>
+        <div class="toggle-row">
+          <button type="button" class="chip ${m.friendlyFire ? 'on' : ''}" data-match="friendlyFire" data-value="${m.friendlyFire ? '0' : '1'}" ${hostOnly ? 'disabled' : ''}>
+            友伤：${m.friendlyFire ? '开' : '关'}
+          </button>
+          <button type="button" class="chip ${m.selfDamage ? 'on' : ''}" data-match="selfDamage" data-value="${m.selfDamage ? '0' : '1'}" ${hostOnly ? 'disabled' : ''}>
+            自伤（自己被弹打到自己）：${m.selfDamage ? '开' : '关'}
+          </button>
+        </div>
+      </div>
+      <p class="lan-hint">
+        ${hostOnly
+          ? '这些由房主设置，进房间后会同步给你，所有人看到的规则和人头都一样。'
+          : '你可以在开局前决定：人数 2–10、人头目标、时间上限，以及友伤和自伤两个独立开关；时间到人头相同就是平局。'}
+      </p>
     </div>`;
 }
 
@@ -578,6 +633,18 @@ function bindSettings(root: HTMLElement): void {
       render({ kind: 'start' });
     });
   });
+  root.querySelectorAll<HTMLButtonElement>('[data-match]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.match as 'mode' | 'capacity' | 'killTarget' | 'timeLimit' | 'friendlyFire' | 'selfDamage';
+      const raw = btn.dataset.value ?? '';
+      if (key === 'mode') settings.match.mode = raw === 'team' ? 'team' : 'ffa';
+      else if (key === 'friendlyFire' || key === 'selfDamage') settings.match[key] = raw === '1';
+      else settings.match[key] = Number(raw);
+      sound.ui();
+      render(state);
+    });
+  });
+
   root.querySelectorAll<HTMLButtonElement>('[data-lanrole]').forEach((btn) => {
     btn.addEventListener('click', () => {
       settings.lanRole = btn.dataset.lanrole === 'guest' ? 'guest' : 'host';
