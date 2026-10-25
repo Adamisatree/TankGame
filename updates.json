@@ -1,7 +1,7 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-25T04:12:51.035Z",
+  "generatedAt": "2026-10-25T04:14:15.844Z",
   "releases": [
     {
       "tag": "v1.2.0",
@@ -11,15 +11,6 @@
       "publishedAt": "2026-10-25T04:12:32Z",
       "prerelease": false,
       "assets": [
-        {
-          "name": "TankGame-1.1.0-portable.html",
-          "size": 1587494,
-          "sha256": "8287c0eb88f724b311fb435a15d37428d004ba6bc3c21d44430c9a64058542fe",
-          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.1.0-portable.html",
-          "kind": "html",
-          "platform": "any",
-          "arch": "any"
-        },
         {
           "name": "TankGame-1.2.0-arm64-setup.exe",
           "size": 82734840,

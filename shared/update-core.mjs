@@ -194,7 +194,9 @@ export function normalizeManifest(payload) {
         notes: String(release.notes ?? release.body ?? ''),
         publishedAt: String(release.publishedAt ?? release.published_at ?? ''),
         prerelease: Boolean(release.prerelease ?? release.draft === true),
-        assets: assets.filter((asset) => asset.name),
+        // `.blockmap` / `latest.yml` / our own `updates.json` are not installable;
+        // dropping them keeps the version list clean and the download picker sane.
+        assets: assets.filter((asset) => asset.name && asset.kind !== 'other'),
       };
     })
     .filter((release) => !!release.version && release.assets.length > 0)

@@ -181,6 +181,23 @@ const ours = normalizeManifest(
 eq('our own manifest shape normalises', ours.releases[0].assets[0].sha256, 'ff');
 eq('our own manifest keeps url', ours.releases[0].assets[0].url, 'https://example/x.html');
 
+const noisy = normalizeManifest({
+  releases: [
+    {
+      tag: 'v1.2.0',
+      assets: [
+        { name: 'TankGame-1.2.0-x64-setup.exe', size: 10, digest: 'sha256:AA' },
+        { name: 'TankGame-1.2.0-x64-setup.exe.blockmap', size: 1, digest: 'sha256:BB' },
+        { name: 'latest.yml', size: 1, digest: 'sha256:CC' },
+        { name: 'updates.json', size: 1, digest: 'sha256:DD' },
+      ],
+    },
+    { tag: 'v1.1.0', assets: [{ name: 'latest.yml', size: 1 }] },
+  ],
+});
+eq('only installable files are kept', noisy.releases.length, 1);
+eq('blockmap/yml/json are dropped', noisy.releases[0].assets.map((a) => a.name), ['TankGame-1.2.0-x64-setup.exe']);
+
 const prereleaseOnly = normalizeManifest({ releases: [{ tag: 'v2.0.0-rc.1', assets: [{ name: 'TankGame-2.0.0-rc.1-x64-setup.exe', size: 1 }] }] });
 eq('prerelease-only falls back to prerelease', latestRelease(prereleaseOnly)?.version, '2.0.0-rc.1');
 
