@@ -451,6 +451,58 @@ check(
   JSON.stringify(guestTank)
 );
 
+// --- barrel heat: free until the cap, then a hard lock.
+const heatProbe = poke as any;
+heatProbe.p1.coldBarrel();
+heatProbe.bullets.length = 0;
+heatProbe.p1.fireReadyAt = 0;
+heatProbe.fire(heatProbe.p1);
+check('firing heats the barrel', heatProbe.p1.heat.heat > 0, JSON.stringify(heatProbe.p1.heat));
+check('a warm barrel still fires', heatProbe.p1.canShoot());
+for (let i = 0; i < 6; i++) heatProbe.p1.addHeat();
+check('the cap locks the barrel', !heatProbe.p1.canShoot(), JSON.stringify(heatProbe.p1.heat));
+heatProbe.bullets.length = 0;
+heatProbe.p1.fireReadyAt = 0;
+heatProbe.fire(heatProbe.p1);
+check('a locked barrel refuses to fire', heatProbe.bullets.length === 0, `bullets=${heatProbe.bullets.length}`);
+heatProbe.p1.coolDown(3);
+check('cooling down unlocks the barrel', heatProbe.p1.canShoot(), JSON.stringify(heatProbe.p1.heat));
+heatProbe.bullets.length = 0;
+heatProbe.p1.fireReadyAt = 0;
+heatProbe.fire(heatProbe.p1);
+check('a cooled barrel fires again', heatProbe.bullets.length > 0, `bullets=${heatProbe.bullets.length}`);
+
+// --- ten players: a second guest must become a third tank on the host.
+const guest2 = new NodeWebSocket(`ws://127.0.0.1:${lanServer.port}/ws`);
+const guest2Msgs: any[] = [];
+guest2.on('message', (raw: unknown) => {
+  try {
+    guest2Msgs.push(JSON.parse(String(raw)));
+  } catch {
+    /* ignore */
+  }
+});
+await new Promise<void>((resolve, reject) => {
+  guest2.once('open', () => resolve());
+  guest2.once('error', reject);
+});
+guest2.send(JSON.stringify({ t: 'join', role: 'guest' }));
+await wait(700);
+check('the host renders a tank per seat', heatProbe.tanks().length >= 3, `tanks=${heatProbe.tanks().length}`);
+check(
+  'a third seat is named p3',
+  (lastSnap()?.tanks ?? []).some((t: { id: string }) => t.id === 'p3'),
+  JSON.stringify((lastSnap()?.tanks ?? []).map((t: { id: string }) => t.id))
+);
+check(
+  'snapshots carry private heat and its lock',
+  (lastSnap()?.tanks ?? []).every((t: { heat?: number; heatLocked?: number }) => typeof t.heat === 'number' && typeof t.heatLocked === 'number')
+);
+guest2Msgs.length = 0;
+guest2.close();
+await wait(500);
+check('a departing seat is removed from the field', heatProbe.tanks().length === 2 && !heatProbe.byId('p3'), `tanks=${heatProbe.tanks().length}`);
+
 // Host can end the match / restart and the guest is told.
 guestMsgs.length = 0;
 poke.restartGame();

@@ -70,6 +70,8 @@ export const FIRE_COOLDOWN = 1.0;
  * brief protection, so people can't be spawn-camped.
  */
 export const RESPAWN_PROTECT = 1.0;
+/** The blink dash carries this much invulnerability (0.5s, as asked). */
+export const BLINK_PROTECT = 0.5;
 export const RESPAWN_DELAY = 2.5;
 
 export const FONT = '"Patrick Hand", "Comic Sans MS", "Segoe Print", system-ui, sans-serif';

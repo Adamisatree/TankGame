@@ -4,7 +4,7 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 export type NetRole = 'host' | 'guest';
 
@@ -23,7 +23,8 @@ export interface TankInput {
 }
 
 export interface TankSnapshot {
-  id: 'p1' | 'p2';
+  /** v1.3: p1…p10 – a room can hold ten players. */
+  id: string;
   x: number;
   y: number;
   body: number;
@@ -44,6 +45,11 @@ export interface TankSnapshot {
   rageShots: number;
   /** Milliseconds until the skill is ready again. */
   skillCd: number;
+  /** Barrel heat 0..100 and whether the gun is locked out. */
+  heat: number;
+  heatLocked: number;
+  /** Summoner skill the player picked (for the notice panel). */
+  skill?: string;
 }
 
 export interface BulletSnapshot {
@@ -51,7 +57,7 @@ export interface BulletSnapshot {
   y: number;
   vx: number;
   vy: number;
-  owner: 'p1' | 'p2';
+  owner: string;
   /** 1 = normal, 2 = empowered by 狂暴. */
   dmg?: number;
 }
@@ -103,15 +109,37 @@ export type HostMessage =
   | { t: 'restart'; level: number }
   | { t: 'chat'; text: string }
   /** A player left on purpose; everyone else sees it as a surrender. */
-  | { t: 'surrender'; by: string };
+  | { t: 'surrender'; by: string }
+  /** Host → server: room capacity, mode and the shared match rules. */
+  | { t: 'config'; mode?: 'ffa' | 'team'; capacity?: number; killTarget?: number; timeLimit?: number; friendlyFire?: boolean; selfDamage?: boolean };
+
+export interface RosterEntry {
+  id: string;
+  skill: string;
+  team: number;
+  host: boolean;
+}
 
 export type ServerMessage =
-  | { t: 'joined'; role: NetRole; guest?: boolean; host?: boolean; skill?: string; version?: string; peerVersion?: string }
+  | {
+      t: 'joined';
+      role: NetRole;
+      /** The seat the server handed us (p1 for the host, p2… for guests). */
+      id?: string;
+      guest?: boolean;
+      host?: boolean;
+      skill?: string;
+      version?: string;
+      peerVersion?: string;
+      capacity?: number;
+    }
   | { t: 'paired'; skill?: string }
-  | { t: 'peer'; state: 'joined' | 'left'; skill?: string; version?: string }
+  | { t: 'roster'; players: RosterEntry[]; capacity: number; mode: 'ffa' | 'team'; host: string | null }
+  | { t: 'config'; config: Record<string, unknown> }
+  | { t: 'peer'; state: 'joined' | 'left'; id?: string; host?: boolean; skill?: string; version?: string }
   | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
   | { t: 'surrender'; by: string }
-  | { t: 'input'; input: TankInput; seq: number }
+  | { t: 'input'; input: TankInput; seq: number; from?: string }
   | { t: 'bye' }
   | { t: 'replaced' };
 

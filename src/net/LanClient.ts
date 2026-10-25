@@ -8,13 +8,21 @@ import {
   type TankInput,
 } from './protocol';
 import { APP_VERSION } from '../version';
+import { DEFAULT_MATCH, type MatchConfig } from '../game/rules';
 
 export type LanStatus = 'idle' | 'connecting' | 'waiting' | 'playing' | 'closed' | 'error' | 'rejected';
 
 export interface LanHandlers {
   onStatus?: (status: LanStatus, detail?: string) => void;
   onSnapshot?: (snap: Snapshot) => void;
-  onInput?: (input: TankInput) => void;
+  /** Host side: input from a guest, tagged with the seat it came from. */
+  onInput?: (input: TankInput, from: string) => void;
+  /** Everyone: the current player list (order = seat order). */
+  onRoster?: (players: { id: string; team: number; skill: string; host: boolean }[], capacity: number) => void;
+  /** Everyone: the room's shared rules, as set by the host. */
+  onConfig?: (config: MatchConfig) => void;
+  /** Our own seat in the room. */
+  onSeat?: (id: string, role: 'host' | 'guest') => void;
   onHostMessage?: (msg: HostMessage) => void;
   /** Fired when the other player joins or leaves. */
   onPeer?: (state: 'joined' | 'left') => void;
@@ -43,6 +51,8 @@ export class LanClient {
   skill = '';
   /** Messages queued while the socket was still connecting (e.g. a restart). */
   private pending: string[] = [];
+  /** Match rules this machine wants the room to use (host only). */
+  matchConfig: MatchConfig | null = null;
 
   constructor(role: NetRole, serverAddress: string, handlers: LanHandlers = {}) {
     this.role = role;
@@ -88,6 +98,9 @@ export class LanClient {
         })
       );
       this.setStatus('waiting');
+      // Host-owned rules go out as soon as the room exists, so guests never
+      // have to guess the capacity or the damage switches.
+      if (this.role === 'host' && this.matchConfig) this.send({ t: 'config', ...this.matchConfig });
       this.handlers.onLog?.(`已连接 ${this.url}`);
       // Anything asked for while we were still dialling goes out now.
       for (const message of this.pending.splice(0)) {
@@ -127,6 +140,7 @@ export class LanClient {
           this.handlers.onSurrender?.(msg.by);
           break;
         case 'joined':
+          if (msg.id) this.handlers.onSeat?.(msg.id, this.role);
           if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
           if (this.role === 'guest' && msg.host) this.setStatus('playing');
           break;
@@ -143,7 +157,23 @@ export class LanClient {
           if (msg.state === 'left') this.setStatus('waiting', '对手已离开');
           break;
         case 'input':
-          this.handlers.onInput?.(msg.input);
+          this.handlers.onInput?.(msg.input, msg.from ?? 'p2');
+          break;
+        case 'config': {
+          const raw = (msg.config ?? {}) as Record<string, unknown>;
+          const num = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+          this.handlers.onConfig?.({
+            mode: raw.mode === 'team' ? 'team' : 'ffa',
+            capacity: num(raw.capacity, DEFAULT_MATCH.capacity),
+            killTarget: num(raw.killTarget, DEFAULT_MATCH.killTarget),
+            timeLimit: num(raw.timeLimit, DEFAULT_MATCH.timeLimit),
+            friendlyFire: raw.friendlyFire === true,
+            selfDamage: raw.selfDamage !== false,
+          });
+          break;
+        }
+        case 'roster':
+          this.handlers.onRoster?.(msg.players ?? [], msg.capacity ?? 0);
           break;
         case 'bye':
           this.handlers.onLog?.('连接结束');

@@ -9,6 +9,8 @@ import { bulletThreatAt, nearestWallGap, pickHeading, steerTo } from '../src/eng
 import { LEVELS, buildLayout, levelById, randomLevelIndex, validateLevels } from '../src/engine/level';
 import { PICKUP_KINDS, rollPickupKind, PICKUP_RADIUS } from '../src/game/pickups';
 import { SKILLS, skillById, isSkillId, RAGE_SHOTS } from '../src/game/skills';
+import * as H from '../src/game/heat';
+import { BLINK_PROTECT, FIRE_COOLDOWN } from '../src/game/config';
 import {
   ACTION_LABEL,
   defaultBindings,
@@ -424,6 +426,58 @@ check('reset restores the defaults', getBindings().solo.fire === defaults.solo.f
   // Caps and defaults the menu offers.
   check('capacity goes up to 10', R.CAPACITY_CHOICES.includes(2) && R.CAPACITY_CHOICES.includes(10));
   check('friendly fire and self damage default separately', R.DEFAULT_MATCH.friendlyFire === false && R.DEFAULT_MATCH.selfDamage === true);
+}
+
+console.log('barrel heat');
+{
+  let state = H.coldHeat();
+  check('a cold barrel can fire', H.canFire(state) && H.heatRatio(state) === 0);
+  check('the first shot adds heat', H.afterShot(state).heat === H.HEAT_PER_SHOT);
+
+  // Unrestricted until the cap: every shot below 100% is allowed.
+  state = H.coldHeat();
+  let shots = 0;
+  let lockedAt = 0;
+  while (shots < 20) {
+    if (!H.canFire(state)) break;
+    state = H.afterShot(state);
+    shots += 1;
+    if (state.locked) {
+      lockedAt = shots;
+      break;
+    }
+  }
+  check('firing is free until the cap locks it', lockedAt > 1 && state.locked, `locked at shot ${lockedAt}`);
+  check('reaching the cap locks the gun', !H.canFire(state));
+  check('heat never exceeds the cap', state.heat === H.HEAT_MAX);
+
+  // Sustained fire at the real cooldown must actually overheat, not just on paper.
+  state = H.coldHeat();
+  let seconds = 0;
+  let overheated = false;
+  for (let tick = 0; tick < 2000; tick += 1) {
+    state = H.cool(state, 1 / 60);
+    if (state.locked) {
+      overheated = true;
+      break;
+    }
+    if (Math.abs(seconds % FIRE_COOLDOWN) < 1e-9) state = H.afterShot(state);
+    seconds += 1 / 60;
+  }
+  check('holding the trigger overheats the barrel', overheated);
+
+  // And the lock has to clear again, or the gun would be dead for the match.
+  let guard = 0;
+  while (state.locked && guard < 10000) {
+    state = H.cool(state, 1 / 60);
+    guard += 1;
+  }
+  check('the lock lifts once the barrel cools', !state.locked && guard < 600, `${(guard / 60).toFixed(2)}s`);
+  check('unlocking leaves heat below the release point', state.heat <= H.OVERHEAT_RELEASE + 1e-6);
+  check('the countdown runs out exactly when the lock lifts', H.lockSecondsLeft({ heat: H.OVERHEAT_RELEASE, locked: true }) === 0);
+  check('a cold barrel has no countdown', H.lockSecondsLeft(H.coldHeat()) === 0);
+  check('heat bleed is faster while overheated', H.OVERHEAT_COOL > H.HEAT_DECAY);
+  check('blink grants half a second of protection', Math.abs(BLINK_PROTECT - 0.5) < 1e-9);
 }
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);
