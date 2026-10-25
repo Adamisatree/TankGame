@@ -19,12 +19,28 @@ export interface LanHandlers {
   onInput?: (input: TankInput, from: string) => void;
   /** Everyone: the current player list (order = seat order). */
   onRoster?: (
-    players: { id: string; team: number; skill: string; host: boolean; ready?: boolean; name?: string }[],
+    players: {
+      id: string;
+      team: number;
+      skill: string;
+      hasSkill?: boolean;
+      host: boolean;
+      ready?: boolean;
+      name?: string;
+    }[],
     capacity: number,
-    info: { started: boolean; mode: 'ffa' | 'team'; host: string | null; config: Record<string, unknown> | null }
+    info: {
+      started: boolean;
+      mode: 'ffa' | 'team';
+      host: string | null;
+      config: Record<string, unknown> | null;
+      teams: number;
+    }
   ) => void;
+  /** The lobby refused to start (e.g. an empty team). */
+  onLobbyError?: (info: { reason: 'empty-team'; teams: number[] }) => void;
   /** The host started the match. */
-  onBegin?: (info: { mode: 'ffa' | 'team'; config: Record<string, unknown> | null }) => void;
+  onBegin?: (info: { mode: 'ffa' | 'team'; config: Record<string, unknown> | null; teams: number }) => void;
   /** Everyone: the room's shared rules, as set by the host. */
   onConfig?: (config: MatchConfig, tuning?: Record<string, number>) => void;
   /** Our own seat in the room. */
@@ -193,12 +209,17 @@ export class LanClient {
             mode: msg.mode === 'team' ? 'team' : 'ffa',
             host: msg.host ?? null,
             config: (msg.config as Record<string, unknown> | undefined) ?? null,
+            teams: typeof msg.teams === 'number' ? msg.teams : 2,
           });
+          break;
+        case 'lobby-error':
+          this.handlers.onLobbyError?.({ reason: 'empty-team', teams: msg.teams ?? [] });
           break;
         case 'begin':
           this.handlers.onBegin?.({
             mode: msg.mode === 'team' ? 'team' : 'ffa',
             config: (msg.config as Record<string, unknown> | undefined) ?? null,
+            teams: msg.teams ?? 2,
           });
           break;
         case 'bye':
@@ -259,6 +280,16 @@ export class LanClient {
 
   autoTeams(): void {
     this.sendRaw({ t: 'auto-teams' });
+  }
+
+  /** Host: how many teams team-mode has. */
+  setTeamCount(count: number): void {
+    this.sendRaw({ t: 'teams', count });
+  }
+
+  /** Host: move players so no team is empty. */
+  fillTeams(): void {
+    this.sendRaw({ t: 'fill-teams' });
   }
 
   /** Host only: start the match for everyone. */

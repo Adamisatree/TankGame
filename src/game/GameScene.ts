@@ -339,6 +339,7 @@ export class GameScene extends Phaser.Scene {
       onRoster: (players, capacity, info) => {
         this.syncRoster(players);
         this.roomCapacity = capacity;
+        this.teamCount = info.teams;
         this.matchLive = info.started;
         // Guests (and the host) sit in the lobby until the host starts.
         if (!info.started) this.enterLobby(info);
@@ -346,8 +347,15 @@ export class GameScene extends Phaser.Scene {
       },
       onBegin: (info) => {
         if (info.config) settings.match = { ...settings.match, ...(info.config as unknown as typeof settings.match) };
+        this.teamCount = info.teams;
         this.matchLive = true;
         this.leaveLobby();
+      },
+      onLobbyError: (info) => {
+        const empty = info.teams
+          .map((size, index) => (size === 0 ? `第 ${index + 1} 队` : ''))
+          .filter(Boolean);
+        this.showBanner(`${empty.join('、')}还没有人，不能开始`, 2.2);
       },
       onConfig: (config, hostTuning) => {
         // The host owns the rules and the balance: everyone plays the same match.
@@ -421,11 +429,14 @@ export class GameScene extends Phaser.Scene {
       roster: this.roster.map((entry) => ({
         id: entry.id,
         name: entry.name ?? this.nameOf(entry.id),
-        skill: entry.skill,
+        // Skills are private: only your own seat shows the actual choice.
+        skill: entry.id === this.myId ? entry.skill : '',
+        hasSkill: !!entry.skill,
         team: entry.team,
         ready: entry.ready ?? entry.id === 'p1',
         host: entry.id === 'p1',
       })),
+      teams: this.teamCount,
       capacity: this.roomCapacity,
       mode: settings.match.mode,
       myId: this.myId,
@@ -473,6 +484,31 @@ export class GameScene extends Phaser.Scene {
     this.lan?.autoTeams();
   }
 
+  /** Host: how many teams there are (2..6). */
+  setTeamCount(count: number): void {
+    const next = Math.max(2, Math.min(6, Math.round(count)));
+    this.teamCount = next;
+    this.lan?.setTeamCount(next);
+    // Re-clamp every seat so nobody keeps a team that no longer exists.
+    this.roster = this.roster.map((entry) => ({ ...entry, team: Math.min(entry.team, next - 1) }));
+    this.syncRoster(this.roster);
+  }
+
+  /** Host: move players so no team is empty. */
+  fillTeams(): void {
+    this.lan?.fillTeams();
+  }
+
+  /** Teams that currently have nobody on them (team-mode only). */
+  emptyTeams(): number[] {
+    const sizes = new Array(this.teamCount).fill(0);
+    for (const entry of this.roster) {
+      const team = Math.max(0, Math.min(this.teamCount - 1, entry.team));
+      sizes[team] += 1;
+    }
+    return sizes.map((size, index) => (size === 0 ? index : -1)).filter((index) => index >= 0);
+  }
+
   /** Host: apply lobby rule changes to the room. */
   applyRoomConfig(match: typeof settings.match): void {
     settings.match = { ...match };
@@ -486,6 +522,14 @@ export class GameScene extends Phaser.Scene {
   /** Host: start the match for the whole room. */
   startRoomMatch(): void {
     if (this.lanRole !== 'host' || !this.lan) return;
+    // Every team needs somebody; the server enforces it too, this is the fast path.
+    if (settings.match.mode === 'team') {
+      const empty = this.emptyTeams();
+      if (empty.length) {
+        this.showBanner(`${empty.map((i) => `第 ${i + 1} 队`).join('、')}还没有人，不能开始`, 2.2);
+        return;
+      }
+    }
     this.matchLive = true;
     this.restartLanMatch();
     this.lan.begin();
@@ -663,7 +707,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Makes the tank list match the roster the server just broadcast. */
-  private syncRoster(players: { id: string; team: number; skill: string; ready?: boolean; name?: string }[]): void {
+  private syncRoster(
+    players: { id: string; team: number; skill: string; hasSkill?: boolean; ready?: boolean; name?: string }[]
+  ): void {
     this.roster = players;
     if (!this.lanMode) return;
     const wanted = new Set(players.map((p) => p.id));
@@ -1006,7 +1052,15 @@ export class GameScene extends Phaser.Scene {
         this.pinHud();
       }
       const tank = this.byId(entry.id);
-      const skill = isSkillId(entry.skill) ? skillById(entry.skill).name : '—';
+      // Skills stay private: you see your own, everyone else is just "已选".
+      const mine = entry.id === this.myId;
+      const skill = mine
+        ? isSkillId(entry.skill)
+          ? skillById(entry.skill).name
+          : '—'
+        : entry.hasSkill || entry.skill
+          ? '已选'
+          : '—';
       const teamSize = this.roster.filter((r) => r.team === entry.team).length;
       const team = teamSize > 1 ? `队${entry.team}` : 'FFA';
       const kills = tank ? `${tank.kills} 杀` : '—';
@@ -1651,11 +1705,20 @@ export class GameScene extends Phaser.Scene {
   /** Latest input from each remote seat, keyed by id. */
   private remoteInputs = new Map<string, TankInput>();
   /** Seat order + teams, straight from the server (identical for everyone). */
-  private roster: { id: string; team: number; skill: string; ready?: boolean; name?: string }[] = [];
+  private roster: {
+    id: string;
+    team: number;
+    skill: string;
+    hasSkill?: boolean;
+    ready?: boolean;
+    name?: string;
+  }[] = [];
   /** True once the host pressed 开始; until then the arena is a lobby. */
   matchLive = false;
   /** Seats the room allows, straight from the server. */
   private roomCapacity = 6;
+  /** How many teams team-mode currently has (the host can add/remove). */
+  private teamCount = 2;
   /** Big maps scroll; small ones keep the classic fixed view. */
   private worldMode = false;
   private worldRect: PlayRect | null = null;

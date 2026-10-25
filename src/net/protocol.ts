@@ -111,7 +111,9 @@ export type LobbyMessage =
   | { t: 'skill'; skill: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'team'; id: string; team: number }
+  | { t: 'teams'; count: number }
   | { t: 'auto-teams' }
+  | { t: 'fill-teams' }
   | { t: 'begin' };
 
 export type HostMessage =
@@ -139,7 +141,10 @@ export interface RosterEntry {
   id: string;
   /** Display name the player joined with (falls back to the seat id). */
   name?: string;
+  /** Only filled in for your own seat (and the host's view). */
   skill: string;
+  /** True once that seat has picked a skill – safe to show to everyone. */
+  hasSkill?: boolean;
   team: number;
   /** Guests press 准备 in the lobby; the host counts as ready. */
   ready?: boolean;
@@ -166,17 +171,21 @@ export type ServerMessage =
       capacity: number;
       mode: 'ffa' | 'team';
       host: string | null;
+      /** How many teams team-mode uses (host can add/remove). */
+      teams?: number;
       /** False = still in the lobby; true = a match is running. */
       started?: boolean;
       config?: Record<string, unknown>;
     }
   /** The host started the match; carries the final rules and roster. */
-  | { t: 'begin'; config?: Record<string, unknown>; roster?: RosterEntry[]; mode?: 'ffa' | 'team' }
+  | { t: 'begin'; config?: Record<string, unknown>; roster?: RosterEntry[]; mode?: 'ffa' | 'team'; teams?: number }
   | { t: 'config'; config: Record<string, unknown>; tuning?: Record<string, number> }
   | { t: 'peer'; state: 'joined' | 'left'; id?: string; host?: boolean; skill?: string; version?: string }
   | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
   | { t: 'surrender'; by: string }
   | { t: 'input'; input: TankInput; seq: number; from?: string }
+  /** The host tried to start but the lobby is not valid yet. */
+  | { t: 'lobby-error'; reason: 'empty-team'; teams: number[] }
   | { t: 'bye' }
   | { t: 'replaced' };
 

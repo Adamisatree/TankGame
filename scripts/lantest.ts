@@ -94,16 +94,43 @@ check('the ack tells the guest which version it is playing', guest.messages.find
 check('guest ack sees the host present', guest.messages.find((m) => m.t === 'joined')?.host === true);
 check('host is told the guest arrived', await waitFor(() => host.messages.some((m) => m.t === 'peer' && m.state === 'joined')));
 check('guest is told it is paired', await waitFor(() => guest.messages.some((m) => m.t === 'paired')));
-// Skill choices travel with the pairing so each side shows the right one.
+// v1.4: skill picks are private. Pairing only says *that* someone joined, and
+// the roster only reveals other seats' choices as a boolean.
 check(
-  'the host learns the guest skill',
-  await waitFor(() => host.messages.some((m) => m.t === 'peer' && m.skill === 'weaken')),
+  'pairing no longer leaks the guest skill',
+  !host.messages.some((m) => m.t === 'peer' && m.skill),
   JSON.stringify(host.messages.filter((m) => m.t === 'peer'))
 );
 check(
-  'the guest learns the host skill',
-  await waitFor(() => guest.messages.some((m) => m.t === 'paired' && m.skill === 'rage')),
+  'pairing no longer leaks the host skill',
+  !guest.messages.some((m) => m.t === 'paired' && m.skill),
   JSON.stringify(guest.messages.filter((m) => m.t === 'paired'))
+);
+host.send({ t: 'skill', skill: 'rage' });
+guest.send({ t: 'skill', skill: 'weaken' });
+check(
+  'a seat sees its own skill in the roster',
+  await waitFor(() => guest.messages.filter((m) => m.t === 'roster').some((m) =>
+    m.players.find((p: { id: string }) => p.id === 'p2')?.skill === 'weaken'
+  )),
+  'own skill missing'
+);
+check(
+  'the host sees every skill (it has to simulate them)',
+  await waitFor(() => host.messages.filter((m) => m.t === 'roster').some((m) =>
+    m.players.find((p: { id: string }) => p.id === 'p2')?.skill === 'weaken'
+  )),
+  'host roster missing the guest skill'
+);
+const guestRoster = guest.messages.filter((m) => m.t === 'roster').pop();
+check(
+  'a guest never sees another seat skill',
+  !!guestRoster && (guestRoster.players.find((p: { id: string }) => p.id === 'p1')?.skill ?? '') === '',
+  JSON.stringify(guestRoster?.players)
+);
+check(
+  'but it learns that the seat has picked',
+  !!guestRoster && guestRoster.players.find((p: { id: string }) => p.id === 'p1')?.hasSkill === true
 );
 
 // --- snapshot relay (host -> guest)

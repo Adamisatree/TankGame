@@ -32,8 +32,13 @@ export function seatColor(id: string): number {
   return COLORS_BY_ID[id] ?? COLORS.player;
 }
 
-/** Team colours used by LAN team mode / FFA fallback. */
-export const TEAM_COLORS = [COLORS.player, COLORS.player2, 0xd4a72e, COLORS.enemy];
+/**
+ * Team colours. Up to six teams, because the lobby lets the host add teams;
+ * every seat on a team shares its colour, on the field and on the minimap.
+ */
+export const TEAM_COLORS = [COLORS.enemy, 0x2f6fb5, 0x3f9c8f, 0xb8791d, 0x6f5aa8, 0x8a4b9c];
+
+export const TEAM_NAMES = ['红队', '蓝队', '青队', '黄队', '紫队', '紫红队'];
 
 export function teamColor(team: number): number {
   return TEAM_COLORS[(((team ?? 0) % TEAM_COLORS.length) + TEAM_COLORS.length) % TEAM_COLORS.length];

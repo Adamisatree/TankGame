@@ -1331,3 +1331,57 @@ a.chip.ghost {
 .skill-card.compact span {
   display: none;
 }
+
+/* team-2 … team-5 (the lobby can hold up to six teams) */
+.chip.team-2.on {
+  background: #3f9c8f;
+  border-color: #3f9c8f;
+}
+
+.chip.team-3.on {
+  background: #b8791d;
+  border-color: #b8791d;
+}
+
+.chip.team-4.on {
+  background: #6f5aa8;
+  border-color: #6f5aa8;
+}
+
+.chip.team-5.on {
+  background: #8a4b9c;
+  border-color: #8a4b9c;
+}
+
+.lobby-seat.team-2 {
+  border-left: 5px solid #3f9c8f;
+}
+
+.lobby-seat.team-3 {
+  border-left: 5px solid #b8791d;
+}
+
+.lobby-seat.team-4 {
+  border-left: 5px solid #6f5aa8;
+}
+
+.lobby-seat.team-5 {
+  border-left: 5px solid #8a4b9c;
+}
+
+.lobby-seat-team {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.lobby-team-count {
+  font-size: 12.5px;
+  align-self: center;
+  padding: 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lobby-warn {
+  color: #b8791d;
+}

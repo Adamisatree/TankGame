@@ -8,6 +8,7 @@ import { DIFFICULTIES, settings, type Difficulty, type GameMode } from './game/s
 import { sound } from './game/Sound';
 import { LEVELS, levelById, type Level } from './engine/level';
 import { SKILLS, isSkillId, skillById, type SkillId } from './game/skills';
+import { TEAM_NAMES } from './game/Tank';
 import {
   ACTION_LABEL,
   GLOBAL_LABEL,
@@ -729,23 +730,41 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
   const me = state.roster.find((seat) => seat.id === state.myId);
   const teams = state.mode === 'team';
   const readyCount = state.roster.filter((seat) => seat.ready).length;
+  const teamCount = state.teams ?? 2;
+
+  // Team sizes drive the "no empty team" warning right in the lobby.
+  const sizes = new Array(teamCount).fill(0);
+  for (const seat of state.roster) {
+    const team = Math.max(0, Math.min(teamCount - 1, seat.team));
+    sizes[team] += 1;
+  }
+  const emptyTeams = sizes.map((size, index) => (size === 0 ? index : -1)).filter((index) => index >= 0);
 
   const seatCards = state.roster
     .map((seat) => {
       const isMe = seat.id === state.myId;
-      const teamTone = teams ? `team-${seat.team}` : '';
-      const skill = isSkillId(seat.skill) ? skillById(seat.skill).name : '未选';
-      const teamButtons = state.isHost
+      const teamTone = teams ? `team-${Math.min(seat.team, 5)}` : '';
+      // Skills are private: you see your own pick, everyone else is just "已选".
+      const skill = isMe
+        ? isSkillId(seat.skill)
+          ? skillById(seat.skill).name
+          : '还没选'
+        : seat.hasSkill
+          ? '已选择（保密）'
+          : '未选择';
+      const teamButtons = state.isHost && teams
         ? `<div class="lobby-teams">
-             ${[0, 1]
+             ${Array.from({ length: teamCount }, (_, team) => team)
                .map(
                  (team) =>
-                   `<button type="button" class="chip tiny ${seat.team === team ? 'on' : ''} team-${team}"
-                      data-lobby-team="${team}" data-lobby-id="${seat.id}">${team === 0 ? '红队' : '蓝队'}</button>`
+                   `<button type="button" class="chip tiny team-${team} ${seat.team === team ? 'on' : ''}"
+                      data-lobby-team="${team}" data-lobby-id="${seat.id}">${TEAM_NAMES[team] ?? `第${team + 1}队`}</button>`
                )
                .join('')}
            </div>`
-        : '';
+        : teams
+          ? `<div class="lobby-seat-team">${TEAM_NAMES[seat.team] ?? `第${seat.team + 1}队`}</div>`
+          : '';
       return `
         <div class="lobby-seat ${isMe ? 'is-me' : ''} ${teamTone}">
           <div class="lobby-seat-head">
@@ -769,6 +788,26 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
       </button>`
   ).join('');
 
+  const teamTools = state.isHost
+    ? `<div class="setting-row">
+         <span class="setting-label">队伍</span>
+         <div class="chip-row">
+           <button type="button" class="chip" id="lobby-team-less" ${teamCount <= 2 ? 'disabled' : ''}>− 减队</button>
+           <span class="lobby-team-count">${teamCount} 队</span>
+           <button type="button" class="chip" id="lobby-team-more" ${teamCount >= 6 ? 'disabled' : ''}>+ 加队</button>
+           <button type="button" class="chip" id="lobby-auto-teams">自动分队</button>
+           <button type="button" class="chip" id="lobby-fill-teams" ${emptyTeams.length ? '' : 'disabled'}>补齐空队</button>
+         </div>
+       </div>
+       ${
+         emptyTeams.length
+           ? `<p class="tune-hint lobby-warn">${
+               emptyTeams.map((index) => TEAM_NAMES[index] ?? `第${index + 1}队`).join('、')
+             }还没有人，开始对局前每队至少要有 1 人。</p>`
+           : ''
+       }`
+    : '';
+
   const ruleButtons = state.isHost
     ? `
       <div class="setting-row">
@@ -778,6 +817,7 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
           <button type="button" data-lobby-mode="team" class="${state.mode === 'team' ? 'on' : ''}">分队</button>
         </div>
       </div>
+      ${state.mode === 'team' ? teamTools : ''}
       <div class="setting-row">
         <span class="setting-label">结束方式</span>
         <div class="chip-row">
@@ -827,29 +867,34 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
     <h1>房间<span class="accent">!</span></h1>
     <p class="lan-lead">${
       state.isHost
-        ? '把房间地址发给朋友，等人齐了、都准备后点「开始对局」。'
-        : '等人齐；选好你的技能后点「准备」，房主开始对局。'
+        ? '把房间地址发给朋友；选技能（别人看不到）、分好队伍、都准备好后点「开始对局」。'
+        : '等人齐；选好你的技能（别人看不到）后点「准备」，房主开始对局。'
     }</p>
     ${state.roomUrl ? `<div class="lobby-url">房间地址 <b>${state.roomUrl}</b></div>` : ''}
     <div class="lobby-seats">${seatCards || '<p class="lan-hint">还没有人加入…</p>'}</div>
     <div class="setting-block">
       <div class="setting-head">
         <span class="setting-label">你的技能</span>
-        <span class="setting-hint">每人自己选，别人改不了你的</span>
+        <span class="setting-hint">只有你自己看得到；对手只会在对局里吃到它</span>
       </div>
       <div class="skill-cards">${mySkills}</div>
     </div>
-    ${state.isHost ? '<div class="lobby-auto"><button type="button" class="chip" id="lobby-auto-teams">自动分队</button></div>' : ''}
     ${ruleButtons}
+    ${tuningPanelHtml(!state.isHost)}
     <div class="actions">
       ${
         state.isHost
-          ? `<button class="primary" id="lobby-start">开始对局</button>`
+          ? `<button class="primary" id="lobby-start" ${emptyTeams.length ? 'disabled' : ''}>开始对局</button>`
           : `<button class="primary" id="lobby-ready">${me?.ready ? '取消准备' : '准备'}</button>`
       }
       <button class="ghost" id="lobby-leave">离开房间</button>
       <span class="hint">${readyCount}/${state.roster.length} 已准备</span>
     </div>
+    ${
+      emptyTeams.length && state.isHost
+        ? '<div class="tip"><span class="dot"></span> 每支队伍至少要有 1 人才能开始（点「补齐空队」最快）。</div>'
+        : ''
+    }
   `;
 }
 
@@ -884,6 +929,35 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
   root.querySelector<HTMLButtonElement>('#lobby-auto-teams')?.addEventListener('click', () => {
     sound.ui();
     scene.autoTeams();
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-fill-teams')?.addEventListener('click', () => {
+    sound.ui();
+    scene.fillTeams();
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-team-more')?.addEventListener('click', () => {
+    sound.ui();
+    scene.setTeamCount((state.teams ?? 2) + 1);
+    state.teams = (state.teams ?? 2) + 1;
+    repaint();
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-team-less')?.addEventListener('click', () => {
+    sound.ui();
+    const next = Math.max(2, (state.teams ?? 2) - 1);
+    scene.setTeamCount(next);
+    state.teams = next;
+    // Seats on a removed team fall back to the last remaining one.
+    state.roster = state.roster.map((seat) => ({ ...seat, team: Math.min(seat.team, next - 1) }));
+    repaint();
+  });
+
+  // The room doubles as the internal-test bench: the host can tune every number
+  // here and it ships with the room config; guests see it read-only.
+  bindTuningPanel(root, () => {
+    scene.applyRoomConfig(state.match);
+    window.dispatchEvent(new Event('tankgame:rerender'));
   });
 
   const setMatch = (patch: Partial<typeof state.match>) => {
@@ -944,6 +1018,16 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
     if (waiting.length) {
       window.alert(`还有 ${waiting.length} 人没准备：${waiting.map((seat) => seat.name).join('、')}`);
       return;
+    }
+    // ...and every team needs at least one player.
+    if (state.mode === 'team') {
+      const empty = scene.emptyTeams();
+      if (empty.length) {
+        window.alert(
+          `${empty.map((index) => TEAM_NAMES[index] ?? `第${index + 1}队`).join('、')}还没有人，每队至少 1 人才能开始。`
+        );
+        return;
+      }
     }
     scene.startRoomMatch();
   });

@@ -167,6 +167,49 @@ squeeze.close();
     JSON.stringify({ target, before, wanted, after: teamOf() })
   );
 
+  // Team count: the host can add teams, and an empty team blocks the start.
+  host.send({ t: 'teams', count: 3 });
+  check('the host can add a team', await waitFor(() => lastRoster()?.teams === 3, 1500), JSON.stringify(lastRoster()?.teams));
+  check(
+    'every team is reported to the guests',
+    (g2.messages.filter((m) => m.t === 'roster').pop() as { teams?: number })?.teams === 3
+  );
+
+  // Nobody is on team 3 yet, so starting must be refused.
+  const seats = lastRoster()?.players ?? [];
+  host.send({ t: 'begin' });
+  const refused = await waitFor(() => host.messages.some((m) => m.t === 'lobby-error' && m.reason === 'empty-team'), 1500);
+  check('an empty team blocks the start', refused);
+  check('the refusal names the empty team', (() => {
+    const err = host.messages.filter((m) => m.t === 'lobby-error').pop() as { teams?: number[] } | undefined;
+    return Array.isArray(err?.teams) && err!.teams!.length === 3 && err!.teams!.some((size) => size === 0);
+  })());
+
+  // 补齐空队 moves somebody into it.
+  host.send({ t: 'fill-teams' });
+  check(
+    'fill-teams seats somebody on every team',
+    await waitFor(() => {
+      const players = lastRoster()?.players ?? [];
+      const sizes = new Array(lastRoster()?.teams ?? 2).fill(0);
+      for (const p of players) sizes[Math.min(p.team, sizes.length - 1)] += 1;
+      return sizes.every((size: number) => size > 0);
+    }, 1500),
+    JSON.stringify(lastRoster()?.players?.map((p: { id: string; team: number }) => `${p.id}:${p.team}`))
+  );
+  check('nobody was left without a seat', (lastRoster()?.players?.length ?? 0) === seats.length);
+
+  // Shrinking the team count re-homes players from the removed team.
+  host.send({ t: 'teams', count: 2 });
+  check(
+    'removing a team re-homes its players',
+    await waitFor(() => {
+      const players = lastRoster()?.players ?? [];
+      return lastRoster()?.teams === 2 && players.every((p: { team: number }) => p.team <= 1);
+    }, 1500),
+    JSON.stringify(lastRoster()?.players?.map((p: { id: string; team: number }) => `${p.id}:${p.team}`))
+  );
+
   // Ready state is per seat.
   g2.send({ t: 'ready', ready: true });
   check(
