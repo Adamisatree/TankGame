@@ -1,13 +1,95 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-25T04:14:15.844Z",
+  "generatedAt": "2026-10-25T06:54:44.158Z",
   "releases": [
+    {
+      "tag": "v1.3.0",
+      "version": "1.3.0",
+      "name": "v1.3.0",
+      "notes": "## What's Changed\n* 清掉遗留的单文件版，CI 只上传本次构建 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/12\n* updates.json 只保留可安装文件 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/13\n* v1.3.0：血量/部位伤害、炮口随车体、2–10 人乱斗与团队 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/14\n* v1.3 收尾：炮管过热 + 闪现无敌 + 真正的 N 人对战 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/15\n* fix(ci): updatetest 不再把协议版本写死成 3 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/16\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.2.0...v1.3.0",
+      "publishedAt": "2026-10-25T06:54:34Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.3.0-arm64-setup.exe",
+          "size": 82741990,
+          "sha256": "0a39a4b43a02715cbf1059a6c7616e7a3dfd71d44dabc36d7c452be6630d0c50",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.3.0-arm64.dmg",
+          "size": 96080954,
+          "sha256": "b964c813188f0dc74bc00fbbfa9ff7ddb37da74ccfcfadd1a947fb8d80254051",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.3.0-arm64.zip",
+          "size": 92561667,
+          "sha256": "f0e3e84e60ef59f876258711200e95e8207097a6995a9a36b343b4af53680acb",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.3.0-portable.exe",
+          "size": 78546763,
+          "sha256": "6063f68d12272d19faab3d09c1c93577a0036e7c856a96caafd15c0fb947fbd2",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.3.0-portable.html",
+          "size": 1618961,
+          "sha256": "82691434334b8cbc03f66e8c28fcacc7551bd74369a4e3671a3b3beb2d53abaf",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.3.0-setup.exe",
+          "size": 160923927,
+          "sha256": "0068042d788d8e8f7ad0309cdcb2fa433a211d9ced9232f16d2bc86a886d4108",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.3.0-x64-setup.exe",
+          "size": 78779345,
+          "sha256": "bb94e634da33d39a27e6868a519ebb2aba6753b404e327833b6327caaacb3b9e",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.3.0-x64.dmg",
+          "size": 102113431,
+          "sha256": "255e8bf228f5d32cd8cdf3ba72019b3430e201b8c00d77a208c2d1d78416d9f7",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.3.0/TankGame-1.3.0-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.2.0",
       "version": "1.2.0",
       "name": "v1.2.0",
-      "notes": "## What's Changed\n* README 指向 v1.1.0 安装包 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/9\n* v1.2.0：自动更新 + 任意版本升级/降级 + 局域网版本拦截 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/10\n* 修复 v1.2.0 CI：nsis.allowDowngrade + 测试服务器加固 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/11\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.1.0...v1.2.0",
+      "notes": "## v1.2.0 · 自动更新、任意版本升级/降级、局域网版本锁\n\n**新增**\n- 🔄 **自动更新（走镜像，不直连 GitHub）**：检查更新时并发问 jsDelivr CDN、几个加速站和 GitHub API，谁先回谁用、再等一小会儿取其中**最新**的一份——因此既快，也不会被镜像的旧缓存挡住新版本\n- 🧭 **任意版本装**：菜单里的「更新与版本」面板列出所有版本，往上装是升级，**往下装就是降级**；下载好的安装包留在本机 `versions/` 里，再切回来不用重新下\n- 🚀 **镜像加速 + 自动重试**：`ghfast.top` / `gh-proxy.com` / `ghproxy.net` / `gh.llkk.cc` 等前缀镜像逐条重试，最后才回落到 github.com；面板里可以「镜像测速」看谁最快，也能手动固定线路\n- 🔐 **下载校验**：边下边算 SHA-256，与清单里 GitHub 记录的摘要比对；校验不过或被代理截断自动换下一条线路\n- 🚫 **局域网版本锁**：两边版本不一致直接拒绝并提示「房主 vX / 你 vY」，不会打一半不同步\n- 菜单标题栏常驻显示当前版本号\n\n**发布流程**\n- `updates.json` 在 CI 发布完成后自动重新生成：提交回 `main` + 挂到 release，镜像站因此始终拿得到最新清单\n- `mirrors.json` 集中管理镜像前缀，加新站改一个文件即可\n\n**下载**\n- Windows：`TankGame-1.2.0-setup.exe`（x64+arm64 合一）/ `-x64-setup.exe` / `-arm64-setup.exe` / 免安装 `-portable.exe`\n- macOS：`TankGame-1.2.0-arm64.dmg`（M 芯片）、`TankGame-1.2.0-x64.dmg`（Intel）\n- 什么都不装：`TankGame-1.2.0-portable.html`，双击即玩\n\n**修复**\n- 单文件版在 `file://` 下 `localStorage` 不可用时不再白屏（jsdom 冒烟测试抓到的真实 bug）\n- 炮口贴墙仍会正确夹到墙面之前（沿用 1.1.0 的修正）\n\n> 未做代码签名：Windows 首次运行点「更多信息 → 仍要运行」；macOS 右键「打开」或 `xattr -dr com.apple.quarantine /Applications/TankGame.app`\n\n**测试**：`selftest` 103、`smoke` 45、`lantest` 30、`test:update` 77、`test:desktop` 7、`verify:single` 26，全部通过。",
       "publishedAt": "2026-10-25T04:12:32Z",
       "prerelease": false,
       "assets": [
