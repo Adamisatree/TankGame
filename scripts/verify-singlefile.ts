@@ -251,6 +251,7 @@ const checks: [string, boolean, string?][] = [
   ['the internal tuning panel is present', !!doc.querySelector('#tuning-panel')],
   ['the tuning panel is locked until the passphrase is entered', !!doc.querySelector('#tune-pass')],
   ['the tuning panel exposes fire rate', !!doc.querySelector('[data-tune="fireCooldown"]')],
+  ['the tuning panel exposes the aiming-line bounce knob', !!doc.querySelector('[data-tune="aimBounces"]')],
   ['the tuning panel exposes heat and damage knobs',
     !!doc.querySelector('[data-tune="heatPerShot"]') && !!doc.querySelector('[data-tune="dmgBack"]')],
   ['the tuning panel can reset and export', !!doc.querySelector('#tune-reset') && !!doc.querySelector('#tune-export')],

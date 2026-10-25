@@ -3205,30 +3205,77 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private drawAimGuide(g: Phaser.GameObjects.Graphics, tank: Tank, color: number, baseAlpha: number): void {
+  /** How many bounces the dashed aiming line shows (内测可调, 0..6). */
+  aimPreviewBounces(): number {
+    const value = tuning().aimBounces;
+    return Math.max(0, Math.min(6, Math.round(Number.isFinite(value) ? value : 2)));
+  }
+
+  /**
+   * The geometry of the preview line: one leg per straight run, plus whether a
+   * real reflection happens at its end.
+   *
+   * A shell with `maxBounces` survives that many bounces and dies on the wall
+   * after them, so the preview stops after `bounces + 1` legs. Crates eat
+   * shells, so a crate ends the line without a reflection.
+   */
+  private aimPreviewLegs(
+    tank: Tank
+  ): { x1: number; y1: number; x2: number; y2: number; bounce: boolean }[] {
     const start = tank.muzzle(44);
     let px = start.x;
     let py = start.y;
     let dx = Math.cos(tank.turretAngle);
     let dy = Math.sin(tank.turretAngle);
     const range = 2200;
+    const bounces = this.aimPreviewBounces();
+    const crateBoxes = this.crates.filter((crate) => crate.alive).map((crate) => crate.box);
+    const legs: { x1: number; y1: number; x2: number; y2: number; bounce: boolean }[] = [];
 
-    for (let b = 0; b <= 4; b++) {
-      const hit = sweepCircleBox(px, py, BULLET.radius, dx * range, dy * range, this.layout.walls);
+    for (let b = 0; b <= bounces; b += 1) {
+      const wallHit = sweepCircleBox(px, py, BULLET.radius, dx * range, dy * range, this.layout.walls);
+      const crateHit = sweepCircleBox(px, py, BULLET.radius, dx * range, dy * range, crateBoxes);
+      // `remaining` is the distance left after the hit, so the bigger one is nearer.
+      const crateFirst = !!crateHit && (!wallHit || crateHit.remaining > wallHit.remaining);
+      const hit = crateFirst ? crateHit : wallHit;
       const len = hit ? range - hit.remaining : range;
-      const alpha = Math.max(0.1, baseAlpha - b * baseAlpha * 0.22);
-      this.dashedLine(g, px, py, px + dx * len, py + dy * len, color, alpha, 14, 9, b === 0 ? 2.3 : 1.7);
+      legs.push({
+        x1: px,
+        y1: py,
+        x2: px + dx * len,
+        y2: py + dy * len,
+        // Only a wall that is not the final stop reflects the shell.
+        bounce: b < bounces && !!wallHit && !crateFirst,
+      });
       px += dx * len;
       py += dy * len;
-      if (!hit) break;
+      if (!hit || crateFirst) break;
       const r = reflect(dx, dy, hit.nx, hit.ny);
       dx = r.x;
       dy = r.y;
       px += hit.nx * 0.6;
       py += hit.ny * 0.6;
-      g.lineStyle(1.4, color, alpha + 0.1);
-      g.strokeCircle(px, py, 4);
     }
+    return legs;
+  }
+
+  /**
+   * The dashed aiming line: exactly `aimPreviewBounces()` reflections, so the
+   * dot count *is* the bounce count. Cosmetic only — `maxBounces` still decides
+   * what real shells do.
+   */
+  private drawAimGuide(g: Phaser.GameObjects.Graphics, tank: Tank, color: number, baseAlpha: number): void {
+    const legs = this.aimPreviewLegs(tank);
+    const bounces = this.aimPreviewBounces();
+    legs.forEach((leg, b) => {
+      // Fade along the path, so the far legs read as "maybe" instead of "there".
+      const alpha = Math.max(0.12, baseAlpha * (1 - b / (bounces + 1)));
+      this.dashedLine(g, leg.x1, leg.y1, leg.x2, leg.y2, color, alpha, 14, 9, b === 0 ? 2.3 : 1.7);
+      if (leg.bounce) {
+        g.lineStyle(1.4, color, alpha + 0.1);
+        g.strokeCircle(leg.x2, leg.y2, 4);
+      }
+    });
   }
 
   private dashedLine(

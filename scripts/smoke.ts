@@ -397,6 +397,59 @@ for (let i = 0; i < 30 && !acquired; i++) {
 }
 check('the AI acquires and fires shots', acquired, `charge=${poke.aiCharge}`);
 
+// --- v1.5: the dashed aiming line follows the (tunable) bounce count.
+{
+  const T = await import('../src/game/tuning');
+  const aim = poke as unknown as {
+    aimPreviewBounces: () => number;
+    aimPreviewLegs: (tank: unknown) => { bounce: boolean }[];
+  };
+  const keep = { x: poke.p1.x, y: poke.p1.y, turret: poke.p1.turretAngle };
+  poke.p1.x = 640;
+  poke.p1.y = 360;
+  // Aim around the compass and keep the longest line this map allows, so the
+  // check is about the bounce count and not about one unlucky wall.
+  const longest = (): { legs: number; reflections: number } => {
+    let best = { legs: 0, reflections: 0 };
+    for (let i = 0; i < 72; i += 1) {
+      poke.p1.turretAngle = (i / 72) * Math.PI * 2;
+      const legs = aim.aimPreviewLegs(poke.p1);
+      const reflections = legs.filter((leg) => leg.bounce).length;
+      if (reflections > best.reflections || (reflections === best.reflections && legs.length > best.legs)) {
+        best = { legs: legs.length, reflections };
+      }
+    }
+    return best;
+  };
+
+  check('the aiming line previews two bounces by default', aim.aimPreviewBounces() === 2, `${aim.aimPreviewBounces()}`);
+  const shipped = longest();
+  check('two bounces means two reflections', shipped.reflections === 2, JSON.stringify(shipped));
+  check('two bounces means three straight legs', shipped.legs === 3, JSON.stringify(shipped));
+
+  T.setTuning({ aimBounces: 4 });
+  const four = longest();
+  check('the line follows a raised bounce count', aim.aimPreviewBounces() === 4 && four.reflections === 4, JSON.stringify(four));
+  check('four bounces means five legs', four.legs === 5, JSON.stringify(four));
+
+  T.setTuning({ aimBounces: 0 });
+  const straight = longest();
+  check('zero bounces is one straight leg', straight.legs === 1 && straight.reflections === 0, JSON.stringify(straight));
+
+  T.setTuning({ aimBounces: 99 });
+  check('the bounce count is clamped', aim.aimPreviewBounces() === 6, `${aim.aimPreviewBounces()}`);
+
+  T.resetTuning();
+  const back = longest();
+  check('resetting restores the two-bounce line', back.legs === 3 && back.reflections === 2, JSON.stringify(back));
+  check('the line never bounces more than it is told to', back.reflections <= aim.aimPreviewBounces());
+  check('the shell bounce limit is a separate knob', T.tuning().maxBounces === 2, `${T.tuning().maxBounces}`);
+
+  poke.p1.x = keep.x;
+  poke.p1.y = keep.y;
+  poke.p1.turretAngle = keep.turret;
+}
+
 // --- pause / resume.
 poke.setPaused(true);
 await wait(150);
