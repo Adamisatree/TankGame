@@ -412,7 +412,14 @@ check('server reads its version from package.json', /package\.json/.test(lanServ
 check('server compares versions on join', /reject/.test(lanServerSource) && /hostVersion/.test(lanServerSource));
 check('server reports version in /info', /version/.test(lanServerSource));
 const protocolSource = await readFile(new URL('../src/net/protocol.ts', import.meta.url), 'utf8');
-check('protocol version bumped', /PROTOCOL_VERSION\s*=\s*3/.test(protocolSource));
+// Bumping the protocol is expected (v3 → v4 for HP, v5 for ten seats and heat),
+// so this asserts the floor instead of one exact number.
+const protocolVersion = Number(/PROTOCOL_VERSION\s*=\s*(\d+)/.exec(protocolSource)?.[1] ?? 0);
+check('protocol version is at least 3', protocolVersion >= 3, `got ${protocolVersion}`);
+check(
+  'snapshots carry barrel heat in the protocol',
+  /heat:\s*number/.test(protocolSource) && /heatLocked:\s*number/.test(protocolSource)
+);
 
 // ------------------------------------------------------------------ summary
 console.log('');
