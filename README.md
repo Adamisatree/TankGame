@@ -10,11 +10,17 @@
 
 ![tech](https://img.shields.io/badge/Phaser-3.90-8a4b9c) ![tech](https://img.shields.io/badge/TypeScript-5.9-3178c6) ![tech](https://img.shields.io/badge/Vite-5-646cff)
 
+> **装不上？被系统拦下了？**
+> Windows 提示「Windows 已保护你的电脑」「无法验证此文件的数字签名」，macOS 提示
+> 「已损坏，无法打开」，浏览器说镜像站证书无效，或者更新面板说「校验失败」——
+> 这些通常都不是文件真的坏了（本项目没有买代码签名证书）。逐条处理办法、sha256 自检和 13 条 Q&A：
+> [**证书 / 签名 / 安装包问题排查**](docs/troubleshoot-signing.md)。
+
 ## 三种打开方式
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.2.0-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-portable.html)是一个**完全自包含**的网页（1.5 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.5.1-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -27,18 +33,21 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.2.0-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.2.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.2.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.2.0-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.2.0-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.2.0-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.5.1-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.5.1-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.5.1-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.5.1-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.5.1-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.5.1-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
 > 安装包没有做代码签名（个人项目拿不到证书），所以：
 > - Windows：首次运行 SmartScreen 会拦一下 → 点「更多信息」→「仍要运行」；
 > - macOS：首次打开提示「无法验证开发者」→ 右键点图标选「打开」，或执行 `xattr -dr com.apple.quarantine /Applications/TankGame.app`。
+>
+> 装不上、提示「证书损坏 / 无法验证签名 / 已损坏」、更新器说校验失败？
+> 看 [证书与安装包问题排查（含 Q&A）](docs/troubleshoot-signing.md)。
 
 ### 3. 开发模式
 
@@ -59,7 +68,7 @@ npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
 
 ## 自动更新、换版本、镜像下载
 
-菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.2.0`）：
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.5.1`）：
 
 - **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
 - **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
@@ -97,7 +106,7 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 
 输入框做了处理：**中文输入法打出来的「192。168。1。10」会自动变成「192.168.1.10」**，全角数字也会转成半角，粘贴整句话只会保留地址部分——之前那种「打不出点」的问题不会再出现。
 
-**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 v1.2.0 / 你 v1.1.0，请更新到同一版本」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
+**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.5.1，你是 1.5.0。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
 
 技术上是**房主权威**：房主的机器跑物理、算道具、判命中，每秒 30 次把状态推给对方，对方只上传操作意图。所以两边看到的结果一定一致，也不怕对方改内存。
 
