@@ -7,10 +7,25 @@ import { advanceBullet, type BulletBody, type CrateBox } from '../src/engine/bul
 import { circleBox, reflect, sweepCircleBox, type Box } from '../src/engine/physics';
 import { bulletThreatAt, nearestWallGap, pickHeading, steerTo } from '../src/engine/steer';
 import { LEVELS, buildLayout, levelById, randomLevelIndex, validateLevels } from '../src/engine/level';
+import * as R from '../src/game/rules';
 import { PICKUP_KINDS, rollPickupKind, PICKUP_RADIUS } from '../src/game/pickups';
 import { SKILLS, skillById, isSkillId, RAGE_SHOTS } from '../src/game/skills';
 import * as H from '../src/game/heat';
-import { BLINK_PROTECT, FIRE_COOLDOWN } from '../src/game/config';
+import {
+  TUNING_DEFAULTS,
+  TUNING_SPEC,
+  exportTuning,
+  importTuning,
+  isTuningUnlocked,
+  lockTuning,
+  normalizeTuning,
+  resetTuning,
+  setTuning,
+  tuning,
+  tuningDiff,
+  tuningIsCustom,
+  unlockTuning,
+} from '../src/game/tuning';
 import {
   ACTION_LABEL,
   defaultBindings,
@@ -430,9 +445,10 @@ check('reset restores the defaults', getBindings().solo.fire === defaults.solo.f
 
 console.log('barrel heat');
 {
+  const cfg = H.heatCfg();
   let state = H.coldHeat();
   check('a cold barrel can fire', H.canFire(state) && H.heatRatio(state) === 0);
-  check('the first shot adds heat', H.afterShot(state).heat === H.HEAT_PER_SHOT);
+  check('the first shot adds heat', H.afterShot(state).heat === cfg.perShot);
 
   // Unrestricted until the cap: every shot below 100% is allowed.
   state = H.coldHeat();
@@ -461,7 +477,7 @@ console.log('barrel heat');
       overheated = true;
       break;
     }
-    if (Math.abs(seconds % FIRE_COOLDOWN) < 1e-9) state = H.afterShot(state);
+    if (Math.abs(seconds % TUNING_DEFAULTS.fireCooldown) < 1e-9) state = H.afterShot(state);
     seconds += 1 / 60;
   }
   check('holding the trigger overheats the barrel', overheated);
@@ -473,11 +489,73 @@ console.log('barrel heat');
     guard += 1;
   }
   check('the lock lifts once the barrel cools', !state.locked && guard < 600, `${(guard / 60).toFixed(2)}s`);
-  check('unlocking leaves heat below the release point', state.heat <= H.OVERHEAT_RELEASE + 1e-6);
-  check('the countdown runs out exactly when the lock lifts', H.lockSecondsLeft({ heat: H.OVERHEAT_RELEASE, locked: true }) === 0);
+  check('unlocking leaves heat below the release point', state.heat <= cfg.release + 1e-6);
+  check('the countdown runs out exactly when the lock lifts', H.lockSecondsLeft({ heat: cfg.release, locked: true }) === 0);
   check('a cold barrel has no countdown', H.lockSecondsLeft(H.coldHeat()) === 0);
-  check('heat bleed is faster while overheated', H.OVERHEAT_COOL > H.HEAT_DECAY);
-  check('blink grants half a second of protection', Math.abs(BLINK_PROTECT - 0.5) < 1e-9);
+  check('heat bleed is faster while overheated', cfg.overheatCool > cfg.decay);
+  check('blink grants half a second of protection', Math.abs(TUNING_DEFAULTS.blinkProtect - 0.5) < 1e-9);
+
+  // v1.3.1 balance: the barrel should be forgiving, not a cooldown simulator.
+  check('at least 6 shots fit in a cold barrel', H.shotsToOverheat(cfg) >= 6, `${H.shotsToOverheat(cfg)}`);
+  check('the lockout is short', cfg.overheatCool > cfg.decay * 3);
+  // Firing at the maximum rate should still give a long burst before the lock.
+  let burst = 0;
+  let burstState = H.coldHeat();
+  while (!burstState.locked && burst < 60) {
+    burstState = H.cool(burstState, TUNING_DEFAULTS.fireCooldown);
+    burstState = H.afterShot(burstState);
+    burst += 1;
+  }
+  check('a full burst lasts at least 8 shots', burst >= 8, `${burst} shots`);
+}
+
+console.log('hit zones');
+{
+  const up = -Math.PI / 2;
+  // `incoming` is the shell's travel direction; the impact face is opposite it.
+  check('a shell flying at the nose is a front hit', R.hitZone(up, -up) === 'front');
+  check('a shell chasing you hits the rear', R.hitZone(up, up) === 'back');
+  check('a shell flying left at a right-facing tank is a front hit', R.hitZone(0, Math.PI) === 'front');
+  check('a shell flying up at a right-facing tank is a flank hit', R.hitZone(0, -Math.PI / 2) === 'side');
+  // 1.3.0 passed the damage multiplier where the bearing belonged, so the zone
+  // came from a constant (1 or 2 rad) instead of the shell. Those two bearings
+  // both read as "front" for a north-facing hull, which is exactly the reversal
+  // players saw. The smoke test checks the real shot path.
+  check('a multiplier is not a valid bearing', R.hitZone(up, 2) === R.hitZone(up, 1));
+  // The shipped numbers, exactly as asked: nose 7, flank 9, engine deck 12.
+  check('front 7 / side 9 / rear 12', R.ZONE_DAMAGE.front === 7 && R.ZONE_DAMAGE.side === 9 && R.ZONE_DAMAGE.back === 12);
+  check('a rear hit hurts most', R.zoneDamage('back') > R.zoneDamage('front'));
+  check('the multiplier reaches the damage', R.zoneDamage('side', 2) === 18);
+}
+
+console.log('internal tuning');
+{
+  check('defaults keep the shipped damage split', TUNING_DEFAULTS.dmgFront === 7 && TUNING_DEFAULTS.dmgSide === 9 && TUNING_DEFAULTS.dmgBack === 12);
+  check('bounces default to 2', TUNING_DEFAULTS.maxBounces === 2);
+  check('tap-friendly heat defaults', TUNING_DEFAULTS.heatPerShot === 17 && TUNING_DEFAULTS.heatDecay === 12);
+
+  const specKeys = TUNING_SPEC.map((spec) => spec.key).sort();
+  const defaultKeys = (Object.keys(TUNING_DEFAULTS) as (keyof typeof TUNING_DEFAULTS)[]).sort();
+  check('every knob is in the panel', JSON.stringify(specKeys) === JSON.stringify(defaultKeys));
+
+  const filled = normalizeTuning({ fireCooldown: 0.5 });
+  check('missing knobs fall back to defaults', filled.heatPerShot === TUNING_DEFAULTS.heatPerShot && filled.fireCooldown === 0.5);
+  check('out-of-range values are clamped', normalizeTuning({ fireCooldown: 99 }).fireCooldown <= 2);
+  check('garbage values are ignored', normalizeTuning({ heatDecay: 'fast' }).heatDecay === TUNING_DEFAULTS.heatDecay);
+
+  setTuning({ dmgBack: 20 });
+  check('a change is visible immediately', tuning().dmgBack === 20 && tuningIsCustom());
+  check('the panel lists what changed', tuningDiff().some((d) => d.key === 'dmgBack'));
+  check('tuning can be exported and re-imported', importTuning(JSON.stringify(exportTuning()))?.dmgBack === 20);
+  check('a garbage tuning file is rejected', importTuning('not json') === null);
+  resetTuning();
+  check('reset restores the shipped balance', !tuningIsCustom() && tuning().dmgBack === 12);
+
+  lockTuning();
+  check('the panel starts locked', !isTuningUnlocked());
+  check('a wrong passphrase does not unlock', !unlockTuning('nope'));
+  check('the right passphrase unlocks', unlockTuning('tank2026') && isTuningUnlocked());
+  lockTuning();
 }
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);

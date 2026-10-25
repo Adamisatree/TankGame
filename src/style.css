@@ -1077,3 +1077,134 @@ a.chip.ghost {
   opacity: 0.45;
   cursor: default;
 }
+
+/* ---------------------------------------------------------------- 内测面板 */
+
+.tuning-panel {
+  margin: 14px 0 6px;
+  padding: 10px 12px;
+  border: 1.4px dashed rgba(38, 34, 29, 0.35);
+  border-radius: 12px;
+  background: rgba(250, 245, 234, 0.55);
+}
+
+.tuning-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tuning-title {
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.tuning-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  border: 1.2px solid rgba(38, 34, 29, 0.25);
+  color: var(--muted);
+}
+
+.tuning-badge.on {
+  border-color: #b8791d;
+  color: #b8791d;
+}
+
+.tuning-head .chip {
+  margin-left: auto;
+}
+
+.tuning-body {
+  margin-top: 10px;
+}
+
+.tune-lock {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tune-lock input {
+  flex: 1;
+  padding: 6px 9px;
+  border: 1.4px solid rgba(38, 34, 29, 0.3);
+  border-radius: 9px;
+  background: #fffdf7;
+  font: inherit;
+  font-size: 14px;
+}
+
+.tune-error {
+  color: var(--danger, #c0392b);
+  font-size: 12px;
+}
+
+.tune-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tune-hint {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.tune-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px 18px;
+}
+
+.tune-group-title {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(38, 34, 29, 0.15);
+  padding-bottom: 3px;
+  margin-bottom: 4px;
+}
+
+.tune-row {
+  display: grid;
+  grid-template-columns: 88px 1fr 62px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12.5px;
+}
+
+.tune-row.is-changed .tune-value {
+  color: #b8791d;
+  font-weight: 700;
+}
+
+.tune-name i {
+  display: block;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.tune-row input[type='range'] {
+  width: 100%;
+  accent-color: var(--player, #3f9c8f);
+}
+
+.tune-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tune-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}

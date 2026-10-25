@@ -4,7 +4,7 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 export type NetRole = 'host' | 'guest';
 
@@ -111,7 +111,17 @@ export type HostMessage =
   /** A player left on purpose; everyone else sees it as a surrender. */
   | { t: 'surrender'; by: string }
   /** Host → server: room capacity, mode and the shared match rules. */
-  | { t: 'config'; mode?: 'ffa' | 'team'; capacity?: number; killTarget?: number; timeLimit?: number; friendlyFire?: boolean; selfDamage?: boolean };
+  | {
+      t: 'config';
+      mode?: 'ffa' | 'team';
+      capacity?: number;
+      killTarget?: number;
+      timeLimit?: number;
+      friendlyFire?: boolean;
+      selfDamage?: boolean;
+      /** 内测 balance knobs, so every machine simulates the same physics. */
+      tuning?: Record<string, number>;
+    };
 
 export interface RosterEntry {
   id: string;
@@ -135,7 +145,7 @@ export type ServerMessage =
     }
   | { t: 'paired'; skill?: string }
   | { t: 'roster'; players: RosterEntry[]; capacity: number; mode: 'ffa' | 'team'; host: string | null }
-  | { t: 'config'; config: Record<string, unknown> }
+  | { t: 'config'; config: Record<string, unknown>; tuning?: Record<string, number> }
   | { t: 'peer'; state: 'joined' | 'left'; id?: string; host?: boolean; skill?: string; version?: string }
   | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
   | { t: 'surrender'; by: string }

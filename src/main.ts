@@ -25,6 +25,7 @@ import {
 import { DEFAULT_LAN_PORT } from './net/protocol';
 import { CAPACITY_CHOICES, KILL_TARGET_CHOICES, TIME_LIMIT_CHOICES } from './game/rules';
 import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
+import { bindTuningPanel, tuningPanelHtml } from './ui/tuningPanel';
 import { APP_VERSION } from './version';
 import './update/types';
 
@@ -556,7 +557,7 @@ function settingsPanel(): string {
             .join('')}
         </div>
       </div>
-      <div class="setting-note">${versus ? '对战模式：每人 3 条命，先被击毁的一方输掉这一局。' : d.blurb}</div>
+      <div class="setting-note">${versus ? '对战模式：双方各 100 血，先被打空的一方输掉这一局。' : d.blurb}</div>
       ${mapPicker()}
       ${skillPicker()}
       ${settings.mode === 'lan' ? lanPanel() : ''}
@@ -708,18 +709,29 @@ function render(next: OverlayState): void {
         <button class="primary" id="btn-start">开始游戏</button>
         <span class="hint">或按 Enter</span>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
+        <button class="ghost" id="btn-tuning" title="内测参数（需要密码）">内测</button>
       </div>
+      ${tuningPanelHtml(settings.mode === 'lan' && settings.lanRole === 'guest')}
       <div class="tip"><span class="dot"></span> ${
         settings.mode === 'lan'
           ? settings.lanRole === 'host'
-            ? '联机：开好后把房间地址发给朋友（浏览器直接打开即可）· 1v1，各 3 条命'
-            : '联机：填房主地址，或点「扫描局域网房间」自动找到 · 1v1，各 3 条命'
+            ? '联机：开好后把房间地址发给朋友（浏览器直接打开即可）· 2–10 人，各 100 血'
+            : '联机：填房主地址，或点「扫描局域网房间」自动找到 · 2–10 人，各 100 血'
           : settings.mode === 'versus'
-            ? `双人：先被打光 3 条命的一方输 · 当前地图 ${mapName}`
-            : `单人：你有 ${DIFFICULTIES[settings.difficulty].lives} 条命，从「${mapName}」开始连打 5 关`
+            ? `双人：各 100 血，先被打空的一方输 · 当前地图 ${mapName}`
+            : `单人：100 血对抗 AI（${DIFFICULTIES[settings.difficulty].label}），从「${mapName}」开始连打 5 关`
       }</div>
     `;
     bindSettings(card);
+    bindTuningPanel(card, () => {
+      // Balance changed: refresh the mode label / tip without losing focus.
+      window.dispatchEvent(new Event('tankgame:rerender'));
+    });
+    card.querySelector<HTMLButtonElement>('#btn-tuning')?.addEventListener('click', () => {
+      const body = card.querySelector<HTMLElement>('#tuning-body');
+      if (body && body.hidden) card.querySelector<HTMLButtonElement>('#tuning-toggle')?.click();
+      else card.querySelector<HTMLElement>('#tuning-panel')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
   } else if (next.kind === 'paused') {
     card.innerHTML = `
       <div class="kicker">Paused</div>
@@ -732,10 +744,17 @@ function render(next: OverlayState): void {
         <button id="btn-restart">重新开始</button>
         <button class="ghost" id="btn-quit">退出对局</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
+        <button class="ghost" id="btn-tuning">内测</button>
       </div>
+      ${tuningPanelHtml(settings.mode === 'lan' && settings.lanRole === 'guest')}
       <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 退出对局会直接结束这一局${settings.mode === 'lan' ? '，对手会看到「你已经投降」' : ''}</div>
     `;
     bindKeyEditor(card);
+    bindTuningPanel(card, () => window.dispatchEvent(new Event('tankgame:rerender')));
+    card.querySelector<HTMLButtonElement>('#btn-tuning')?.addEventListener('click', () => {
+      const body = card.querySelector<HTMLElement>('#tuning-body');
+      if (body) body.hidden = !body.hidden;
+    });
   } else if (next.kind === 'gameover') {
     card.innerHTML = `
       <div class="kicker">Game Over</div>
@@ -885,6 +904,16 @@ if (document.fonts?.ready) {
 }
 
 window.addEventListener('keydown', (event) => {
+  // F9: the internal balance panel, from the menu or from a paused match.
+  if (event.key === 'F9') {
+    event.preventDefault();
+    if (state.kind === 'start' || state.kind === 'paused') {
+      const body = document.querySelector<HTMLElement>('#tuning-body');
+      if (body && body.hidden) document.querySelector<HTMLButtonElement>('#tuning-toggle')?.click();
+      body?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    return;
+  }
   if (state.kind !== 'start') return;
   if (document.querySelector('.key-btn.capturing')) return;
   if (event.key === 'Enter' || event.key === ' ') {

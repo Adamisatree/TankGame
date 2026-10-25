@@ -4,25 +4,15 @@ import { advanceBullet, type BulletTarget } from '../engine/bullet';
 import { LEVELS, buildLayout, levelIndexById, randomLevelIndex, type Layout, type PlayRect } from '../engine/level';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../engine/physics';
 import { bulletThreatAt, pickHeading, steerTo, type ThreatBullet } from '../engine/steer';
-import {
-  BLINK_PROTECT,
-  BULLET,
-  COLORS,
-  FIRE_COOLDOWN,
-  FONT,
-  GAME_H,
-  GAME_W,
-  RESPAWN_DELAY,
-  RESPAWN_PROTECT,
-  TANK,
-} from './config';
+import { BULLET, COLORS, FONT, GAME_H, GAME_W, TANK } from './config';
 import { MAX_HP } from './rules';
-import { heatRatio, lockSecondsLeft } from './heat';
+import { heatCfg, heatRatio, lockSecondsLeft, shotsToOverheat } from './heat';
+import { setTuning, tuning, tuningDiff, tuningIsCustom } from './tuning';
 import { OVERLAY_EVENT, type OverlayState } from './events';
 import { Sketch } from './Sketch';
 import { seatColor, Tank, teamColor, TURRET_LIMIT, type TankId } from './Tank';
 import { getBindings, keyLabel, SEAT_ACTIONS, type SeatAction, type SeatBindings } from './keybinds';
-import { makePickup, PICKUPS, PICKUP_RADIUS, PICKUP_RESPAWN, rollPickupKind, type Pickup } from './pickups';
+import { makePickup, PICKUPS, PICKUP_RADIUS, rollPickupKind, type Pickup } from './pickups';
 import { isSkillId, RAGE_SHOTS, skillById, type SkillId } from './skills';
 import { makeTextures, paperBackground } from './art';
 import { sound } from './Sound';
@@ -32,7 +22,6 @@ import {
   chooseRespawn,
   evaluateMatch,
   hitZone,
-  zoneDamage,
   type HitZone,
   type MatchResult,
   type RespawnCandidate,
@@ -113,7 +102,9 @@ export class GameScene extends Phaser.Scene {
   private levelText!: Phaser.GameObjects.Text;
   private scoreText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
-  private bannerText!: Phaser.GameObjects.Text;
+  /** Corner message lines (newest at the bottom). Replaces the old centre banner. */
+  private toastTexts: Phaser.GameObjects.Text[] = [];
+  private toasts: { text: string; life: number; total: number }[] = [];
   private modeText!: Phaser.GameObjects.Text;
 
   private p1!: Tank;
@@ -250,18 +241,17 @@ export class GameScene extends Phaser.Scene {
 
     this.buildKeys();
 
-    this.levelText = this.hud.text(GAME_W / 2, 40, '', 24, COLORS.ink);
-    this.scoreText = this.hud.text(GAME_W - 48, 40, '', 22, COLORS.ink, 'right');
-    this.modeText = this.hud.text(PLAY_RECT.x + 8, 40, '', 18, COLORS.ink, 'left');
+    // ---- top bar, three columns: left = you, middle = match, right = them.
+    this.levelText = this.hud.text(GAME_W / 2, 16, '', 18, COLORS.ink);
+    this.scoreText = this.hud.text(GAME_W / 2, 56, '', 20, COLORS.ink);
+    this.modeText = this.hud.text(GAME_W / 2, 36, '', 13, COLORS.ink);
     this.modeText.setAlpha(0.55);
-    this.hintText = this.hud.text(GAME_W / 2, GAME_H - 24, '', 16, COLORS.ink);
-    this.hintText.setAlpha(0.55);
-    this.skillLabel1 = this.hud.text(PLAY_RECT.x + 8, 61, '', 15, COLORS.ink, 'left');
-    this.skillLabel1.setAlpha(0.8);
-    this.skillLabel2 = this.hud.text(PLAY_RECT.x + PLAY_RECT.w - 8, 61, '', 15, COLORS.ink, 'right');
-    this.skillLabel2.setAlpha(0.8);
-    this.bannerText = this.hud.text(GAME_W / 2, GAME_H / 2, '', 64, COLORS.ink);
-    this.bannerText.setAlpha(0);
+    this.hintText = this.hud.text(GAME_W / 2, GAME_H - 18, '', 13, COLORS.ink);
+    this.hintText.setAlpha(0.45);
+    this.skillLabel1 = this.hud.text(PLAY_RECT.x + 10, 64, '', 13, COLORS.ink, 'left');
+    this.skillLabel1.setAlpha(0.75);
+    this.skillLabel2 = this.hud.text(PLAY_RECT.x + PLAY_RECT.w - 10, 64, '', 13, COLORS.ink, 'right');
+    this.skillLabel2.setAlpha(0.75);
     this.input.mouse?.disableContextMenu();
 
     this.score = 0;
@@ -342,9 +332,10 @@ export class GameScene extends Phaser.Scene {
         if (role === 'guest') this.applyCameraToLocal();
       },
       onRoster: (players) => this.syncRoster(players),
-      onConfig: (config) => {
-        // The host owns the rules: everyone plays the same match.
+      onConfig: (config, hostTuning) => {
+        // The host owns the rules and the balance: everyone plays the same match.
         if (role === 'host') return;
+        if (hostTuning) setTuning(hostTuning);
         settings.match = { ...settings.match, ...config };
         // Colours depend on the mode (team paint vs per-seat), so re-apply them.
         this.syncRoster(this.roster);
@@ -363,6 +354,7 @@ export class GameScene extends Phaser.Scene {
     if (role === 'host') {
       this.lan.matchConfig = { ...settings.match };
       this.lan.matchConfig.mode = settings.match.mode;
+      this.lan.tuning = { ...tuning() };
     }
     this.lan.connect();
   }
@@ -385,11 +377,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   private modeLabel(): string {
+    // A non-default balance is always labelled, so nobody wonders why the
+    // numbers feel odd (and a LAN guest knows it is the host's tuning).
+    const tag = tuningIsCustom() ? ` · 内测参数 ${tuningDiff().length} 项` : '';
     if (this.lanMode) {
       const role = this.lanRole === 'host' ? '房主' : '访客';
-      return `局域网 · ${role}`;
+      return `局域网 · ${role}${tag}`;
     }
-    return this.versus ? '双人对战' : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}`;
+    return this.versus
+      ? `双人对战${tag}`
+      : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}${tag}`;
   }
 
   /** Host: reset the arena without touching the socket. */
@@ -431,7 +428,7 @@ export class GameScene extends Phaser.Scene {
       this.hintText,
       this.skillLabel1,
       this.skillLabel2,
-      this.bannerText,
+      ...this.toastTexts,
       this.heatText,
       ...this.noticeLabels,
       ...this.cachedTexts.values(),
@@ -743,11 +740,46 @@ export class GameScene extends Phaser.Scene {
     this.showBanner(on ? '自动躲弹：开' : '自动躲弹：关', 0.9);
   }
 
+  /**
+   * All short-lived messages go to the corner stack instead of the middle of
+   * the screen: the old 64px centre text covered the exact spot you aim at.
+   * Newest message sits at the bottom, older ones slide up and fade out.
+   */
   private showBanner(text: string, seconds: number): void {
-    this.bannerText.setText(text).setAlpha(0.9).setScale(0.85);
-    this.tweens.killTweensOf(this.bannerText);
-    this.tweens.add({ targets: this.bannerText, scale: 1, duration: 260, ease: 'Back.easeOut' });
-    this.tweens.add({ targets: this.bannerText, alpha: 0, delay: seconds * 1000, duration: 500 });
+    if (!text) return;
+    const life = Math.max(0.4, seconds) * 1000 + 450;
+    this.toasts.push({ text, life, total: life });
+    // Three lines is enough; anything older is dropped rather than stacked.
+    while (this.toasts.length > 3) this.toasts.shift();
+  }
+
+  /** Advances the corner messages and lays them out bottom-up. */
+  private refreshToasts(dt: number): void {
+    for (const toast of this.toasts) toast.life -= dt * 1000;
+    this.toasts = this.toasts.filter((toast) => toast.life > 0);
+
+    const baseY = GAME_H - 52;
+    const lineHeight = 21;
+    const x = PLAY_RECT.x + 10;
+
+    // Newest at the bottom, walking upward.
+    for (let i = 0; i < this.toasts.length; i++) {
+      const toast = this.toasts[this.toasts.length - 1 - i];
+      let label = this.toastTexts[i];
+      if (!label) {
+        label = this.hud.text(x, baseY - i * lineHeight, '', 16, COLORS.ink, 'left');
+        this.toastTexts.push(label);
+        this.pinHud();
+      }
+      if (label.text !== toast.text) label.setText(toast.text);
+      label.setPosition(x, baseY - i * lineHeight);
+      // Fade only in the last 400ms.
+      const fade = Math.min(1, toast.life / 400);
+      label.setAlpha(0.85 * fade);
+    }
+    for (let i = this.toasts.length; i < this.toastTexts.length; i++) {
+      if (this.toastTexts[i].text !== '') this.toastTexts[i].setText('');
+    }
   }
 
   // ------------------------------------------------------------------ drawing
@@ -779,29 +811,25 @@ export class GameScene extends Phaser.Scene {
 
   private drawHud(): void {
     this.hud.clear();
-    this.hud.line(PLAY_RECT.x, 72, PLAY_RECT.x + PLAY_RECT.w, 72, { width: 1.6, jitter: 1.6 });
-    this.hud.line(PLAY_RECT.x, 75, PLAY_RECT.x + PLAY_RECT.w, 75, { width: 1.1, jitter: 1.4 });
 
-    // v1.3: no more heart rows – health is a bar, and it is the same bar
-    // everybody sees (the tanks draw their own, this is the HUD summary).
-    this.drawHpBar(PLAY_RECT.x + 8, 34, 190, 14, this.p1.hpRatio(), COLORS.player, 'P1');
+    // No full-width divider any more – grouping is done with spacing. The old
+    // pair of scratched lines at y=72/75 sat right on top of the health bars.
+    const left = PLAY_RECT.x + 10;
+    const right = PLAY_RECT.x + PLAY_RECT.w - 10;
+
+    this.drawHpBar(left, 28, 190, 10, this.p1.hpRatio(), COLORS.player, 'P1', 'L');
     if (this.versus && this.p2) {
-      this.drawHpBar(PLAY_RECT.x + PLAY_RECT.w - 198, 34, 190, 14, this.p2.hpRatio(), COLORS.player2, 'P2');
+      this.drawHpBar(right - 190, 28, 190, 10, this.p2.hpRatio(), COLORS.player2, 'P2', 'R');
       this.scoreText.setText(`P1 ${this.p1.kills} : ${this.p2.kills} P2`);
     } else if (this.enemy) {
-      this.drawHpBar(PLAY_RECT.x + PLAY_RECT.w - 198, 34, 190, 14, this.enemy.hpRatio(), COLORS.enemy, 'CPU');
+      this.drawHpBar(right - 190, 28, 190, 10, this.enemy.hpRatio(), COLORS.enemy, 'CPU', 'R');
       this.scoreText.setText(`得分  ${String(this.score).padStart(5, '0')}`);
+    } else {
+      this.scoreText.setText('');
     }
 
-    // v1.3: your own barrel heat. Only the owner sees this gauge.
+    // Your own barrel heat – only the owner ever sees this gauge.
     this.drawHeatGauge();
-
-    // Auto-dodge badge.
-    if (!this.versus && this.autoDodge) {
-      const x = GAME_W / 2;
-      this.hud.circle(x - 38, 40, 5, { width: 1.6, color: COLORS.player, jitter: 0.5 });
-      this.hud.fillCircle(x - 38, 40, 2.4, COLORS.player, 0.9);
-    }
     this.hudDirty = false;
   }
 
@@ -816,13 +844,13 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const right = PLAY_RECT.x + PLAY_RECT.w - 10;
-    const top = 86;
-    const lineHeight = 18;
+    const top = 88;
+    const lineHeight = 19;
     this.roster.forEach((entry, index) => {
       let label = this.noticeLabels[index];
       if (!label) {
-        label = this.hud.text(right, top + index * lineHeight, '', 14, COLORS.ink, 'right');
-        label.setAlpha(0.72);
+        label = this.hud.text(right, top + index * lineHeight, '', 12, COLORS.ink, 'right');
+        label.setAlpha(0.7);
         this.noticeLabels.push(label);
         this.pinHud();
       }
@@ -830,7 +858,7 @@ export class GameScene extends Phaser.Scene {
       const skill = isSkillId(entry.skill) ? skillById(entry.skill).name : '—';
       const teamSize = this.roster.filter((r) => r.team === entry.team).length;
       const team = teamSize > 1 ? `队${entry.team}` : 'FFA';
-      const kills = tank ? `${tank.kills}杀` : '—';
+      const kills = tank ? `${tank.kills} 杀` : '—';
       label.setText(`${this.nameOf(entry.id)} · ${team} · ${skill} · ${kills}`);
     });
     for (let i = this.roster.length; i < this.noticeLabels.length; i++) {
@@ -838,40 +866,58 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** One public health bar plus its numeric value – identical on every screen. */
-  private drawHpBar(x: number, y: number, w: number, h: number, ratio: number, color: number, label: string): void {
-    this.hud.fillRect(x, y, w, h, COLORS.white, 0.92);
-    if (ratio > 0) this.hud.fillRect(x + 1.5, y + 1.5, Math.max(0, (w - 3) * ratio), h - 3, color, 0.92);
-    this.hud.rect(x, y, w, h, { width: 1.8, color: COLORS.ink, jitter: 0.7 });
-    const slot = x < GAME_W / 2 ? 'hpA' : 'hpB';
-    const name = this.cachedText(`${slot}.name`, x - 6, y + h / 2, 13, 'right');
+  /**
+   * One public health bar. The name sits above the bar and the number inside
+   * it, so a bar never shares a line with any other element.
+   */
+  private drawHpBar(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    ratio: number,
+    color: number,
+    label: string,
+    slot: 'L' | 'R'
+  ): void {
+    const onLeft = slot === 'L';
+    this.hud.fillRect(x, y, w, h, COLORS.white, 0.9);
+    if (ratio > 0) {
+      this.hud.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * ratio), h - 2, color, 0.9);
+    }
+    this.hud.rect(x, y, w, h, { width: 1.4, color: COLORS.ink, jitter: 0.6 });
+
+    const name = this.cachedText(`hp${slot}.name`, onLeft ? x : x + w, y - 12, 13, onLeft ? 'left' : 'right');
     if (name.text !== label) name.setText(label);
-    const value = this.cachedText(`${slot}.value`, x + w + 6, y + h / 2, 13, 'left');
+
+    const value = this.cachedText(`hp${slot}.value`, onLeft ? x + w - 6 : x + 6, y + h / 2, 11, onLeft ? 'right' : 'left');
     const shown = `${Math.max(0, Math.round(ratio * 100))}`;
     if (value.text !== shown) value.setText(shown);
   }
 
   /** The local player's barrel heat, drawn under the left-hand health bar. */
   private drawHeatGauge(): void {
-    const mine = this.lanMode && this.lanRole === 'guest' ? this.byId(this.myId) ?? this.p2 : this.p1;
+    const mine = this.localTank();
     if (!mine) return;
     const ratio = heatRatio(mine.heat);
     const locked = mine.heat.locked;
     const x = PLAY_RECT.x + 10;
-    const y = GAME_H - 40;
-    const w = 150;
-    const h = 10;
+    const y = 46;
+    const w = 140;
+    const h = 8;
 
-    this.hud.fillRect(x, y, w, h, COLORS.white, 0.9);
+    this.hud.fillRect(x, y, w, h, COLORS.white, 0.85);
     if (ratio > 0) {
       // Blue while usable, red once the gun is locked out.
       const color = locked ? COLORS.danger : ratio > 0.66 ? 0xd4a72e : 0x2f6fb5;
       this.hud.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * ratio), h - 2, color, 0.95);
     }
-    this.hud.rect(x, y, w, h, { width: 1.3, color: COLORS.ink, jitter: 0.5 });
+    this.hud.rect(x, y, w, h, { width: 1.2, color: COLORS.ink, jitter: 0.5 });
 
-    const label = locked ? `过热 ${lockSecondsLeft(mine.heat).toFixed(1)}s` : `炮管 ${Math.round(ratio * 100)}%`;
-    this.heatText ??= this.hud.text(x + w + 8, y + h / 2, '', 13, COLORS.ink, 'left').setOrigin(0, 0.5).setAlpha(0.85);
+    const label = locked
+      ? `过热 ${lockSecondsLeft(mine.heat).toFixed(1)}s`
+      : `炮管 ${Math.round(ratio * 100)}%（${shotsToOverheat(heatCfg())} 发）`;
+    this.heatText ??= this.hud.text(x + w + 8, y + h / 2, '', 12, COLORS.ink, 'left').setOrigin(0, 0.5).setAlpha(0.8);
     if (this.heatText.text !== label) this.heatText.setText(label);
     this.heatText.setColor(locked ? '#c0392b' : '#26221d');
   }
@@ -960,6 +1006,7 @@ export class GameScene extends Phaser.Scene {
     this.updateMatch(dt);
     this.updatePhase(dt);
     this.followCamera(dt);
+    this.refreshToasts(dt);
     this.drawFrame(time);
     this.refreshSkillLabels();
     this.refreshNotice();
@@ -1158,11 +1205,12 @@ export class GameScene extends Phaser.Scene {
     // The gun is bolted to the hull: turning the hull turns the barrel too, at
     // the same instant and by the same amount (this is the v1.3 fix – the old
     // order let the barrel stay put in world space while the hull rotated).
-    tank.turnHull(input.turn * TANK.turnRate * (slow ? 0.8 : 1) * dt);
+    const tune = tuning();
+    tank.turnHull(input.turn * tune.turnRate * (slow ? 0.8 : 1) * dt);
 
     const mul = tank.speedMultiplier(this.time.now);
-    const fwd = (slow ? TANK.tacticalSpeed : TANK.driveSpeed) * mul;
-    const rev = (slow ? TANK.tacticalReverse : TANK.reverseSpeed) * mul;
+    const fwd = (slow ? TANK.tacticalSpeed : tune.driveSpeed) * mul;
+    const rev = (slow ? TANK.tacticalReverse : tune.reverseSpeed) * mul;
     const speed = input.drive > 0 ? fwd : rev;
     const v = input.drive * speed;
     tank.vx = Math.cos(tank.bodyAngle) * v;
@@ -1188,13 +1236,13 @@ export class GameScene extends Phaser.Scene {
       this.fireCd1 -= dt;
       if (input.fire && this.fireCd1 <= 0) {
         this.fire(tank);
-        this.fireCd1 = FIRE_COOLDOWN;
+        this.fireCd1 = tune.fireCooldown;
       }
     } else {
       this.fireCd2 -= dt;
       if (input.fire && this.fireCd2 <= 0) {
         this.fire(tank);
-        this.fireCd2 = FIRE_COOLDOWN;
+        this.fireCd2 = tune.fireCooldown;
       }
     }
   }
@@ -1233,7 +1281,7 @@ export class GameScene extends Phaser.Scene {
           tank.y += Math.sin(dir) * best;
           // A blink that lands you in a stream of shells is not a dodge, so the
           // dash carries 0.5s of invulnerability.
-          tank.invulnerableUntil = Math.max(tank.invulnerableUntil, this.time.now + BLINK_PROTECT * 1000);
+          tank.invulnerableUntil = Math.max(tank.invulnerableUntil, this.time.now + tuning().blinkProtect * 1000);
           this.puff(from.x, from.y, def.color, 10);
           this.puff(tank.x, tank.y, def.color, 10);
           this.ring(tank.x, tank.y, def.color);
@@ -1280,11 +1328,15 @@ export class GameScene extends Phaser.Scene {
 
   private resetPickups(levelIndex: number): void {
     const spots = LEVELS[levelIndex]?.pickups ?? [];
-    this.pickups = spots.map((p) =>
+    const t = tuning();
+    this.pickups = spots.map((p, index) =>
       makePickup(
         rollPickupKind(),
         this.layout.rect.x + p.x * this.layout.rect.w,
-        this.layout.rect.y + p.y * this.layout.rect.h
+        this.layout.rect.y + p.y * this.layout.rect.h,
+        // v1.3.1: every pickup starts on cooldown and they come back one by
+        // one, so the opening seconds are not a race for the health pack.
+        t.pickupWarmupStart + index * t.pickupWarmupGap
       )
     );
     for (const p of this.pickups) p.pop = 0;
@@ -1325,7 +1377,7 @@ export class GameScene extends Phaser.Scene {
       tank.shieldUntil = Math.max(tank.shieldUntil, now + def.duration * 1000);
     }
 
-    p.respawn = PICKUP_RESPAWN;
+    p.respawn = tuning().pickupRespawn;
     p.pop = 0;
     this.hudDirty = true;
     this.puff(p.x, p.y, def.color, 12);
@@ -1481,8 +1533,11 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const dir = tank.turretAngle;
-    const speed = tank.id === 'enemy' ? preset().shellSpeed : BULLET.speedPlayer;
-    const maxBounces = tank.id === 'enemy' ? Math.max(2, preset().maxBounces + 1) : BULLET.maxBounces;
+    const t = tuning();
+    const speed = tank.id === 'enemy' ? preset().shellSpeed : t.bulletSpeed;
+    // v1.3.1: exactly `maxBounces` for everyone. The old "+1 for the AI" meant
+    // the hard preset fired shells that bounced four times.
+    const maxBounces = t.maxBounces;
 
     // Keep the muzzle outside any neighbouring hull so shells never spawn inside a tank.
     let len = 44;
@@ -1619,7 +1674,7 @@ export class GameScene extends Phaser.Scene {
     const decision = this.aiDecision;
     if (decision.angle !== null) {
       const st = steerTo(decision.angle, e.bodyAngle);
-      e.bodyAngle += st.turn * TANK.turnRate * 0.95 * dt;
+      e.bodyAngle += st.turn * tuning().turnRate * 0.95 * dt;
       const v = st.drive * decision.speed;
       e.vx = Math.cos(e.bodyAngle) * v;
       e.vy = Math.sin(e.bodyAngle) * v;
@@ -1640,7 +1695,7 @@ export class GameScene extends Phaser.Scene {
     // outside the arc it swings the hull round instead of shooting sideways.
     if (Math.abs(Phaser.Math.Angle.Wrap(want - e.bodyAngle)) > TURRET_LIMIT - 0.12) {
       const st = steerTo(want, e.bodyAngle);
-      e.turnHull(st.turn * TANK.turnRate * 0.85 * dt);
+      e.turnHull(st.turn * tuning().turnRate * 0.85 * dt);
     }
     e.aimAt(want, this.aiCharge > 0 ? 7 : 2.4, dt);
 
@@ -1830,7 +1885,10 @@ export class GameScene extends Phaser.Scene {
         } else if (ev.kind === 'tank') {
           b.dead = true;
           const victim = this.tanks().find((t) => t.id === ev.id);
-          if (victim) this.damage(victim, b.owner, b.dmg);
+          // v1.3.1: the third argument is the shell's *travel angle*. Passing
+          // the damage multiplier here (as 1.3.0 did) made the hit-zone maths
+          // read a fake bearing, which reversed front and rear damage.
+          if (victim) this.damage(victim, b.owner, Math.atan2(b.vy, b.vx), b.dmg);
           break;
         } else {
           b.dead = true;
@@ -1863,7 +1921,7 @@ export class GameScene extends Phaser.Scene {
    * @param incoming direction the shell was travelling (radians). Omitted for
    *   scripted/effect damage, which then uses the frontal value.
    */
-  private damage(victim: Tank, attacker: TankId, incoming?: number): void {
+  private damage(victim: Tank, attacker: TankId, incoming?: number, multiplier = 1): void {
     if (!victim.alive || victim.awaitingRespawn || this.phase !== 'playing') return;
 
     // Friendly fire and self damage are two separate switches (see rules.ts).
@@ -1879,7 +1937,11 @@ export class GameScene extends Phaser.Scene {
     }
 
     const zone: HitZone = incoming === undefined ? 'front' : hitZone(victim.bodyAngle, incoming);
-    const amount = zoneDamage(zone, 1);
+    const t = tuning();
+    const base = zone === 'front' ? t.dmgFront : zone === 'side' ? t.dmgSide : t.dmgBack;
+    // 狂暴 shells carry a x2 flag; before 1.3.1 this multiplier was dropped on
+    // the floor because it was passed in as the shell's bearing instead.
+    const amount = Math.max(1, Math.round(base * (multiplier > 0 ? multiplier : 1)));
     if (victim.shielded()) {
       // Shield / invulnerability: absorb the hit with a visible, audible block.
       this.ring(victim.x, victim.y, PICKUPS.shield.color);
@@ -1932,7 +1994,7 @@ export class GameScene extends Phaser.Scene {
         this.showBanner('击毁！', 1.2);
       } else {
         this.phase = 'dying';
-        this.phaseTimer = RESPAWN_DELAY;
+        this.phaseTimer = tuning().respawnDelay;
         if (!this.versus) this.showBanner('被击毁！', 1.1);
         if (this.lanMode) this.scheduleRespawn(victim);
       }
@@ -1997,7 +2059,7 @@ export class GameScene extends Phaser.Scene {
     tank.coldBarrel();
     tank.setAlive(true, this.time.now);
     // Brief protection so a spawn can never be turned into a free kill.
-    tank.invulnerableUntil = this.time.now + RESPAWN_PROTECT * 1000;
+    tank.invulnerableUntil = this.time.now + tuning().respawnProtect * 1000;
     tank.awaitingRespawn = false;
     tank.sync(this.time.now);
     this.ring(tank.x, tank.y, tank.color);
@@ -2236,7 +2298,7 @@ export class GameScene extends Phaser.Scene {
       owner: b.owner,
       color: this.byId(b.owner)?.color ?? COLORS.player,
       bounces: 0,
-      maxBounces: BULLET.maxBounces,
+      maxBounces: tuning().maxBounces,
       life: BULLET.lifetime,
       dead: false,
       dmg: b.dmg ?? 1,
@@ -2382,7 +2444,7 @@ export class GameScene extends Phaser.Scene {
         // Faint outline + countdown ring so you can plan the next grab.
         g.lineStyle(1.4, COLORS.ink, 0.14);
         g.strokeCircle(p.x, p.y, PICKUP_RADIUS);
-        const k = 1 - p.respawn / PICKUP_RESPAWN;
+        const k = 1 - Math.min(1, p.respawn / Math.max(1, tuning().pickupRespawn));
         g.lineStyle(2, def.color, 0.35);
         g.beginPath();
         g.arc(p.x, p.y, PICKUP_RADIUS + 4, -Math.PI / 2, -Math.PI / 2 + k * Math.PI * 2);

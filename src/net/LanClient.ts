@@ -20,7 +20,7 @@ export interface LanHandlers {
   /** Everyone: the current player list (order = seat order). */
   onRoster?: (players: { id: string; team: number; skill: string; host: boolean }[], capacity: number) => void;
   /** Everyone: the room's shared rules, as set by the host. */
-  onConfig?: (config: MatchConfig) => void;
+  onConfig?: (config: MatchConfig, tuning?: Record<string, number>) => void;
   /** Our own seat in the room. */
   onSeat?: (id: string, role: 'host' | 'guest') => void;
   onHostMessage?: (msg: HostMessage) => void;
@@ -53,6 +53,8 @@ export class LanClient {
   private pending: string[] = [];
   /** Match rules this machine wants the room to use (host only). */
   matchConfig: MatchConfig | null = null;
+  /** Balance knobs this machine wants the room to use (host only). */
+  tuning: Record<string, number> | null = null;
 
   constructor(role: NetRole, serverAddress: string, handlers: LanHandlers = {}) {
     this.role = role;
@@ -100,7 +102,9 @@ export class LanClient {
       this.setStatus('waiting');
       // Host-owned rules go out as soon as the room exists, so guests never
       // have to guess the capacity or the damage switches.
-      if (this.role === 'host' && this.matchConfig) this.send({ t: 'config', ...this.matchConfig });
+      if (this.role === 'host' && this.matchConfig) {
+        this.send({ t: 'config', ...this.matchConfig, tuning: this.tuning ?? undefined });
+      }
       this.handlers.onLog?.(`已连接 ${this.url}`);
       // Anything asked for while we were still dialling goes out now.
       for (const message of this.pending.splice(0)) {
@@ -162,6 +166,7 @@ export class LanClient {
         case 'config': {
           const raw = (msg.config ?? {}) as Record<string, unknown>;
           const num = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+          const hostTuning = raw.tuning && typeof raw.tuning === 'object' ? (raw.tuning as Record<string, number>) : undefined;
           this.handlers.onConfig?.({
             mode: raw.mode === 'team' ? 'team' : 'ffa',
             capacity: num(raw.capacity, DEFAULT_MATCH.capacity),
@@ -169,7 +174,7 @@ export class LanClient {
             timeLimit: num(raw.timeLimit, DEFAULT_MATCH.timeLimit),
             friendlyFire: raw.friendlyFire === true,
             selfDamage: raw.selfDamage !== false,
-          });
+          }, hostTuning);
           break;
         }
         case 'roster':

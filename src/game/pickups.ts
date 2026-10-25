@@ -64,6 +64,6 @@ export interface Pickup {
   pop: number;
 }
 
-export function makePickup(kind: PickupKind, x: number, y: number): Pickup {
-  return { kind, x, y, respawn: 0, pop: 1 };
+export function makePickup(kind: PickupKind, x: number, y: number, respawn = 0): Pickup {
+  return { kind, x, y, respawn, pop: respawn > 0 ? 0 : 1 };
 }
