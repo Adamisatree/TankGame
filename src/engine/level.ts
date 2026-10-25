@@ -438,6 +438,13 @@ export function levelForSeats(seats: number): Level {
 
 export const DEFAULT_LEVEL_ID = LEVELS[0].id;
 
+/**
+ * Built-in levels **only** – a custom map id falls back to `LEVELS[0]`.
+ *
+ * Game code must use `src/maps/registry.ts`'s `levelById()`, which resolves the
+ * player's own maps too. This copy exists for the engine tests and for code that
+ * genuinely means "one of the shipped levels" (tier rotation, presets).
+ */
 export function levelById(id: string): Level {
   return LEVELS.find((l) => l.id === id) ?? LEVELS[0];
 }

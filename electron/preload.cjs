@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('tankGame', {
     check: (options) => ipcRenderer.invoke('update:check', options),
     probeMirrors: () => ipcRenderer.invoke('update:probe'),
     download: (payload) => ipcRenderer.invoke('update:download', payload),
-    install: () => ipcRenderer.invoke('update:install'),
+    install: (options) => ipcRenderer.invoke('update:install', options),
     localVersions: () => ipcRenderer.invoke('update:local'),
     installFile: (payload) => ipcRenderer.invoke('update:install-file', payload),
     reveal: (filePath) => ipcRenderer.invoke('update:reveal', filePath),

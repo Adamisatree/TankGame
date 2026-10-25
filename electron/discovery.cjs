@@ -59,6 +59,25 @@ function startBeacon(gamePort) {
   };
 }
 
+/**
+ * The address a friend should type. Prefer a routable IPv4 over the machine
+ * name: plenty of home/DHCP setups cannot resolve `<hostname>` from another
+ * computer, which made the copied LAN address useless (E3).
+ */
+function localIPv4() {
+  const interfaces = os.networkInterfaces();
+  const entries = Object.values(interfaces).flatMap((list) => list || []);
+  const usable = entries.find((net) => net.family === 'IPv4' && !net.internal && net.address);
+  if (usable) {
+    // Prefer the private (192.168/10.x/172.16) ones Windows/macOS hand out first.
+    const priv = entries.find(
+      (net) => net.family === 'IPv4' && !net.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(net.address)
+    );
+    return (priv ?? usable).address;
+  }
+  return os.hostname();
+}
+
 function broadcastAddresses() {
   const out = new Set(['255.255.255.255', '127.0.0.1']);
   for (const list of Object.values(os.networkInterfaces())) {
@@ -137,4 +156,4 @@ function scanForHosts(timeoutMs = 1300) {
   });
 }
 
-module.exports = { startBeacon, scanForHosts, DISCOVERY_PORT, MAGIC };
+module.exports = { startBeacon, scanForHosts, localIPv4, DISCOVERY_PORT, MAGIC };

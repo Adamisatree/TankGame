@@ -850,6 +850,22 @@ b.p2 {
   border-color: var(--player);
 }
 
+.key-btn.clash {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1.5px rgba(192, 57, 43, 0.28);
+}
+
+.key-warn {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: #a8321f;
+  margin: 0 0 8px;
+}
+
+.key-warn.ok {
+  color: var(--muted);
+}
+
 .key-foot {
   display: flex;
   align-items: center;
@@ -1156,6 +1172,12 @@ b.p2 {
   display: flex;
   gap: 5px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.ver-note {
+  font-size: 11.5px;
+  color: var(--muted);
 }
 
 .ver-tag {

@@ -25,6 +25,7 @@ import {
   chooseRespawn,
   evaluateMatch,
   hitZone,
+  matchHasEnder,
   type HitZone,
   type MatchResult,
   type RespawnCandidate,
@@ -681,6 +682,11 @@ export class GameScene extends Phaser.Scene {
   /** Host: start the match for the whole room. */
   startRoomMatch(): void {
     if (this.lanRole !== 'host' || !this.lan) return;
+    // A match nobody can win is a bug, not a setting: refuse to start one.
+    if (!matchHasEnder(settings.match)) {
+      this.showBanner('没有结束条件（人头和时间都不限），先在房间面板里开一个', 2.4);
+      return;
+    }
     // Every team needs somebody; the server enforces it too, this is the fast path.
     if (settings.match.mode === 'team') {
       const empty = this.emptyTeams();

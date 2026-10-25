@@ -10,7 +10,7 @@
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const path = require('node:path');
 const { startLanServer } = require('./lan-boot.cjs');
-const { startBeacon, scanForHosts } = require('./discovery.cjs');
+const { startBeacon, scanForHosts, localIPv4 } = require('./discovery.cjs');
 const updater = require('./updater.cjs');
 const { pathToFileURL: toFileUrl } = require('node:url');
 
@@ -26,7 +26,8 @@ async function startServer() {
 }
 
 function buildMenu(port) {
-  const lanUrl = port ? `http://${require('node:os').hostname()}:${port}` : '';
+  // Same address the in-game banner shows: a real IPv4, not the machine name.
+  const lanUrl = port ? `http://${localIPv4()}:${port}` : '';
   const template = [
     {
       label: '游戏',
@@ -191,6 +192,11 @@ ipcMain.handle('update:download', async (event, payload) => {
 
   const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
   const url = givenUrl || `${core.OFFICIAL.releaseDownload}/v${version}/${assetName}`;
+  // The renderer (or a tampered manifest) must not be able to aim this at an
+  // arbitrary host: only GitHub and the mirrors we ship may serve an installer.
+  if (!(await updater.isAllowedAssetUrl(url))) {
+    return { ok: false, error: '这个下载地址不在信任列表里（只认 GitHub 和 mirrors.json 里的镜像）' };
+  }
   let lastEmit = 0;
   const result = await updater.ensureDownloaded(url, { name: assetName, sha256: sha256 || undefined }, {
     onProgress: ({ received, total }) => {
@@ -211,20 +217,31 @@ ipcMain.handle('update:download', async (event, payload) => {
   });
 
   if (!result.ok) return { ok: false, errors: result.errors };
-  pendingInstall = { path: result.path, asset: { name: assetName, kind: core.classifyAsset(assetName).kind } };
+  pendingInstall = {
+    path: result.path,
+    // Keep the digest so the install step can check the bytes again (D2).
+    asset: { name: assetName, kind: core.classifyAsset(assetName).kind, sha256: sha256 || undefined },
+    verified: !!result.verified,
+  };
   return {
     ok: true,
     path: result.path,
     sha256: result.sha256,
     cached: !!result.cached,
+    verified: !!result.verified,
     source: result.source,
     errors: result.errors,
   };
 });
 
-ipcMain.handle('update:install', async () => {
+ipcMain.handle('update:install', async (_event, payload) => {
   if (!pendingInstall) return { ok: false, error: '还没有下载好的安装包' };
+  // An installer we could not verify only runs if the player said so.
+  if (!pendingInstall.verified && !payload?.allowUnverified) {
+    return { ok: false, error: 'unverified' };
+  }
   const result = await updater.installDownloaded(pendingInstall.path, pendingInstall.asset);
+  if (result.launched === false) return { ok: false, error: result.error ?? '安装失败' };
   return { ok: true, ...result };
 });
 
@@ -235,11 +252,22 @@ ipcMain.handle('update:local', async () => ({
 
 ipcMain.handle('update:install-file', async (_event, payload) => {
   const filePath = String(payload?.path ?? '');
-  // Only ever launch something from our own version store.
-  if (!filePath.startsWith(updater.versionsDir())) return { ok: false, error: '未知的安装包路径' };
-  const asset = { name: path.basename(filePath), kind: (await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href)).classifyAsset(filePath).kind };
-  pendingInstall = { path: filePath, asset };
+  // Only ever launch something from our own version store. The separator
+  // matters: `…/versions-x/evil.exe` is not inside `…/versions` (D4).
+  const dir = updater.versionsDir();
+  const separator = path.sep;
+  if (!filePath.startsWith(dir.endsWith(separator) ? dir : `${dir}${separator}`)) {
+    return { ok: false, error: '未知的安装包路径' };
+  }
+  const asset = {
+    name: path.basename(filePath),
+    kind: (await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href)).classifyAsset(filePath).kind,
+  };
+  // Switching to a version already in the archive is itself the player's
+  // consent (they clicked that exact build), so no extra prompt here.
+  pendingInstall = { path: filePath, asset, verified: false };
   const result = await updater.installDownloaded(filePath, asset);
+  if (result.launched === false) return { ok: false, error: result.error ?? '安装失败' };
   return { ok: true, ...result };
 });
 

@@ -343,7 +343,7 @@ export class MapEditor {
       if (!this.commit()) return;
       const copy = this.handlers.onSaveCopy(this.map);
       if (!copy) {
-        this.status('另存失败：本机存储已满或被禁用', true);
+        this.status('另存失败：地图库已满（先删几张旧图）或本机存储被禁用', true);
         return;
       }
       this.map = copy;
@@ -712,7 +712,7 @@ export class MapEditor {
     this.map = { ...this.map, name: name.trim().slice(0, 24) || '未命名地图' };
     const saved = this.handlers.onSave(this.map);
     if (!saved) {
-      this.status('保存失败：本机存储已满或被禁用', true);
+      this.status('保存失败：地图库已满（先删几张旧图）或本机存储被禁用', true);
       return;
     }
     // Adopt the stored revision so 返回/再保存 don't look like another edit.

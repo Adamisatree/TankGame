@@ -21,8 +21,10 @@ import {
   mapHasErrors,
   newMapId,
   normalizeMapFile,
+  needsWorld,
   toLevel,
   validateMap,
+  versionAtLeast,
   type MapFile,
 } from '../src/maps/format';
 import {
@@ -35,6 +37,7 @@ import {
   exportMapText,
   getMap,
   importMapText,
+  isLibraryFull,
   libraryBytes,
   listMaps,
   saveMap,
@@ -48,13 +51,13 @@ import { LanClient } from '../src/net/LanClient';
 let passed = 0;
 const failures: string[] = [];
 
-function check(name: string, ok: boolean): void {
+function check(name: string, ok: boolean, detail = ''): void {
   if (ok) {
     passed += 1;
     console.log(`  ok   ${name}`);
   } else {
     failures.push(name);
-    console.error(`  FAIL ${name}`);
+    console.error(`  FAIL ${name}${detail ? ` — ${detail}` : ''}`);
   }
 }
 
@@ -141,6 +144,14 @@ console.log('\n地图格式 v1');
   check('mirroring once is idempotent', applyMirror(full).walls.length === 2);
   check('a centred wall is not duplicated', applyMirror({ ...half, walls: [{ x: 0.45, y: 0.2, w: 0.1, h: 0.1 }] }).walls.length === 1);
   check('mirror none changes nothing', applyMirror({ ...map, mirror: 'none' }).walls.length === map.walls.length);
+  // v1.5.1 / C1: a crate sitting exactly on a wall is not a duplicate of it.
+  const overlap = applyMirror({
+    ...half,
+    walls: [{ x: 0.1, y: 0.2, w: 0.1, h: 0.1 }],
+    crates: [{ x: 0.1, y: 0.2, w: 0.1, h: 0.1 }],
+  });
+  check('a crate on a wall survives mirroring', overlap.walls.length === 2 && overlap.crates.length === 2);
+  check('the mirrored crate still exists in the level', toLevel(overlap).crates.length === 2);
 
   // Validation catches what players would notice.
   const bad: MapFile = { ...map, spawns: [{ x: 0.5, y: 0.5, angle: 0 }] };
@@ -155,6 +166,14 @@ console.log('\n地图格式 v1');
   const edge = validateMap({ ...map, spawns: [{ x: 0.01, y: 0.5, angle: 0 }, { x: 0.9, y: 0.9, angle: 0 }] });
   check('a spawn on the very edge is an error', edge.some((issue) => issue.code === 'spawn-edge'));
   check('a future format only warns', validateMap({ ...map, schemaVersion: 9 }).some((issue) => issue.code === 'newer' && issue.severity === 'warn'));
+  // v1.5.1 / C3: `minAppVersion` is a promise, so compare versions properly.
+  check('version compare handles equal and longer strings', versionAtLeast('1.5.1', '1.5.1') && versionAtLeast('1.5.1', '1.5'));
+  check('version compare orders numbers, not text', versionAtLeast('1.10.0', '1.9.9') && !versionAtLeast('1.5.0', '1.5.1'));
+  check(
+    'a map that needs a newer build is refused',
+    validateMap({ ...map, minAppVersion: '99.0.0' }).some((issue) => issue.code === 'min-app' && issue.severity === 'error')
+  );
+  check('a map from an older build still opens', !validateMap({ ...map, minAppVersion: '1.0.0' }).some((i) => i.code === 'min-app'));
 
   // Map file → engine level.
   const level = toLevel({ ...map, name: '引擎测试' });
@@ -163,6 +182,10 @@ console.log('\n地图格式 v1');
   const big = toLevel({ ...map, size: { w: 2400, h: 1600 } });
   check('a big map gets a scrolling world', big.world?.w === 2400 && big.world?.h === 1600);
   check('a screen-sized map stays still', toLevel(map).world === undefined);
+  // v1.5.1 / C2: a tall map used to be squeezed onto the 16:9 play rectangle.
+  const tall = toLevel({ ...map, size: { w: 900, h: 1800 } });
+  check('a tall map gets a world camera', tall.world?.w === 900 && tall.world?.h === 1800);
+  check('needsWorld agrees', needsWorld({ w: 900, h: 1800 }) && needsWorld({ w: 1280, h: 720 }) === false);
   const fromBuiltIn = fromLevel(levelById('maze') ?? levels()[0]);
   check('a built-in map copies into the editor', fromBuiltIn.id.startsWith('custom-') && fromBuiltIn.walls.length > 0);
 }
@@ -218,6 +241,16 @@ console.log('\n本地地图库');
   for (let i = 0; i < MAX_MAPS + 5; i += 1) saveMap(emptyMap({ name: `批量 ${i}` }));
   check('the library is capped', countMaps() <= MAX_MAPS);
   check('the newest map is first', listMaps()[0].name.startsWith('批量'));
+  // v1.5.1 / C4: the 201st save is refused instead of silently evicting the oldest.
+  check('a full library says so', isLibraryFull() && countMaps() === MAX_MAPS);
+  const oldestBefore = listMaps()[MAX_MAPS - 1];
+  const refused = saveMap(emptyMap({ name: '溢出的第 201 张' }));
+  check('the 201st map is refused, not swapped in', refused === null && countMaps() === MAX_MAPS);
+  check('the refused save kept the oldest map', !!getMap(oldestBefore.id));
+  const refusedImport = importMapText(exportMapText(emptyMap({ name: '导入溢出' })));
+  check('a refused import explains the cap', !refusedImport.ok && (refusedImport.error ?? '').includes('满了'), `${refusedImport.error}`);
+  // Replacing an existing map still works when the library is full.
+  check('a full library still accepts edits', !!saveMap({ ...oldestBefore, name: '改一下' }));
 }
 
 // ------------------------------------------------------------------ editor

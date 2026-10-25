@@ -41,6 +41,8 @@ export interface DownloadResult {
   ok: boolean;
   errors?: string[];
   cached?: boolean;
+  /** False when the manifest carried no sha256, so nothing could be checked. */
+  verified?: boolean;
   path?: string;
   sha256?: string;
   source?: { id: string; label: string };
@@ -73,7 +75,7 @@ export interface UpdateBridge {
     sha256?: string;
     size?: number;
   }) => Promise<DownloadResult>;
-  install: () => Promise<InstallResult>;
+  install: (options?: { allowUnverified?: boolean }) => Promise<InstallResult>;
   localVersions: () => Promise<{ dir: string; versions: LocalVersion[] }>;
   installFile: (payload: { path: string }) => Promise<InstallResult>;
   reveal: (filePath?: string) => Promise<boolean>;

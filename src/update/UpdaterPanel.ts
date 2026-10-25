@@ -135,7 +135,7 @@ function releaseRow(release: ReleaseInfo): string {
       <div class="ver-actions">
         ${
           asset && !isCurrent
-            ? `<button type="button" class="chip" data-ver-download="${release.version}" data-asset="${asset.name}" data-sha="${asset.sha256}" data-size="${asset.size}">
+            ? `<button type="button" class="chip" data-ver-download="${release.version}" data-asset="${asset.name}" data-sha="${asset.sha256 ?? ''}" data-size="${asset.size}">
                  ${bridge() ? '下载并安装' : '下载'}
                </button>`
             : ''
@@ -143,6 +143,11 @@ function releaseRow(release: ReleaseInfo): string {
         ${
           html
             ? `<a class="chip" href="${downloadUrl(html, mirror, release.version)}" target="_blank" rel="noreferrer">网页版</a>`
+            : ''
+        }
+        ${
+          !asset && !isCurrent
+            ? `<span class="ver-note" title="这个版本没有适合当前系统的安装包，可以先用网页版或到发布页手动下载">本机无对应安装包</span>`
             : ''
         }
         <a class="chip ghost" href="${OFFICIAL.releasePage}/tag/v${release.version}" target="_blank" rel="noreferrer">发布页</a>
@@ -346,7 +351,7 @@ export function bindUpdaterPanel(root: HTMLElement): void {
     btn.addEventListener('click', () => {
       const version = btn.dataset.verDownload ?? '';
       const assetName = btn.dataset.asset ?? '';
-      const sha = btn.dataset.sha ?? '';
+      const sha = btn.dataset.sha && btn.dataset.sha !== 'undefined' ? btn.dataset.sha : '';
       const size = Number(btn.dataset.size ?? 0);
       const asset = state.manifest?.releases
         .find((r) => r.version === version)
@@ -367,12 +372,24 @@ export function bindUpdaterPanel(root: HTMLElement): void {
         }
         state.downloading = '';
         state.progress = 1;
-        state.message = result.cached ? '这个版本本机已有，直接安装…' : '下载完成，正在安装…';
         void refreshLocal().then(rerender);
+        // A package the manifest gives no digest for cannot be checked. Ask,
+        // instead of quietly installing whatever the mirror sent (D2).
+        if (result.verified === false) {
+          const ok = window.confirm(
+            `v${version} 的安装包没有官方校验值（清单里没有 sha256），无法确认它没被改过。\n仍然要运行它吗？`
+          );
+          if (!ok) {
+            state.message = '已停在下载完成这一步：安装包留在本机版本库里，没有运行。';
+            rerender();
+            return;
+          }
+        }
+        state.message = result.cached ? '这个版本本机已有，直接安装…' : '下载完成，正在安装…';
         rerender();
-        void api.install().then((installed) => {
+        void api.install({ allowUnverified: result.verified === false }).then((installed) => {
           if (!installed.ok) {
-            state.error = installed.error ?? '安装失败';
+            state.error = installed.error === 'unverified' ? '安装包没有校验值，安装已取消' : (installed.error ?? '安装失败');
             rerender();
           } else if (installed.mode === 'manual') {
             state.message = '安装包已打开，把它拖进 Applications 覆盖旧版即可。';

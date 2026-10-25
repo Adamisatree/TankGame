@@ -1030,6 +1030,50 @@ check(
   settings.match = { ...settings.match, winCondition: 'both', killTarget: 15, timeLimit: 480, capacity: 6 };
 }
 
+// --- v1.5.1 / B1: a rule set with no armed ender must be impossible ---------
+{
+  const { evaluateMatch, matchHasEnder, ensureMatchEnder, DEFAULT_MATCH } = await import('../src/game/rules');
+  const lines = [
+    { id: 'p1', team: 0, kills: 3, deaths: 1, hp: 100, connected: true },
+    { id: 'p2', team: 1, kills: 1, deaths: 3, hp: 100, connected: true },
+  ];
+  const noKills = { ...DEFAULT_MATCH, winCondition: 'kills' as const, killTarget: 0 };
+  const noTime = { ...DEFAULT_MATCH, winCondition: 'time' as const, timeLimit: 0 };
+  const noEither = { ...DEFAULT_MATCH, winCondition: 'both' as const, killTarget: 0, timeLimit: 0 };
+  check('B1: kills ender at 0 is not an ender', !matchHasEnder(noKills));
+  check('B1: time ender at 0 is not an ender', !matchHasEnder(noTime));
+  check('B1: neither ender armed is not an ender', !matchHasEnder(noEither));
+  check(
+    'B1: an endless rule set never decides a match',
+    evaluateMatch(lines, noKills, 99999).kind === 'running' &&
+      evaluateMatch(lines, noTime, 99999).kind === 'running' &&
+      evaluateMatch(lines, noEither, 99999).kind === 'running',
+    JSON.stringify([evaluateMatch(lines, noKills, 99999), evaluateMatch(lines, noTime, 99999)])
+  );
+  check(
+    'B1: ensureMatchEnder re-arms the unlimited ender',
+    matchHasEnder(ensureMatchEnder(noKills)) &&
+      matchHasEnder(ensureMatchEnder(noTime)) &&
+      matchHasEnder(ensureMatchEnder(noEither)) &&
+      ensureMatchEnder(noKills).killTarget === DEFAULT_MATCH.killTarget &&
+      ensureMatchEnder(noTime).timeLimit === DEFAULT_MATCH.timeLimit,
+    JSON.stringify([ensureMatchEnder(noKills), ensureMatchEnder(noTime), ensureMatchEnder(noEither)])
+  );
+  check(
+    'B1: ensureMatchEnder leaves a valid rule set alone',
+    ensureMatchEnder(DEFAULT_MATCH) === DEFAULT_MATCH
+  );
+  // The arming rule must follow winCondition, not just the numbers.
+  check(
+    'B1: time-only mode ignores kills',
+    evaluateMatch(lines, { ...DEFAULT_MATCH, winCondition: 'time', killTarget: 1, timeLimit: 480 }, 10).kind === 'running'
+  );
+  check(
+    'B1: kills-only mode ignores the clock',
+    evaluateMatch(lines, { ...DEFAULT_MATCH, winCondition: 'kills', killTarget: 5, timeLimit: 1 }, 999).kind === 'running'
+  );
+}
+
 console.log('');
 const failed = checks.filter((c) => !c.ok);
 console.log(`${checks.length - failed.length}/${checks.length} smoke checks passed`);

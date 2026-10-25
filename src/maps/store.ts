@@ -21,7 +21,11 @@ import {
 
 const STORAGE_KEY = 'tankduel.maps';
 const STORE_VERSION = 1;
-/** Keep the library bounded so a shared machine cannot fill local storage. */
+/**
+ * Keep the library bounded so a shared machine cannot fill local storage.
+ * Reaching the cap is reported to the player — a map is never evicted silently
+ * just because it is the oldest one (C4).
+ */
 export const MAX_MAPS = 200;
 
 interface StoreShape {
@@ -103,11 +107,17 @@ export function saveMap(raw: MapFile, options: { bumpRev?: boolean } = {}): MapF
     shape.maps[existing] = saved;
   } else {
     saved = { ...incoming, rev: Math.max(1, incoming.rev), createdAt: incoming.createdAt, updatedAt: now };
+    if (isFull(shape)) return null;
     shape.maps.unshift(saved);
   }
 
   return writeStore(shape) ? saved : null;
 }
+
+/** True when the library is at its cap, so a *new* map cannot be added. */
+export const isLibraryFull = (): boolean => isFull(readStore());
+
+const isFull = (shape: StoreShape): boolean => shape.maps.length >= MAX_MAPS;
 
 /** Stores a map received from another player without touching its revision. */
 export function archiveReceived(raw: MapFile): MapFile | null {
@@ -128,6 +138,7 @@ export function archiveReceived(raw: MapFile): MapFile | null {
     };
     return writeStore(shape) ? shape.maps[existing] : null;
   }
+  if (isFull(shape)) return null;
   shape.maps.unshift({ ...incoming, updatedAt: new Date().toISOString() });
   return writeStore(shape) ? shape.maps[0] : null;
 }
@@ -187,7 +198,12 @@ export function importMapText(text: string): ImportResult {
   if (!looksLikeMap(candidate)) return { ok: false, error: '这看起来不是地图文件（缺少 walls / spawns）' };
   const map = normalizeMapFile({ ...(candidate as MapFile), source: 'local' });
   const stored = saveMap(map);
-  if (!stored) return { ok: false, error: '本机存储写不进去（可能是隐私模式或已满）' };
+  if (!stored) {
+    return {
+      ok: false,
+      error: isLibraryFull() ? `地图库满了（最多 ${MAX_MAPS} 张），先删几张再导入` : '本机存储写不进去（可能是隐私模式或已满）',
+    };
+  }
   if (map.schemaVersion > MAP_SCHEMA_VERSION) {
     // Still load it – unknown fields are preserved – but say so.
     return { ok: true, map: stored, error: `这张图来自更新的格式 v${map.schemaVersion}，可能显示不全` };
