@@ -1,13 +1,95 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-25T06:54:44.158Z",
+  "generatedAt": "2026-10-25T08:14:27.083Z",
   "releases": [
+    {
+      "tag": "v1.4.0",
+      "version": "1.4.0",
+      "name": "v1.4.0",
+      "notes": "## What's Changed\n* v1.4.0：房间界面 · 每人自选技能 · 可分配队伍 · 全员血条 · 小地图 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/17\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.3.0...v1.4.0",
+      "publishedAt": "2026-10-25T08:14:15Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.4.0-arm64-setup.exe",
+          "size": 82752733,
+          "sha256": "850ec0aa6b161bdc0565a21e6e892469dde872655105e5ca6dc0126a8924fd07",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.4.0-arm64.dmg",
+          "size": 96103541,
+          "sha256": "b69d5a08b8cb4fd536e00f1ca4ae59c2137eb35a7e56d510ddae86ff414b7fae",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.4.0-arm64.zip",
+          "size": 92573572,
+          "sha256": "9e3655851b4bbf32df63478f15d22a3ce584c48b5b3581af89603962de5fcb21",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.4.0-portable.exe",
+          "size": 78557573,
+          "sha256": "f8ad78254e87d53034c1cbe5d80eb8f478d597487ffb02408911042214939d52",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.4.0-portable.html",
+          "size": 1649221,
+          "sha256": "70786c4250ab5ba3ab832be9d1092d02c84ca7466bf06d0da050215b2ddf4054",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.4.0-setup.exe",
+          "size": 160945565,
+          "sha256": "cb0c9b7ca330ef8cd858f6b9cb0c3f81b97ba289c22a20947c70aa778d560c0f",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.4.0-x64-setup.exe",
+          "size": 78790162,
+          "sha256": "493c95b917db8bd108e9d9885ab8090d2e6dcf5622fa60039ffd83af5f3d7678",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.4.0-x64.dmg",
+          "size": 102113808,
+          "sha256": "26cd0de4353ef13e5d5ce115dffe4c344ba6263ea35e52266cb35c0af9e6fa82",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.4.0/TankGame-1.4.0-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.3.0",
       "version": "1.3.0",
-      "name": "v1.3.0",
-      "notes": "## What's Changed\n* 清掉遗留的单文件版，CI 只上传本次构建 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/12\n* updates.json 只保留可安装文件 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/13\n* v1.3.0：血量/部位伤害、炮口随车体、2–10 人乱斗与团队 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/14\n* v1.3 收尾：炮管过热 + 闪现无敌 + 真正的 N 人对战 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/15\n* fix(ci): updatetest 不再把协议版本写死成 3 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/16\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.2.0...v1.3.0",
+      "name": "v1.3.0 · 血量制、2–10 人局域网、炮管过热",
+      "notes": "## 坦克大作战 1.3.0\n\n一次大版本：从「三条命、两台车」变成 **血量制 + 2–10 人局域网**，并加了**炮管过热**。\n\n### 战斗\n- **血量制**：所有模式都是 100 血，不再有命数。部位伤害 **车尾 12 / 侧面 9 / 正面 7**（车尾有红点提示）。\n- **反弹 2 次**：子弹最多弹两次，仍然会打到自己。\n- **炮口装在车体上**：转向即瞄准，不再有 Q/E 独立转炮塔；屏幕上画出**攻击扇形范围**。\n- **射速放慢**：1.0 秒/发，8–14 发打死一个人。\n- **炮管过热（新）**：每发 +26 热量、平时 9/秒散热，打满 100 就锁炮强制冷却（约 1.6 秒）。\n  **没打满之前开火完全不受限**，点射永远打得出去；这条热量条**只有自己看得见**。\n- **闪现带 0.5 秒无敌**：落地瞬间免伤，闪进弹幕里不再靠运气。\n\n### 局域网（2–10 人）\n- 房间支持 **2 / 3 / 4 / 5 / 6 / 8 / 10** 人，**乱斗**或**分队**（红蓝交替分队）两种模式。\n- 开局前规则面板：人数、人头目标、时间上限、**友伤 / 自伤两个独立开关**；时间到按人头判，平局算平。\n- 房主权威同步，协议升到 **v5**；**1.3 与 1.2 互不兼容**，版本不一致会被直接拦在门外。\n- 右上角**公示区**列出每个座位的队伍、所选技能、人头数——所有人看到的完全一致。\n- 复活自动分配：乱斗挑**远离所有活人**的点，团队挑**队友身旁**的点，队友全灭则随机；复活后有 1 秒保护。\n- 暂停菜单里的**退出对局**会把对手看到「对面已经投降」。\n\n### 视角\n- 三张多人大图 **1800×1200 / 2400×1600 / 3200×2200**，镜头平滑跟随你自己的车，HUD 钉在屏幕上。\n- **没有战争迷雾、没有小地图**：地图变大、车相对变小，靠的就是视野。\n\n### 下载\n\n| 文件 | 平台 | 大小 | SHA-256 |\n| --- | --- | --- | --- |\n| `TankGame-1.3.0-setup.exe` | Windows 安装版（含 NSIS 安装器） | 153.5 MB | `0068042d788d8e8f7ad0309cdcb2fa433a211d9ced9232f16d2bc86a886d4108` |\n| `TankGame-1.3.0-x64-setup.exe` | Windows x64 安装版 | 75.1 MB | `bb94e634da33d39a27e6868a519ebb2aba6753b404e327833b6327caaacb3b9e` |\n| `TankGame-1.3.0-arm64-setup.exe` | Windows arm64 安装版 | 78.9 MB | `0a39a4b43a02715cbf1059a6c7616e7a3dfd71d44dabc36d7c452be6630d0c50` |\n| `TankGame-1.3.0-portable.exe` | Windows 免安装 | 74.9 MB | `6063f68d12272d19faab3d09c1c93577a0036e7c856a96caafd15c0fb947fbd2` |\n| `TankGame-1.3.0-portable.html` | **单文件网页版**，双击即玩，不用装 | 1.5 MB | `82691434334b8cbc03f66e8c28fcacc7551bd74369a4e3671a3b3beb2d53abaf` |\n| `TankGame-1.3.0-x64.dmg` | macOS Intel | 97.4 MB | `255e8bf228f5d32cd8cdf3ba72019b3430e201b8c00d77a208c2d1d78416d9f7` |\n| `TankGame-1.3.0-arm64.dmg` | macOS Apple Silicon | 91.6 MB | `b964c813188f0dc74bc00fbbfa9ff7ddb37da74ccfcfadd1a947fb8d80254051` |\n| `TankGame-1.3.0-arm64.zip` | macOS 压缩包版 | 88.3 MB | `f0e3e84e60ef59f876258711200e95e8207097a6995a9a36b343b4af53680acb` |\n\n> 安装包**没有代码签名**（Windows SmartScreen / macOS Gatekeeper 会提示「未知开发者」）：\n> Windows 点「更多信息 → 仍要运行」；macOS 右键 →「打开」。\n> 局域网联机需要一端的**桌面客户端**当服务器（浏览器不能当服务器）；想先试试单机，直接双击 `portable.html` 就行。\n\n### 更新\n客户端内置更新器会读 `updates.json`，**1.2.x 可以直接升到 1.3.0**（设置留档，可回退）。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.2.0...v1.3.0\n",
       "publishedAt": "2026-10-25T06:54:34Z",
       "prerelease": false,
       "assets": [
