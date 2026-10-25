@@ -1,8 +1,99 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-25T03:57:53.950Z",
+  "generatedAt": "2026-10-25T04:12:51.035Z",
   "releases": [
+    {
+      "tag": "v1.2.0",
+      "version": "1.2.0",
+      "name": "v1.2.0",
+      "notes": "## What's Changed\n* README 指向 v1.1.0 安装包 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/9\n* v1.2.0：自动更新 + 任意版本升级/降级 + 局域网版本拦截 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/10\n* 修复 v1.2.0 CI：nsis.allowDowngrade + 测试服务器加固 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/11\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.1.0...v1.2.0",
+      "publishedAt": "2026-10-25T04:12:32Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.1.0-portable.html",
+          "size": 1587494,
+          "sha256": "8287c0eb88f724b311fb435a15d37428d004ba6bc3c21d44430c9a64058542fe",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.1.0-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.2.0-arm64-setup.exe",
+          "size": 82734840,
+          "sha256": "dffa2302d20e27956109198ffce81a5dd3b74c55f52ce72e66095bc6db6d8490",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.2.0-arm64.dmg",
+          "size": 96106236,
+          "sha256": "015e05ca7349d7260f165592e5f064cfdd0ffe38b7a18a6d821db16082b817a7",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.2.0-arm64.zip",
+          "size": 92553601,
+          "sha256": "c9008735519472e70f0f3b3546f45dcef75df52f4892ec283ab6601c7914975d",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.2.0-portable.exe",
+          "size": 78539635,
+          "sha256": "904c8e83c9b9f8d5d84a7731a8d00dd121076b54b164aa31c4e7e4bdfec480e8",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.2.0-portable.html",
+          "size": 1598650,
+          "sha256": "467cd3c9cad7c48e88066dbc27d847674b118d2096e4e3bad6257152dcffce4c",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.2.0-setup.exe",
+          "size": 160909570,
+          "sha256": "bbf636bf60ace37d34d784179df4d7ad523a162749704c9ee93fd4d645a62a67",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.2.0-x64-setup.exe",
+          "size": 78772166,
+          "sha256": "1eecf669bcf889d9911020f95dc55db412acb666e1b7f07ab6aa089d86be5e06",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.2.0-x64.dmg",
+          "size": 102106344,
+          "sha256": "11d992fd1054550001c00c1f767e92d214baf440edbf9cb69f9f4ce10f0d9115",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.1.0",
       "version": "1.1.0",
