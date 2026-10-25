@@ -274,6 +274,7 @@ export class GameScene extends Phaser.Scene {
         if (status === 'waiting') this.netBanner = '等待对手加入…';
         else if (status === 'playing') this.netBanner = '';
         else if (status === 'error') this.netBanner = detail ?? '连接失败';
+        else if (status === 'rejected') this.netBanner = detail ?? '版本不一致，无法联机';
         else if (status === 'closed') this.netBanner = '连接已断开';
         else if (status === 'connecting') this.netBanner = detail ?? '连接中…';
         if (this.netBanner) this.showBanner(this.netBanner, 1.6);

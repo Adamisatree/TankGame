@@ -11,6 +11,8 @@ const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron')
 const path = require('node:path');
 const { startLanServer } = require('./lan-boot.cjs');
 const { startBeacon, scanForHosts } = require('./discovery.cjs');
+const updater = require('./updater.cjs');
+const { pathToFileURL: toFileUrl } = require('node:url');
 
 const DEV_URL = process.env.TANK_DEV_URL; // set to http://localhost:5173 while developing the UI
 let serverHandle = null;
@@ -84,6 +86,22 @@ async function createWindow() {
   win.once('ready-to-show', () => win.show());
 }
 
+/** Runs a manifest check and pings the renderer if something newer exists. */
+async function autoCheckForUpdates() {
+  try {
+    const result = await updater.fetchManifest({});
+    if (!result.manifest || !win || win.isDestroyed()) return;
+    const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
+    const latest = core.latestRelease(result.manifest);
+    const settings = await updater.readSettings();
+    if (!latest || !core.isNewer(latest.version, app.getVersion())) return;
+    if (latest.version === settings.skippedVersion) return;
+    win.webContents.send('update:available', { version: latest.version, notes: latest.notes });
+  } catch {
+    /* offline: nothing to do */
+  }
+}
+
 app.whenReady().then(async () => {
   try {
     serverHandle = await startServer();
@@ -95,6 +113,13 @@ app.whenReady().then(async () => {
   buildMenu(serverHandle?.port ?? 0);
   await createWindow();
 
+  // Quiet background check a few seconds after launch, then every 6 hours.
+  const settings = await updater.readSettings();
+  if (settings.autoCheck) {
+    setTimeout(() => void autoCheckForUpdates(), 6000);
+    setInterval(() => void autoCheckForUpdates(), 6 * 60 * 60 * 1000);
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();
   });
@@ -102,6 +127,139 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// ---------------------------------------------------------------- updater IPC
+
+/** Cached download so "install" doesn't have to re-fetch the file. */
+let pendingInstall = null;
+
+async function updateInfo() {
+  const settings = await updater.readSettings();
+  const { mirrors, rawMirrors } = await updater.readMirrors();
+  return {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    isPackaged: app.isPackaged,
+    autoCheck: settings.autoCheck,
+    mirrorId: settings.mirrorId,
+    skippedVersion: settings.skippedVersion,
+    lastCheckAt: settings.lastCheckAt,
+    mirrors,
+    rawMirrors,
+    repo: 'Adamisatree/TankGame',
+  };
+}
+
+ipcMain.handle('update:info', () => updateInfo());
+
+ipcMain.handle('update:check', async (_event, options) => {
+  const result = await updater.fetchManifest(options || {});
+  const settings = await updater.readSettings();
+  await updater.writeSettings({ ...settings, lastCheckAt: Date.now() });
+  if (!result.manifest) return { ok: false, errors: result.errors };
+
+  const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
+  const latest = core.latestRelease(result.manifest);
+  return {
+    ok: true,
+    current: app.getVersion(),
+    manifest: result.manifest,
+    source: result.source,
+    errors: result.errors,
+    latest,
+    upToDate: !latest || !core.isNewer(latest.version, app.getVersion()),
+    assets: latest ? latest.assets : [],
+  };
+});
+
+ipcMain.handle('update:probe', async (event) => {
+  const result = await updater.probeMirrors((entry) => {
+    try {
+      event.sender.send('update:probe-progress', entry);
+    } catch {
+      /* window gone */
+    }
+  });
+  return result;
+});
+
+ipcMain.handle('update:download', async (event, payload) => {
+  const { assetName, url: givenUrl, version, sha256, size } = payload || {};
+  if (!assetName || !version) return { ok: false, error: 'missing asset' };
+
+  const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
+  const url = givenUrl || `${core.OFFICIAL.releaseDownload}/v${version}/${assetName}`;
+  let lastEmit = 0;
+  const result = await updater.ensureDownloaded(url, { name: assetName, sha256: sha256 || undefined }, {
+    onProgress: ({ received, total }) => {
+      const now = Date.now();
+      if (now - lastEmit < 120 && received !== total) return;
+      lastEmit = now;
+      try {
+        event.sender.send('update:progress', {
+          assetName,
+          received,
+          total: total || size || 0,
+          ratio: total ? received / total : 0,
+        });
+      } catch {
+        /* window gone */
+      }
+    },
+  });
+
+  if (!result.ok) return { ok: false, errors: result.errors };
+  pendingInstall = { path: result.path, asset: { name: assetName, kind: core.classifyAsset(assetName).kind } };
+  return {
+    ok: true,
+    path: result.path,
+    sha256: result.sha256,
+    cached: !!result.cached,
+    source: result.source,
+    errors: result.errors,
+  };
+});
+
+ipcMain.handle('update:install', async () => {
+  if (!pendingInstall) return { ok: false, error: '还没有下载好的安装包' };
+  const result = await updater.installDownloaded(pendingInstall.path, pendingInstall.asset);
+  return { ok: true, ...result };
+});
+
+ipcMain.handle('update:local', async () => ({
+  dir: updater.versionsDir(),
+  versions: await updater.localVersions(),
+}));
+
+ipcMain.handle('update:install-file', async (_event, payload) => {
+  const filePath = String(payload?.path ?? '');
+  // Only ever launch something from our own version store.
+  if (!filePath.startsWith(updater.versionsDir())) return { ok: false, error: '未知的安装包路径' };
+  const asset = { name: path.basename(filePath), kind: (await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href)).classifyAsset(filePath).kind };
+  pendingInstall = { path: filePath, asset };
+  const result = await updater.installDownloaded(filePath, asset);
+  return { ok: true, ...result };
+});
+
+ipcMain.handle('update:reveal', async (_event, filePath) => {
+  await updater.openFolder(filePath || pendingInstall?.path || app.getPath('downloads'));
+  return true;
+});
+
+ipcMain.handle('update:settings', async (_event, patch) => {
+  const settings = await updater.readSettings();
+  const next = { ...settings, ...(patch || {}) };
+  await updater.writeSettings(next);
+  return next;
+});
+
+ipcMain.handle('update:open-release', async (_event, version) => {
+  const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
+  const url = version ? `${core.OFFICIAL.releasePage}/tag/v${version}` : core.OFFICIAL.releasePage;
+  await shell.openExternal(url);
+  return true;
 });
 
 // A guest can find rooms without typing an IP address.

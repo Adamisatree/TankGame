@@ -1,5 +1,11 @@
 /** Wire format shared by the LAN server, the host and the guest. */
 
+/**
+ * Bumped whenever the netcode changes shape. Two machines on different
+ * versions refuse to play instead of silently desyncing.
+ */
+export const PROTOCOL_VERSION = 3;
+
 export type NetRole = 'host' | 'guest';
 
 export interface TankInput {
@@ -94,9 +100,10 @@ export type HostMessage =
   | { t: 'chat'; text: string };
 
 export type ServerMessage =
-  | { t: 'joined'; role: NetRole; guest?: boolean; host?: boolean; skill?: string }
+  | { t: 'joined'; role: NetRole; guest?: boolean; host?: boolean; skill?: string; version?: string; peerVersion?: string }
   | { t: 'paired'; skill?: string }
-  | { t: 'peer'; state: 'joined' | 'left'; skill?: string }
+  | { t: 'peer'; state: 'joined' | 'left'; skill?: string; version?: string }
+  | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
   | { t: 'input'; input: TankInput; seq: number }
   | { t: 'bye' }
   | { t: 'replaced' };

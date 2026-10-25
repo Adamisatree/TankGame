@@ -19,6 +19,21 @@ import { WebSocketServer } from 'ws';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
+
+/**
+ * Both sides must run the same build: the netcode, the maps and the item table
+ * all change between versions, so a mismatched pair would desync immediately.
+ */
+async function readVersion() {
+  if (process.env.TANK_VERSION) return process.env.TANK_VERSION;
+  try {
+    const pkg = JSON.parse(await readFile(resolve(ROOT, 'package.json'), 'utf8'));
+    return String(pkg.version || '0.0.0');
+  } catch {
+    return '0.0.0';
+  }
+}
+const VERSION = await readVersion();
 const DIST = process.env.TANK_DIST ? resolve(process.env.TANK_DIST) : join(ROOT, 'dist');
 
 const MIME = {
@@ -67,6 +82,7 @@ async function serveStatic(req, res) {
   if (url.pathname === '/info') {
     return json(res, 200, {
       ok: true,
+      version: VERSION,
       port: currentPort,
       addresses: lanAddresses(),
       players: countPlayers(),
@@ -119,7 +135,7 @@ function send(ws, msg) {
 /** The guest's menu choice travels with the pairing so the host can use it. */
 function pair() {
   if (!room.host || !room.guest) return;
-  send(room.host, { t: 'peer', state: 'joined', skill: room.guest.skill });
+  send(room.host, { t: 'peer', state: 'joined', skill: room.guest.skill, version: room.guest.version });
   send(room.guest, { t: 'paired', skill: room.host.skill });
   console.log('[lan] host <-> guest paired');
 }
@@ -165,12 +181,21 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       if (msg.t === 'join') {
         const role = msg.role === 'host' ? 'host' : 'guest';
         ws.skill = typeof msg.skill === 'string' ? msg.skill : undefined;
+        ws.version = typeof msg.version === 'string' ? msg.version : '';
+
+        // A guest from a different build cannot be played with – say why.
+        if (role === 'guest' && ws.version && ws.version !== VERSION) {
+          send(ws, { t: 'reject', reason: 'version', hostVersion: VERSION, yourVersion: ws.version });
+          console.log(`[lan] rejected guest ${ws.version} (host ${VERSION})`);
+          ws.role = null;
+          return;
+        }
         if (role === 'host') {
           if (room.host && room.host !== ws) send(room.host, { t: 'replaced' });
           room.host = ws;
           ws.role = 'host';
           totalPlayers++;
-          send(ws, { t: 'joined', role: 'host', guest: !!room.guest });
+          send(ws, { t: 'joined', role: 'host', guest: !!room.guest, version: VERSION, peerVersion: room.guest?.version });
           console.log('[lan] host joined');
           pair();
         } else {
@@ -178,7 +203,7 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           room.guest = ws;
           ws.role = 'guest';
           totalPlayers++;
-          send(ws, { t: 'joined', role: 'guest', host: !!room.host, skill: room.host?.skill });
+          send(ws, { t: 'joined', role: 'guest', host: !!room.host, skill: room.host?.skill, version: VERSION, peerVersion: room.host?.version });
           console.log('[lan] guest joined');
           pair();
         }
@@ -254,6 +279,7 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         wss,
         port: actual,
         addresses: lanAddresses(),
+        version: VERSION,
         close: () =>
           new Promise((done) => {
             clearInterval(heartbeat);

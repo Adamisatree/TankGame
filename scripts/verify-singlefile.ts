@@ -14,6 +14,7 @@ const file = resolve('release/坦克大作战.html');
 const html = readFileSync(file, 'utf8');
 console.log(`file: ${file} (${(Buffer.byteLength(html) / 1024 / 1024).toFixed(2)} MB)`);
 
+const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as { version: string };
 const errors: string[] = [];
 const virtualConsole = new VirtualConsole();
 virtualConsole.on('jsdomError', (err) => {
@@ -141,6 +142,20 @@ if (firstKey) {
   rebindLabel = (firstKey.textContent ?? '').trim();
 }
 
+// --- version + updater panel (v1.2.0)
+const updater = doc.querySelector('.updater');
+const updaterSummary = (updater?.querySelector('summary')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+const mirrorSelect = doc.querySelector('[data-upd-mirror]') as HTMLSelectElement | null;
+const versionBadge = (doc.querySelector('.kicker')?.textContent ?? '').trim();
+const autoOption = Array.from(mirrorSelect?.options ?? []).some((o) => o.value === '');
+const mirroredOptions = Array.from(mirrorSelect?.options ?? []).filter((o) => o.value !== '');
+
+// Offline behaviour: clicking "check" must not throw, it must explain itself.
+(doc.querySelector('[data-upd-check]') as HTMLElement | null)?.click();
+await new Promise((r) => setTimeout(r, 600));
+const updaterStatus = (doc.querySelector('.upd-status')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+const updaterErrors = errors.length;
+
 const checks: [string, boolean, string?][] = [
   ['a canvas was created', !!canvas],
   ['the title card rendered', cardText.includes('坦克大作战'), cardText.slice(0, 60)],
@@ -160,6 +175,15 @@ const checks: [string, boolean, string?][] = [
   ['clicking a key starts capture', captureStarted],
   ['pressing a key rebinds it', rebindLabel === 'Z', rebindLabel],
   ['capture mode ends after rebinding', !!firstKey && !firstKey.classList.contains('capturing')],
+  ['the title shows the build version', versionBadge.includes(`v${pkg.version}`), versionBadge],
+  ['the version comes from the build, not a hard-coded string', html.includes(pkg.version)],
+  ['the updater panel is in the menu', !!updater],
+  ['the panel shows the current version', updaterSummary.includes(`v${pkg.version}`), updaterSummary],
+  ['the panel offers a check button', !!doc.querySelector('[data-upd-check]')],
+  ['the panel offers mirror probing', !!doc.querySelector('[data-upd-probe]')],
+  ['mirror choice includes an automatic option', autoOption],
+  ['several mirrors can be picked by hand', mirroredOptions.length >= 3, `${mirroredOptions.length}`],
+  ['checking offline fails politely instead of throwing', updaterStatus.length > 0 && errors.length === updaterErrors, updaterStatus.slice(0, 80)],
 ];
 
 let failed = 0;

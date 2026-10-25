@@ -14,7 +14,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.1.0-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-portable.html)是一个**完全自包含**的网页（1.5 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.2.0-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-portable.html)是一个**完全自包含**的网页（1.5 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -27,12 +27,12 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.1.0-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.1.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.1.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.1.0-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.1.0-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.1.0-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.1.0/TankGame-1.1.0-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.2.0-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.2.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.2.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.2.0-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.2.0-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.2.0-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.2.0/TankGame-1.2.0-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
@@ -54,6 +54,30 @@ npm run build        # 类型检查 + 生产构建（输出到 dist/）
 npm run lan          # 构建并启动局域网服务：http://<你的IP>:8787
 npm run build:single # 生成 release/坦克大作战.html 单文件版
 npm run test:desktop # 检查桌面端打包后能否正常起服务
+npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
+```
+
+## 自动更新、换版本、镜像下载
+
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.2.0`）：
+
+- **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
+- **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
+- **下载全走镜像**：`ghfast.top`、`gh-proxy.com`、`ghproxy.net`、`gh.llkk.cc` 等前缀镜像一个个自动重试，镜像全挂了才回落到 github.com；镜像列表在仓库根目录的 `mirrors.json` 里，改一个文件就能加新的；
+- **本地留档**：下载好的安装包存在用户目录的 `versions/` 里，面板下方会列出「本机已下载的版本」，再切回旧版本不用重新下载；同一版本重复点击也只会校验一下缓存；
+- **下载校验**：边下边算 SHA-256，和 `updates.json` 里 GitHub 记录的摘要比对，校验不过或者被代理截断就自动换下一条线路，装上去的一定是完整的那一份；
+- **镜像测速 + 手动选线**：`镜像测速` 会并发量每个站点的延迟并标出最快的一条（★），也可以在下拉框里固定用某一条；
+- 浏览器/单文件版里没有「安装」权限，按钮会变成镜像直链下载，其余逻辑一样。
+
+> 装回旧版本时，Windows 安装器默认允许降级覆盖，配置在 `package.json` 的 `build.nsis.allowDowngrade`。
+
+### 发布新版本时镜像怎么保持新鲜
+
+`updates.json`（版本清单）在 **CI 发布完成后自动重新生成**并提交回 `main`、同时挂到该 release 上；客户端优先读 CDN 上的这一份，因此**镜像挂了不影响更新，镜像源也不会把新版本挡住**。自己手动刷新：
+
+```bash
+gh api "repos/Adamisatree/TankGame/releases?per_page=30" > /tmp/releases.json
+node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scripts/gen-update-manifest.mjs（需要 GITHUB_TOKEN）
 ```
 
 ## 局域网联机（不用联网）
@@ -72,6 +96,8 @@ npm run test:desktop # 检查桌面端打包后能否正常起服务
 3. **手动填**：只填 IP（端口默认 `8787`，会自动补），或者直接粘贴整条网址。
 
 输入框做了处理：**中文输入法打出来的「192。168。1。10」会自动变成「192.168.1.10」**，全角数字也会转成半角，粘贴整句话只会保留地址部分——之前那种「打不出点」的问题不会再出现。
+
+**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 v1.2.0 / 你 v1.1.0，请更新到同一版本」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
 
 技术上是**房主权威**：房主的机器跑物理、算道具、判命中，每秒 30 次把状态推给对方，对方只上传操作意图。所以两边看到的结果一定一致，也不怕对方改内存。
 
@@ -261,23 +287,34 @@ src/
   net/
     protocol.ts      # 局域网报文格式（快照 / 输入 / 事件）
     LanClient.ts     # WebSocket 客户端（自动重连、状态回调）
+  update/
+    UpdaterPanel.ts  # 菜单里的「更新与版本」面板（检查 / 换版本 / 镜像 / 进度）
+    types.ts         # preload 暴露的更新接口类型
+  version.ts         # 构建时注入的版本号（__APP_VERSION__）
   game/
     pickups.ts       # 三种地图道具的数据与抽取权重
     skills.ts        # 四个召唤师技能的数据（冷却 / 时长）
     keybinds.ts      # 按键绑定：默认值、校验、存档、按键名字
+shared/
+  update-core.mjs    # 纯逻辑：版本比较、安装包识别、镜像 URL、清单归一化
+  fetch-manifest.mjs # 并发拉清单、取最新的一份（不被慢镜像拖住）
+  download.mjs       # 镜像逐个重试下载 + SHA-256 校验 + 截断检测
 server/
   lan-server.mjs     # 静态站点 + WebSocket 中继（一个进程，无外部服务）
 electron/
   main.cjs           # 桌面窗口，启动时自带局域网服务
   lan-boot.cjs       # 服务引导（可脱离 Electron 单独测试）
   discovery.cjs      # UDP 广播/扫描：访客一键找到房间
-  preload.cjs        # 只暴露「扫描局域网」这一个能力
+  updater.cjs        # 更新：设置存档、拉清单、测速、下载校验、启动安装器
+  preload.cjs        # 只暴露「扫描局域网 / 更新」这两个能力
 scripts/
   selftest.ts        # 103 项纯逻辑检查（含地图校验、道具、技能、键位）
+  updatetest.ts      # 75 项更新检查（版本比较、换版本、镜像回退、校验、清单并发）
   smoke.ts           # jsdom + 软件 Canvas 里跑真游戏的冒烟测试（45 项，含真 WebSocket 联机）
-  lantest.ts         # 20 项局域网中继检查（配对 / 转发 / 断线 / 重开）
+  lantest.ts         # 30 项局域网中继检查（配对 / 转发 / 断线 / 重开 / 版本拦截）
   desktop-test.ts    # 7 项打包后服务检查
-  verify-singlefile.ts # 在 jsdom 里真的打开单文件版，确认能起
+  verify-singlefile.ts # 在 jsdom 里真的打开单文件版，确认能起（26 项，含版本号与更新面板）
+  gen-update-manifest.mjs # 从 GitHub Releases 生成 updates.json
   map-sheet.ts       # 把 8 张地图画成一张总览图（docs/maps.png）
   render.ts          # 离线渲染 PNG 截图（npx tsx scripts/render.ts 输出目录）
 ```
@@ -300,4 +337,5 @@ scripts/
 - 更多模式：时间赛、占点、道具；
 - 多敌人 / 波次、道具、可破坏墙；
 - 关卡编辑器与最佳成绩本地存档；
+- 增量更新（目前每个版本都是整包下载）；
 - 更精细的笔触（同一笔画内变宽、墨点堆积）。

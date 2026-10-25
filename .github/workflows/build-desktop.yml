@@ -35,6 +35,7 @@ jobs:
           npm run typecheck
           npm run selftest
           npm run lantest
+          npm run test:update
 
       - name: Build the game
         shell: bash
@@ -76,6 +77,12 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: npm ci
+
+      - name: Type-check and test
+        shell: bash
+        run: |
+          npm run typecheck
+          npm run test:update
 
       - name: Build the game
         shell: bash
@@ -129,3 +136,41 @@ jobs:
         with:
           files: dist-artifacts/**/*
           generate_release_notes: true
+
+  manifest:
+    name: Refresh updates.json
+    # The app reads its release list from a CDN mirror, so the manifest has to be
+    # in the repo (and on the release) the moment the assets land.
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate updates.json from the published releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/gen-update-manifest.mjs
+
+      - name: Commit it back to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- updates.json; then
+            echo "manifest unchanged"
+          else
+            git add updates.json
+            git commit -m "chore: refresh updates.json for ${GITHUB_REF_NAME}"
+            git push origin HEAD:main
+          fi
+
+      - name: Attach the manifest to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" updates.json --clobber

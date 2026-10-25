@@ -4,6 +4,7 @@
  *
  *   npm run lantest
  */
+import { readFile } from 'node:fs/promises';
 import WebSocket from 'ws';
 import { createLanServer } from '../server/lan-server.mjs';
 
@@ -60,6 +61,21 @@ check('/info reports a free room', info.players === 0, JSON.stringify(info));
 check('/info reports the real port', info.port === server.port, `${info.port} vs ${server.port}`);
 check('/info lists LAN addresses for the host to share', Array.isArray(info.addresses), JSON.stringify(info.addresses));
 
+// --- version gate (different builds must never play together)
+const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+check('/info reports the build version', info.version === pkg.version, `${info.version} vs ${pkg.version}`);
+
+const stale = await open(wsUrl);
+stale.send({ t: 'join', role: 'guest', version: '0.0.0-old', protocol: 3 });
+const rejected = await waitFor(() => stale.messages.some((m) => m.t === 'reject'), 2000);
+const rejectMsg = stale.messages.find((m) => m.t === 'reject');
+check('an old guest is refused with a reason', rejected && rejectMsg?.reason === 'version', JSON.stringify(stale.messages));
+check('the refusal names both versions', rejectMsg?.hostVersion === pkg.version && rejectMsg?.yourVersion === '0.0.0-old', JSON.stringify(rejectMsg));
+check('a refused guest never joins the room', !stale.messages.some((m) => m.t === 'joined'), JSON.stringify(stale.messages));
+check('a refused guest does not occupy a seat', server.stats().players === 0, JSON.stringify(server.stats()));
+stale.close();
+await new Promise((r) => setTimeout(r, 60));
+
 const pageRes = await fetch(`http://127.0.0.1:${server.port}/`);
 check('/ serves the game (or a build hint)', pageRes.ok, String(pageRes.status));
 const traversal = await fetch(`http://127.0.0.1:${server.port}/../package.json`);
@@ -74,6 +90,7 @@ check('host ack says nobody has joined yet', host.messages.find((m) => m.t === '
 const guest = await open(wsUrl);
 guest.send({ t: 'join', role: 'guest', skill: 'weaken' });
 check('guest gets a joined ack', await waitFor(() => guest.messages.some((m) => m.t === 'joined')));
+check('the ack tells the guest which version it is playing', guest.messages.find((m) => m.t === 'joined')?.version === pkg.version);
 check('guest ack sees the host present', guest.messages.find((m) => m.t === 'joined')?.host === true);
 check('host is told the guest arrived', await waitFor(() => host.messages.some((m) => m.t === 'peer' && m.state === 'joined')));
 check('guest is told it is paired', await waitFor(() => guest.messages.some((m) => m.t === 'paired')));
