@@ -309,7 +309,7 @@ electron/
   preload.cjs        # 只暴露「扫描局域网 / 更新」这两个能力
 scripts/
   selftest.ts        # 103 项纯逻辑检查（含地图校验、道具、技能、键位）
-  updatetest.ts      # 75 项更新检查（版本比较、换版本、镜像回退、校验、清单并发）
+  updatetest.ts      # 77 项更新检查（版本比较、换版本、镜像回退、校验、清单并发）
   smoke.ts           # jsdom + 软件 Canvas 里跑真游戏的冒烟测试（45 项，含真 WebSocket 联机）
   lantest.ts         # 30 项局域网中继检查（配对 / 转发 / 断线 / 重开 / 版本拦截）
   desktop-test.ts    # 7 项打包后服务检查
