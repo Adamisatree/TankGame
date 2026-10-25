@@ -503,3 +503,379 @@ b.p2 {
   border-radius: 10px;
   color: var(--player2);
 }
+
+/* ------------------------------------------------------- maps / skills / keys */
+
+.setting-block {
+  margin: 12px 0 4px;
+}
+
+.setting-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.setting-hint {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.map-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.map-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 5px 5px 4px;
+  background: #fffaf0;
+  border: 1.8px solid rgba(38, 34, 29, 0.45);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--font);
+  color: var(--ink);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.map-card:hover {
+  transform: translateY(-1px) rotate(-0.4deg);
+  box-shadow: 2px 3px 0 rgba(38, 34, 29, 0.14);
+}
+
+.map-card.on {
+  border-color: var(--player);
+  box-shadow: 0 0 0 2px rgba(63, 156, 143, 0.28);
+}
+
+.map-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: #f3ead9;
+  border-radius: 2px;
+}
+
+.map-frame {
+  fill: none;
+  stroke: rgba(38, 34, 29, 0.7);
+  stroke-width: 1.4;
+}
+
+.map-wall {
+  fill: #d8c9ae;
+  stroke: #26221d;
+  stroke-width: 0.7;
+}
+
+.map-crate {
+  fill: #d6a75c;
+  stroke: #26221d;
+  stroke-width: 0.6;
+}
+
+.map-pickup {
+  fill: #3f9c8f;
+  opacity: 0.85;
+}
+
+.map-p1 {
+  fill: #3f9c8f;
+  stroke: #26221d;
+  stroke-width: 0.6;
+}
+
+.map-p2 {
+  fill: #6f5aa8;
+  stroke: #26221d;
+  stroke-width: 0.6;
+}
+
+.map-name {
+  font-size: 13px;
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+
+.map-random {
+  justify-content: center;
+  align-items: center;
+  min-height: 84px;
+  border-style: dashed;
+}
+
+.map-dice {
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.skill-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.seat-tag {
+  flex: 0 0 62px;
+  font-size: 14px;
+  padding-top: 8px;
+  font-weight: 700;
+}
+
+.skill-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  flex: 1;
+}
+
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 7px;
+  text-align: left;
+  background: #fffaf0;
+  border: 1.7px solid rgba(38, 34, 29, 0.4);
+  border-radius: 4px;
+  font-family: var(--font);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.skill-card b {
+  font-size: 16px;
+}
+
+.skill-card em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.skill-card span {
+  font-size: 11.5px;
+  line-height: 1.28;
+  color: #5c5346;
+}
+
+.skill-card.on {
+  border-color: var(--player2);
+  box-shadow: 0 0 0 2px rgba(111, 90, 168, 0.22);
+  background: #f6f1ff;
+}
+
+/* key bindings */
+
+.keybinds {
+  margin: 12px 0 4px;
+  border: 1.6px dashed rgba(38, 34, 29, 0.4);
+  border-radius: 4px;
+  padding: 6px 12px 10px;
+  background: rgba(255, 250, 240, 0.6);
+}
+
+.keybinds summary {
+  cursor: pointer;
+  font-size: 16px;
+  padding: 3px 0;
+}
+
+.key-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0;
+}
+
+.key-tabs button {
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 3px 9px;
+  border: 1.5px solid rgba(38, 34, 29, 0.4);
+  border-radius: 12px;
+  background: #fffaf0;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.key-tabs button.on {
+  background: var(--ink);
+  color: #fffaf0;
+  border-color: var(--ink);
+}
+
+.key-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 4px 14px;
+  margin: 4px 0 8px;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14.5px;
+}
+
+.key-btn {
+  font-family: var(--font);
+  font-size: 14px;
+  min-width: 74px;
+  padding: 2px 9px;
+  border: 1.6px solid rgba(38, 34, 29, 0.55);
+  border-bottom-width: 2.6px;
+  border-radius: 4px;
+  background: #fffaf0;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.key-btn:hover {
+  background: #fff;
+}
+
+.key-btn.capturing {
+  background: var(--player);
+  color: #fff;
+  border-color: var(--player);
+}
+
+.key-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.key-foot button {
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 2px 9px;
+  border: 1.4px solid rgba(38, 34, 29, 0.45);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* LAN helper */
+
+.lan-block {
+  margin-top: 6px;
+}
+
+.lan-lead {
+  font-size: 14px;
+  margin: 2px 0 6px;
+}
+
+.lan-room {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+
+.lan-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  font-family: var(--font);
+  padding: 5px 10px;
+  border: 1.8px solid var(--player);
+  border-radius: 4px;
+  background: #fffaf0;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.lan-copy b {
+  font-size: 16px;
+  letter-spacing: 0.4px;
+}
+
+.lan-copy span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.lan-copy.copied {
+  background: #eaf6f2;
+  border-color: var(--player);
+}
+
+.lan-loading {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.lan-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chip {
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1.5px solid rgba(111, 90, 168, 0.55);
+  background: #fffaf0;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: #f6f1ff;
+}
+
+.lan-scan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.lan-host {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  font-family: var(--font);
+  padding: 5px 10px;
+  border: 1.6px solid rgba(111, 90, 168, 0.6);
+  border-radius: 4px;
+  background: #fffaf0;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.lan-host span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .skill-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .map-grid {
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  }
+}

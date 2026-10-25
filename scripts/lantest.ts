@@ -57,6 +57,8 @@ const infoRes = await fetch(`http://127.0.0.1:${server.port}/info`);
 const info = await infoRes.json();
 check('/info answers', infoRes.ok && info.ok === true, JSON.stringify(info));
 check('/info reports a free room', info.players === 0, JSON.stringify(info));
+check('/info reports the real port', info.port === server.port, `${info.port} vs ${server.port}`);
+check('/info lists LAN addresses for the host to share', Array.isArray(info.addresses), JSON.stringify(info.addresses));
 
 const pageRes = await fetch(`http://127.0.0.1:${server.port}/`);
 check('/ serves the game (or a build hint)', pageRes.ok, String(pageRes.status));
@@ -65,16 +67,27 @@ check('path traversal is blocked', traversal.status === 200 && !(await traversal
 
 // --- pairing
 const host = await open(wsUrl);
-host.send({ t: 'join', role: 'host' });
+host.send({ t: 'join', role: 'host', skill: 'rage' });
 check('host gets a joined ack', await waitFor(() => host.messages.some((m) => m.t === 'joined')), JSON.stringify(host.messages));
 check('host ack says nobody has joined yet', host.messages.find((m) => m.t === 'joined')?.guest === false);
 
 const guest = await open(wsUrl);
-guest.send({ t: 'join', role: 'guest' });
+guest.send({ t: 'join', role: 'guest', skill: 'weaken' });
 check('guest gets a joined ack', await waitFor(() => guest.messages.some((m) => m.t === 'joined')));
 check('guest ack sees the host present', guest.messages.find((m) => m.t === 'joined')?.host === true);
 check('host is told the guest arrived', await waitFor(() => host.messages.some((m) => m.t === 'peer' && m.state === 'joined')));
 check('guest is told it is paired', await waitFor(() => guest.messages.some((m) => m.t === 'paired')));
+// Skill choices travel with the pairing so each side shows the right one.
+check(
+  'the host learns the guest skill',
+  await waitFor(() => host.messages.some((m) => m.t === 'peer' && m.skill === 'weaken')),
+  JSON.stringify(host.messages.filter((m) => m.t === 'peer'))
+);
+check(
+  'the guest learns the host skill',
+  await waitFor(() => guest.messages.some((m) => m.t === 'paired' && m.skill === 'rage')),
+  JSON.stringify(guest.messages.filter((m) => m.t === 'paired'))
+);
 
 // --- snapshot relay (host -> guest)
 host.send({ t: 'state', seq: 1, level: 0, phase: 'playing', score: 0, crates: [], tanks: [], bullets: [], events: [] });

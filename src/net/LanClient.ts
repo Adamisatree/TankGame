@@ -9,6 +9,8 @@ export interface LanHandlers {
   onHostMessage?: (msg: HostMessage) => void;
   /** Fired when the other player joins or leaves. */
   onPeer?: (state: 'joined' | 'left') => void;
+  /** The other player's summoner skill choice, announced when pairing. */
+  onPeerSkill?: (skill: string) => void;
   onLog?: (line: string) => void;
 }
 
@@ -26,6 +28,8 @@ export class LanClient {
   private closedByUser = false;
   private retryTimer: number | null = null;
   private url: string;
+  /** Summoner skill this machine picked; sent with the join message. */
+  skill = '';
 
   constructor(role: NetRole, serverAddress: string, handlers: LanHandlers = {}) {
     this.role = role;
@@ -61,7 +65,7 @@ export class LanClient {
 
     ws.onopen = () => {
       this.retry = 0;
-      ws.send(JSON.stringify({ t: 'join', role: this.role }));
+      ws.send(JSON.stringify({ t: 'join', role: this.role, skill: this.skill || undefined }));
       this.setStatus('waiting');
       this.handlers.onLog?.(`已连接 ${this.url}`);
     };
@@ -75,15 +79,17 @@ export class LanClient {
       }
       switch (msg.t) {
         case 'joined':
-          this.handlers.onLog?.(`房主已就位` );
+          if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
           if (this.role === 'guest' && msg.host) this.setStatus('playing');
           break;
         case 'paired':
+          if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
           this.setStatus('playing');
           this.handlers.onPeer?.('joined');
           this.handlers.onLog?.('对手已加入');
           break;
         case 'peer':
+          if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
           this.handlers.onPeer?.(msg.state);
           if (msg.state === 'joined') this.setStatus('playing');
           if (msg.state === 'left') this.setStatus('waiting', '对手已离开');
@@ -180,13 +186,15 @@ export class LanClient {
 }
 
 /** Best-effort LAN address list, used by the host panel to tell friends where to go. */
-export async function fetchLanInfo(serverAddress: string): Promise<{ addresses: string[]; players: number } | null> {
+export async function fetchLanInfo(
+  serverAddress: string
+): Promise<{ addresses: string[]; players: number; port?: number } | null> {
   try {
     const socket = resolveSocketUrl(serverAddress);
     const base = socket.replace(/^ws/, 'http').replace(/\/ws$/, '');
     const res = await fetch(`${base}/info`, { cache: 'no-store' });
     if (!res.ok) return null;
-    return (await res.json()) as { addresses: string[]; players: number };
+    return (await res.json()) as { addresses: string[]; players: number; port?: number };
   } catch {
     return null;
   }

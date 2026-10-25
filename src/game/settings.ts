@@ -1,3 +1,6 @@
+import { DEFAULT_LEVEL_ID } from '../engine/level';
+import { DEFAULT_SKILL, type SkillId } from './skills';
+
 export type GameMode = 'solo' | 'versus' | 'lan';
 export type Difficulty = 'easy' | 'normal' | 'hard';
 
@@ -84,6 +87,12 @@ export interface Settings {
   lanRole: 'host' | 'guest';
   /** LAN: host IP / URL. Empty = the page's own server. */
   lanAddress: string;
+  /** Map id, or 'random' to roll a fresh one each match. */
+  mapId: string;
+  /** P1's summoner skill (also the solo pick). */
+  skillP1: SkillId;
+  /** P2's summoner skill in local versus / LAN. */
+  skillP2: SkillId;
 }
 
 /** Mutated by the DOM overlay, read by the game scene when it boots. */
@@ -94,6 +103,9 @@ export const settings: Settings = {
   autoDodge: false,
   lanRole: 'host',
   lanAddress: '',
+  mapId: DEFAULT_LEVEL_ID,
+  skillP1: DEFAULT_SKILL,
+  skillP2: 'invincible',
 };
 
 export function preset(): DifficultyPreset {

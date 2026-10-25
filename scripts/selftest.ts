@@ -6,7 +6,19 @@ import { planRicochetShot, trace, segmentCircleT } from '../src/engine/ai';
 import { advanceBullet, type BulletBody, type CrateBox } from '../src/engine/bullet';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../src/engine/physics';
 import { bulletThreatAt, nearestWallGap, pickHeading, steerTo } from '../src/engine/steer';
-import { LEVELS, buildLayout } from '../src/engine/level';
+import { LEVELS, buildLayout, levelById, randomLevelIndex, validateLevels } from '../src/engine/level';
+import { PICKUP_KINDS, rollPickupKind, PICKUP_RADIUS } from '../src/game/pickups';
+import { SKILLS, skillById, isSkillId, RAGE_SHOTS } from '../src/game/skills';
+import {
+  ACTION_LABEL,
+  defaultBindings,
+  findConflicts,
+  getBindings,
+  keyLabel,
+  resetBindings,
+  saveBindings,
+  SEAT_ACTIONS,
+} from '../src/game/keybinds';
 
 let passed = 0;
 const failures: string[] = [];
@@ -258,6 +270,74 @@ for (const [i, level] of LEVELS.entries()) {
       (plan ? `${plan.bounces} bounce(s), ${Math.round(plan.length)}px` : 'none — falls back to a direct shot')
   );
 }
+
+
+// ---------------------------------------------------------------- map roster
+
+const issues = validateLevels();
+check('every authored map passes validation', issues.length === 0, JSON.stringify(issues.slice(0, 3)));
+check('the roster has a decent spread of maps', LEVELS.length >= 8, `${LEVELS.length} maps`);
+check('map ids are unique', new Set(LEVELS.map((l) => l.id)).size === LEVELS.length);
+check('every map offers pickups', LEVELS.every((l) => l.pickups.length >= 3));
+check('every map names itself and describes the layout', LEVELS.every((l) => !!l.name && !!l.blurb));
+check(
+  '1v1 maps are 180° rotationally fair',
+  LEVELS.every((l) =>
+    l.walls.every((w) => {
+      const mx = 1 - w.x - w.w;
+      const my = 1 - w.y - w.h;
+      return l.walls.some((o) => Math.abs(o.x - mx) < 1e-6 && Math.abs(o.y - my) < 1e-6);
+    })
+  )
+);
+check('levelById falls back instead of throwing', levelById('nope').id === LEVELS[0].id);
+check('random map avoids repeating the current one', randomLevelIndex(2, () => 0.26) !== 2, `${randomLevelIndex(2, () => 0.26)}`);
+check(
+  'random map stays in range for many draws',
+  Array.from({ length: 200 }, () => randomLevelIndex(-1)).every((i) => i >= 0 && i < LEVELS.length)
+);
+
+// ---------------------------------------------------------------- pickups
+
+check('there are three pickup kinds', PICKUP_KINDS.length === 3);
+check(
+  'pickup rolls only ever return real kinds',
+  Array.from({ length: 400 }, (_, i) => rollPickupKind(() => (i % 100) / 100)).every((k) => PICKUP_KINDS.includes(k))
+);
+check('health is the most common drop', rollPickupKind(() => 0.1) === 'health');
+check('shield is the rarest drop', rollPickupKind(() => 0.95) === 'shield');
+check('pickups are big enough to touch', PICKUP_RADIUS >= 14);
+
+// ---------------------------------------------------------------- skills
+
+check('four summoner skills are offered', SKILLS.length === 4, `${SKILLS.length}`);
+check('skill ids survive a round trip', SKILLS.every((s) => skillById(s.id).id === s.id));
+check('unknown skills fall back safely', skillById('nope' as never).id === SKILLS[0].id);
+check('isSkillId rejects junk', !isSkillId('nope') && isSkillId('blink'));
+check('every skill has a positive cooldown', SKILLS.every((s) => s.cooldown > 0));
+check('rage grants a stack of empowered shells', RAGE_SHOTS >= 3);
+check(
+  'rage is the only damage skill and it is time-limited',
+  SKILLS.filter((s) => s.id === 'rage').every((s) => s.duration > 0)
+);
+
+// ---------------------------------------------------------------- keybinds
+
+resetBindings();
+const defaults = defaultBindings();
+check('default keys cover every seat action', SEAT_ACTIONS.every((a) => defaults.solo[a] > 0));
+check('every action has a label', SEAT_ACTIONS.every((a) => !!ACTION_LABEL[a]));
+check('the two local seats do not share fire keys', defaults.versus.p1.fire !== defaults.versus.p2.fire);
+check('default bindings have no conflicts', findConflicts(defaults).length === 0, JSON.stringify(findConflicts(defaults)));
+check('key labels are readable', keyLabel(87) === 'W' && keyLabel(32) === '空格' && keyLabel(38) === '↑');
+
+saveBindings({ ...defaults, solo: { ...defaults.solo, fire: 74 } });
+check('a rebind survives a save/load round trip', getBindings().solo.fire === 74);
+check('rebinding did not disturb other actions', getBindings().solo.up === defaults.solo.up);
+saveBindings({ ...defaults, solo: { ...defaults.solo, up: 999 } } as never);
+check('out-of-range key codes are rejected', getBindings().solo.up === defaults.solo.up);
+resetBindings();
+check('reset restores the defaults', getBindings().solo.fire === defaults.solo.fire);
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);
 if (failures.length) {

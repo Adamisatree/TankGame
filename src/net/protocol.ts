@@ -10,6 +10,10 @@ export interface TankInput {
   /** Absolute turret angle in radians. */
   aim: number;
   fire: boolean;
+  /** Tactical slow-walk (fine aiming). */
+  slow?: boolean;
+  /** Set for one frame when the summoner skill button is pressed. */
+  skill?: boolean;
 }
 
 export interface TankSnapshot {
@@ -21,6 +25,15 @@ export interface TankSnapshot {
   lives: number;
   damage: number;
   alive: number;
+  /** Milliseconds left on each effect (0 = inactive). */
+  shield: number;
+  speed: number;
+  rage: number;
+  slow: number;
+  /** Shells left with double damage. */
+  rageShots: number;
+  /** Milliseconds until the skill is ready again. */
+  skillCd: number;
 }
 
 export interface BulletSnapshot {
@@ -29,9 +42,27 @@ export interface BulletSnapshot {
   vx: number;
   vy: number;
   owner: 'p1' | 'p2';
+  /** 1 = normal, 2 = empowered by 狂暴. */
+  dmg?: number;
 }
 
-export type NetEventKind = 'fire' | 'hit' | 'bounce' | 'explode' | 'crate' | 'ping';
+/** Pickup state the guest needs to draw the arena identically. */
+export interface PickupSnapshot {
+  kind: 'health' | 'speed' | 'shield';
+  /** Seconds until it comes back; 0 = on the ground. */
+  respawn: number;
+}
+
+export type NetEventKind =
+  | 'fire'
+  | 'hit'
+  | 'bounce'
+  | 'explode'
+  | 'crate'
+  | 'ping'
+  | 'pickup'
+  | 'skill'
+  | 'blink';
 
 export interface NetEvent {
   k: NetEventKind;
@@ -51,6 +82,8 @@ export interface Snapshot {
   crates: number[];
   tanks: TankSnapshot[];
   bullets: BulletSnapshot[];
+  /** One entry per authored pickup spot, in level order. */
+  pickups: PickupSnapshot[];
   events: NetEvent[];
 }
 
@@ -61,9 +94,9 @@ export type HostMessage =
   | { t: 'chat'; text: string };
 
 export type ServerMessage =
-  | { t: 'joined'; role: NetRole; guest?: boolean; host?: boolean }
-  | { t: 'paired' }
-  | { t: 'peer'; state: 'joined' | 'left' }
+  | { t: 'joined'; role: NetRole; guest?: boolean; host?: boolean; skill?: string }
+  | { t: 'paired'; skill?: string }
+  | { t: 'peer'; state: 'joined' | 'left'; skill?: string }
   | { t: 'input'; input: TankInput; seq: number }
   | { t: 'bye' }
   | { t: 'replaced' };
