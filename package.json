@@ -92,8 +92,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "坦克大作战",
-      "artifactName": "TankGame-${version}-${arch}-setup.${ext}",
-      "allowDowngrade": true
+      "artifactName": "TankGame-${version}-${arch}-setup.${ext}"
     },
     "portable": {
       "artifactName": "TankGame-${version}-portable.${ext}"
