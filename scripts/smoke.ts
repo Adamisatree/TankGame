@@ -502,6 +502,120 @@ check(
   JSON.stringify({ phase: lastSnap()?.phase, level: lastSnap()?.level })
 );
 
+// --- v1.5.1 netcode/rules regressions -------------------------------------
+const shadow = scene as unknown as Record<string, any>;
+{
+  // (a) every seat owns its trigger cooldown: p3 and p4 used to share p1's.
+  const a = shadow.addRemoteTank('p3', 0) as TankRef;
+  const b = shadow.addRemoteTank('p4', 0) as TankRef;
+  for (const t of [a, b]) {
+    t.x = poke.layout.player.x;
+    t.y = poke.layout.player.y;
+    t.bodyAngle = -Math.PI / 2;
+    t.aimAt(-Math.PI / 2);
+  }
+  const shots: Record<string, number> = {};
+  const realSpawn = shadow.spawnBullet.bind(shadow);
+  shadow.spawnBullet = (...args: any[]) => {
+    const owner = String(args[3]);
+    shots[owner] = (shots[owner] ?? 0) + 1;
+    return realSpawn(...args);
+  };
+  const hold = { turn: 0, drive: 0, aim: -Math.PI / 2, fire: true, slow: false };
+  for (let i = 0; i < 90; i += 1) {
+    for (const t of [a, b]) {
+      (t as unknown as { heat: { heat: number; locked: boolean } }).heat = { heat: 0, locked: false };
+      shadow.applyInput(t, hold, 1 / 60);
+    }
+  }
+  shadow.spawnBullet = realSpawn;
+  check(
+    'the 3rd and 4th seat keep their own trigger cooldown',
+    (shots['p3'] ?? 0) >= 2 && (shots['p4'] ?? 0) >= 2,
+    JSON.stringify(shots)
+  );
+
+  // (b) a guest applies the host's kills/deaths (the scoreboard used to be 0s).
+  const snap = shadow.buildSnapshot();
+  for (const st of snap.tanks) {
+    st.kills = 7;
+    st.deaths = 3;
+  }
+  shadow.applySnapshot(snap);
+  shadow.updateGuest(1 / 60);
+  check('a guest applies the host kills/deaths', poke.p1.kills === 7 && poke.p1.deaths === 3, `${poke.p1.kills}/${poke.p1.deaths}`);
+
+  // (c) a kill clears only the dead tank's shells.
+  const shell = (owner: string) => ({ x: 10, y: 10, vx: 1, vy: 0, owner, bounces: 0, maxBounces: 2, life: 5, color: 0, radius: 4, trail: [], dmg: 1, dead: false });
+  shadow.bullets = [shell('p1'), shell('p3'), shell('p4')];
+  shadow.phase = 'playing';
+  shadow.matchOver = false;
+  a.setHp(5);
+  shadow.damage(a, 'p1', 600);
+  const owners = (shadow.bullets as { owner: string }[]).map((sb) => sb.owner);
+  check('a kill only clears the dead tank shells', owners.includes('p1') && owners.includes('p4') && !owners.includes('p3'), JSON.stringify(owners));
+
+  // (d) weaken hits a legal target instead of "the first non-CPU tank".
+  const savedSkill = settings.skillP1;
+  settings.skillP1 = 'weaken';
+  shadow.skillP1 = 'weaken';
+  // The roster wins over the menu pick while a room is open.
+  shadow.roster = (shadow.roster as { id: string; skill: string }[]).map((r) =>
+    r.id === 'p1' ? { ...r, skill: 'weaken' } : r
+  );
+  const p1raw = poke.p1 as unknown as { skillReadyAt: number };
+  const raw = [
+    poke.p2 as unknown as { id?: string; slowUntil?: number },
+    ...(shadow.extras as unknown as { id?: string; slowUntil?: number }[]),
+  ];
+  p1raw.skillReadyAt = 0;
+  const used = shadow.useSkill(poke.p1);
+  const slowed = raw.filter((t) => !!t && (t.slowUntil ?? 0) > scene.time.now).map((t) => t!.id);
+  check('weaken slows exactly one legal target', used === true && slowed.length === 1, `${used} ${JSON.stringify(slowed)}`);
+  settings.skillP1 = savedSkill;
+  shadow.skillP1 = savedSkill;
+  shadow.roster = (shadow.roster as { id: string; skill: string }[]).map((r) =>
+    r.id === 'p1' ? { ...r, skill: '' } : r
+  );
+
+  // Put every tank back to a clean slate: the guest sync above replays the
+  // host's effect timers, and the zone-damage checks below need no shield.
+  const clean = shadow.tanks() as unknown as {
+    alive: boolean;
+    awaitingRespawn: boolean;
+    shieldUntil: number;
+    invulnerableUntil: number;
+    slowUntil: number;
+    speedUntil: number;
+    rageUntil: number;
+    heat: { heat: number; locked: boolean };
+    setHp: (hp: number) => void;
+    setAlive: (alive: boolean, now: number) => void;
+  }[];
+  // The guest-sync test wrote 7 kills onto the live tanks; put the score back
+  // so the win check below does not decide the match on fabricated numbers.
+  for (const t of shadow.tanks() as { kills: number; deaths: number }[]) {
+    t.kills = 0;
+    t.deaths = 0;
+  }
+  shadow.matchOver = false;
+  shadow.phase = 'playing';
+  for (const t of clean) {
+    t.shieldUntil = 0;
+    t.invulnerableUntil = 0;
+    t.slowUntil = 0;
+    t.speedUntil = 0;
+    t.rageUntil = 0;
+    t.heat = { heat: 0, locked: false };
+    if (!t.alive) {
+      t.awaitingRespawn = false;
+      t.setHp(100);
+      t.setAlive(true, scene.time.now);
+    }
+  }
+  shadow.bullets = [];
+}
+
 // Guest input must actually move the host's second tank.
 const p2Start = { x: poke.p2!.x, y: poke.p2!.y };
 const sendInput = () =>

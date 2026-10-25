@@ -15,6 +15,27 @@ import { refreshLevels } from '../maps/registry';
 
 export type LanStatus = 'idle' | 'connecting' | 'waiting' | 'playing' | 'closed' | 'error' | 'rejected';
 
+/**
+ * One id per tab, kept alive across scene restarts.
+ *
+ * The server remembers which seat a session owned for a couple of minutes, so
+ * a dropped guest reconnects into *its own* seat and tank instead of walking in
+ * as a brand-new player (which also used to drop the whole room to the lobby).
+ */
+const SESSION_KEY = 'tankduel.session';
+function sessionId(): string {
+  try {
+    const store = globalThis.sessionStorage;
+    const existing = store?.getItem(SESSION_KEY);
+    if (existing) return existing;
+    const fresh = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    store?.setItem(SESSION_KEY, fresh);
+    return fresh;
+  } catch {
+    return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
 export interface LanHandlers {
   onStatus?: (status: LanStatus, detail?: string) => void;
   onSnapshot?: (snap: Snapshot) => void;
@@ -60,8 +81,8 @@ export interface LanHandlers {
   /** Our own seat in the room. */
   onSeat?: (id: string, role: 'host' | 'guest') => void;
   onHostMessage?: (msg: HostMessage) => void;
-  /** Fired when the other player joins or leaves. */
-  onPeer?: (state: 'joined' | 'left') => void;
+  /** Fired when another seat joins or leaves; `id` is that seat. */
+  onPeer?: (state: 'joined' | 'left', id?: string) => void;
   /** The other player's summoner skill choice, announced when pairing. */
   onPeerSkill?: (skill: string) => void;
   onLog?: (line: string) => void;
@@ -134,6 +155,7 @@ export class LanClient {
         JSON.stringify({
           t: 'join',
           role: this.role,
+          session: sessionId(),
           skill: this.skill || undefined,
           version: APP_VERSION,
           protocol: PROTOCOL_VERSION,
@@ -199,7 +221,7 @@ export class LanClient {
           break;
         case 'peer':
           if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
-          this.handlers.onPeer?.(msg.state);
+          this.handlers.onPeer?.(msg.state, msg.id);
           if (msg.state === 'joined') this.setStatus('playing');
           if (msg.state === 'left') this.setStatus('waiting', '对手已离开');
           break;
@@ -274,7 +296,14 @@ export class LanClient {
 
       // Host messages (state/start/restart/chat) reach guests here.
       const maybe = msg as unknown as HostMessage;
-      if (maybe && (maybe.t === 'state' || maybe.t === 'start' || maybe.t === 'restart' || maybe.t === 'chat')) {
+      if (
+        maybe &&
+        (maybe.t === 'state' ||
+          maybe.t === 'start' ||
+          maybe.t === 'restart' ||
+          maybe.t === 'chat' ||
+          maybe.t === 'result')
+      ) {
         if (maybe.t === 'state') this.handlers.onSnapshot?.(maybe);
         else this.handlers.onHostMessage?.(maybe);
       }

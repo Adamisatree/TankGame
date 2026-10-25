@@ -4,7 +4,7 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /**
  * Hard cap on a transferred map blob. A 40×24 grid map is a few kilobytes, so
@@ -54,8 +54,6 @@ export interface TankSnapshot {
   /** Barrel heat 0..100 and whether the gun is locked out. */
   heat: number;
   heatLocked: number;
-  /** Summoner skill the player picked (for the notice panel). */
-  skill?: string;
 }
 
 export interface BulletSnapshot {
@@ -93,6 +91,8 @@ export interface NetEvent {
   /** For hits/explosions: which tank, or which colour. */
   id?: string;
   color?: number;
+  /** Muzzle events: the world angle the shell left at, so guests draw it right. */
+  angle?: number;
 }
 
 /**
@@ -107,11 +107,39 @@ export interface MapTransfer {
   hash: string;
 }
 
+/** One row of the final scoreboard (what the result card renders). */
+export interface ResultRow {
+  id: string;
+  name: string;
+  team: number;
+  kills: number;
+  deaths: number;
+  hp: number;
+}
+
+/**
+ * The host's verdict, sent once when a match ends. Guests do not re-run the
+ * win check themselves: two machines must never disagree about who won.
+ */
+export interface MatchResultPayload {
+  winners: string[];
+  draw: boolean;
+  reason: 'kills' | 'time' | 'surrender';
+  scoreboard: ResultRow[];
+  elapsed: number;
+  mode: 'ffa' | 'team';
+  teams: number;
+  /** Seat that quit mid-match (only for a surrender). */
+  surrenderBy?: string;
+}
+
 export interface Snapshot {
   t: 'state';
   seq: number;
   level: number;
   phase: string;
+  /** Host's match clock in seconds, so a guest's top bar shows the same time. */
+  elapsed?: number;
   score: number;
   crates: number[];
   tanks: TankSnapshot[];
@@ -143,6 +171,8 @@ export type HostMessage =
   | { t: 'start'; level: number; levelId?: string }
   | { t: 'restart'; level: number; levelId?: string }
   | { t: 'chat'; text: string }
+  /** Host → room: the match is over, and here is exactly how it ended. */
+  | ({ t: 'result' } & MatchResultPayload)
   /** A player left on purpose; everyone else sees it as a surrender. */
   | { t: 'surrender'; by: string }
   /** Host → server: room capacity, mode and the shared match rules. */
@@ -181,6 +211,8 @@ export type ServerMessage =
       role: NetRole;
       /** The seat the server handed us (p1 for the host, p2… for guests). */
       id?: string;
+      /** True when this is a reconnecting client taking its old seat back. */
+      resumed?: boolean;
       guest?: boolean;
       host?: boolean;
       skill?: string;

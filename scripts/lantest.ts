@@ -260,6 +260,58 @@ await sleep(120);
   guest5.close();
 }
 
+// --- v1.5.1: a dropped guest reconnects into its own seat (no lobby reset)
+await sleep(120);
+{
+  const host6 = await open(wsUrl);
+  host6.send({ t: 'join', role: 'host' });
+  await waitFor(() => host6.messages.some((m) => m.t === 'joined'));
+  const guest6 = await open(wsUrl);
+  guest6.send({ t: 'join', role: 'guest', session: 'sess-alpha' });
+  check('a session guest is seated', await waitFor(() => guest6.messages.some((m) => m.t === 'joined' && !m.resumed)));
+  const seat = guest6.messages.find((m) => m.t === 'joined' && !m.resumed)?.id;
+  host6.send({ t: 'config', mode: 'ffa', capacity: 6, killTarget: 15, timeLimit: 480 });
+  host6.send({ t: 'begin' });
+  check('the room started', await waitFor(() => guest6.messages.some((m) => m.t === 'begin')));
+
+  // The Wi-Fi dies: the socket goes away, the room keeps the seat.
+  guest6.close();
+  await waitFor(() => host6.messages.some((m) => m.t === 'peer' && m.state === 'left'));
+
+  const back = await open(wsUrl);
+  back.send({ t: 'join', role: 'guest', session: 'sess-alpha' });
+  check('the reconnect is recognised as a resume', await waitFor(() => back.messages.some((m) => m.t === 'joined' && m.resumed === true)));
+  check('it gets the same seat back', back.messages.find((m) => m.t === 'joined')?.id === seat, `${back.messages.find((m) => m.t === 'joined')?.id} vs ${seat}`);
+
+  // The roster must still say the match is running, i.e. nobody is dumped back
+  // into the lobby by a one-second hiccup.
+  const roster = back.messages.filter((m) => m.t === 'roster').pop();
+  check('the room is still in a match after the reconnect', roster?.started === true, JSON.stringify(roster?.started));
+
+  // A *new* session still lands in the lobby (that is not a resume).
+  const fresh = await open(wsUrl);
+  fresh.send({ t: 'join', role: 'guest', session: 'sess-beta' });
+  await waitFor(() => fresh.messages.some((m) => m.t === 'joined'));
+  const freshRoster = fresh.messages.filter((m) => m.t === 'roster').pop();
+  check('a brand-new player still drops the room to the lobby', freshRoster?.started === false);
+
+  // Host -> room results are relayed verbatim.
+  const before = back.messages.length;
+  host6.send({ t: 'result', winners: [seat ?? 'p2'], draw: false, reason: 'kills', scoreboard: [], elapsed: 42, mode: 'ffa', teams: 2 });
+  check('the host\'s verdict reaches the guests', await waitFor(() => back.messages.slice(before).some((m) => m.t === 'result')));
+  const relayed = back.messages.slice(before).find((m) => m.t === 'result');
+  check('the relayed verdict keeps its numbers', relayed?.winners?.[0] === (seat ?? 'p2') && relayed?.elapsed === 42, JSON.stringify(relayed));
+  // ...and a guest cannot fake one.
+  const beforeFake = host6.messages.length;
+  fresh.send({ t: 'result', winners: ['p1'], draw: false, reason: 'kills', scoreboard: [], elapsed: 1, mode: 'ffa', teams: 2 });
+  await sleep(150);
+  check('a guest cannot push a verdict', !host6.messages.slice(beforeFake).some((m) => m.t === 'result'));
+
+  host6.close();
+  back.close();
+  fresh.close();
+}
+
 await sleep(100);
 await server.close();
 
