@@ -1,0 +1,18 @@
+{
+  "$comment": "GitHub 加速前缀。用「前缀 + 完整 github 链接」的形式代理下载，国内访问比直连 github.com 快很多。app 启动时会自动测速挑最快的一个，也允许用户自己填。",
+  "updated": "2026-10-25",
+  "repo": "Adamisatree/TankGame",
+  "mirrors": [
+    { "id": "ghfast", "label": "ghfast.top", "prefix": "https://ghfast.top/" },
+    { "id": "ghproxy-net", "label": "ghproxy.net", "prefix": "https://ghproxy.net/" },
+    { "id": "gh-proxy", "label": "gh-proxy.com", "prefix": "https://gh-proxy.com/" },
+    { "id": "llkk", "label": "gh.llkk.cc", "prefix": "https://gh.llkk.cc/" },
+    { "id": "zwy", "label": "gh.zwy.one", "prefix": "https://gh.zwy.one/" },
+    { "id": "geekertao", "label": "ghfile.geekertao.top", "prefix": "https://ghfile.geekertao.top/" }
+  ],
+  "rawMirrors": [
+    { "id": "jsdelivr", "label": "jsDelivr CDN", "prefix": "https://cdn.jsdelivr.net/gh/Adamisatree/TankGame@" },
+    { "id": "ghfast-raw", "label": "ghfast.top (raw)", "prefix": "https://ghfast.top/https://raw.githubusercontent.com/Adamisatree/TankGame/" },
+    { "id": "ghproxy-raw", "label": "ghproxy.net (raw)", "prefix": "https://ghproxy.net/https://raw.githubusercontent.com/Adamisatree/TankGame/" }
+  ]
+}

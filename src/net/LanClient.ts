@@ -1,6 +1,15 @@
-import { resolveSocketUrl, type HostMessage, type NetRole, type ServerMessage, type Snapshot, type TankInput } from './protocol';
+import {
+  PROTOCOL_VERSION,
+  resolveSocketUrl,
+  type HostMessage,
+  type NetRole,
+  type ServerMessage,
+  type Snapshot,
+  type TankInput,
+} from './protocol';
+import { APP_VERSION } from '../version';
 
-export type LanStatus = 'idle' | 'connecting' | 'waiting' | 'playing' | 'closed' | 'error';
+export type LanStatus = 'idle' | 'connecting' | 'waiting' | 'playing' | 'closed' | 'error' | 'rejected';
 
 export interface LanHandlers {
   onStatus?: (status: LanStatus, detail?: string) => void;
@@ -65,7 +74,15 @@ export class LanClient {
 
     ws.onopen = () => {
       this.retry = 0;
-      ws.send(JSON.stringify({ t: 'join', role: this.role, skill: this.skill || undefined }));
+      ws.send(
+        JSON.stringify({
+          t: 'join',
+          role: this.role,
+          skill: this.skill || undefined,
+          version: APP_VERSION,
+          protocol: PROTOCOL_VERSION,
+        })
+      );
       this.setStatus('waiting');
       this.handlers.onLog?.(`已连接 ${this.url}`);
     };
@@ -78,6 +95,21 @@ export class LanClient {
         return;
       }
       switch (msg.t) {
+        case 'reject':
+          // Different build: refuse clearly instead of desyncing five seconds in.
+          this.closedByUser = true;
+          this.setStatus(
+            'rejected',
+            msg.reason === 'version'
+              ? `版本不一致：房主 ${msg.hostVersion ?? '?'}，你是 ${msg.yourVersion ?? APP_VERSION}。请两边用同一版本。`
+              : '房间拒绝了这次连接。'
+          );
+          try {
+            this.ws?.close();
+          } catch {
+            /* already gone */
+          }
+          break;
         case 'joined':
           if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
           if (this.role === 'guest' && msg.host) this.setStatus('playing');

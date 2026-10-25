@@ -23,6 +23,9 @@ import {
   type SeatAction,
 } from './game/keybinds';
 import { DEFAULT_LAN_PORT } from './net/protocol';
+import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
+import { APP_VERSION } from './version';
+import './update/types';
 
 const overlay = document.getElementById('overlay') as HTMLDivElement;
 const card = document.getElementById('card') as HTMLDivElement;
@@ -145,13 +148,6 @@ function skillPicker(): string {
 
 // ---------------------------------------------------------------- LAN panel
 
-type LanWindow = Window & {
-  tankGame?: {
-    isDesktop?: boolean;
-    scanLan?: () => Promise<{ name: string; host: string; port: number }[]>;
-  };
-};
-
 /** Full-width IME punctuation is why "192.168.1.10" used to be untypable. */
 function normalizeAddress(raw: string): string {
   return raw
@@ -166,7 +162,7 @@ function normalizeAddress(raw: string): string {
 function lanPanel(): string {
   const devPorts = ['5173', '4173'];
   const servedByLanServer = location.protocol.startsWith('http') && !devPorts.includes(location.port);
-  const isDesktop = !!((window as LanWindow).tankGame?.isDesktop);
+  const isDesktop = !!(window.tankGame?.isDesktop);
 
   const host = `
     <div class="lan-block">
@@ -282,7 +278,7 @@ function initGuestTools(): void {
 
   const list = document.getElementById('lan-scan-list');
   document.getElementById('lan-scan')?.addEventListener('click', async () => {
-    const api = (window as LanWindow).tankGame;
+    const api = window.tankGame;
     if (!api?.scanLan || !list) return;
     list.innerHTML = '<span class="lan-loading">正在扫描局域网…</span>';
     try {
@@ -518,6 +514,7 @@ function settingsPanel(): string {
         </span>
       </label>
       ${keyEditor()}
+      ${updaterPanelHtml()}
     </div>
   `;
 }
@@ -596,6 +593,7 @@ function bindSettings(root: HTMLElement): void {
   });
 
   bindKeyEditor(root);
+  bindUpdaterPanel(root);
 
   if (settings.mode === 'lan') {
     if (settings.lanRole === 'host') void initHostRoom();
@@ -632,7 +630,7 @@ function render(next: OverlayState): void {
   if (next.kind === 'start') {
     const mapName = settings.mapId === 'random' ? '随机地图' : levelById(settings.mapId).name;
     card.innerHTML = `
-      <div class="kicker">Sketch Tank · Ricochet</div>
+      <div class="kicker">Sketch Tank · Ricochet · v${APP_VERSION}</div>
       <h1>坦克大作战<span class="accent">!</span></h1>
       ${DOODLE}
       <div class="rule"></div>
@@ -747,7 +745,10 @@ function render(next: OverlayState): void {
 
 game.events.on(OVERLAY_EVENT, (next: OverlayState) => render(next));
 
-game.events.once(Phaser.Core.Events.READY, () => render({ kind: 'start' }));
+game.events.once(Phaser.Core.Events.READY, () => {
+  render({ kind: 'start' });
+  void initUpdater();
+});
 // Safety net in case the ready event has already fired.
 window.setTimeout(() => {
   if (!card.childElementCount) render({ kind: 'start' });
@@ -778,6 +779,11 @@ window.addEventListener('keydown', (event) => {
     event.preventDefault();
     document.getElementById('btn-start')?.click();
   }
+});
+
+// The updater panel asks for a repaint instead of re-rendering itself.
+window.addEventListener('tankgame:rerender', () => {
+  if (state.kind === 'start') render(state);
 });
 
 // Unlock audio on the first interaction (browsers require a gesture).

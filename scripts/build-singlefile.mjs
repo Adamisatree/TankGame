@@ -72,7 +72,8 @@ await writeFile(chinese, html, 'utf8');
 await writeFile(ascii, html, 'utf8');
 const target = chinese;
 
-const leftovers = [...html.matchAll(/(?:src|href)="(?!data:|#|https?:)([^"]+)"/g)].map((m) => m[1]);
+// `${...}` is a template literal inside the bundle, not a missing file.
+const leftovers = [...html.matchAll(/(?:src|href)="(?!data:|#|https?:|\$\{)([^"]+)"/g)].map((m) => m[1]);
 const scriptEnds = (html.match(/<\/script>/g) ?? []).length;
 
 console.log(`single file: ${target}`);
