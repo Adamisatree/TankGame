@@ -821,6 +821,12 @@ check(
     `${room.phase} / ${room.roomLevelId}`
   );
 
+  // Leaving the room in the lobby must not look like a surrender.
+  overlays.length = 0;
+  (room as unknown as { handleSurrender: (by: string) => void }).handleSurrender('p2');
+  await wait(150);
+  check('a lobby exit is not treated as a surrender', !overlays.some((o) => o.kind === 'matchOver'), JSON.stringify(overlays.map((o) => o.kind)));
+
   const peer = new NodeWebSocket(`ws://127.0.0.1:${lanServer2.port}/ws`);
   const peerMsgs: any[] = [];
   peer.on('message', (raw: unknown) => {

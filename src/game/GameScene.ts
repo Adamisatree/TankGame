@@ -1833,6 +1833,9 @@ export class GameScene extends Phaser.Scene {
   /** Someone walked away from a LAN match – show it as a surrender. */
   private handleSurrender(by: string): void {
     if (this.matchOver) return;
+    // Walking out of the room before the start is not a surrender; the roster
+    // broadcast already updates the seat list.
+    if (this.phase === 'lobby') return;
     this.matchOver = true;
     this.phase = 'matchOver';
     this.paused = false;

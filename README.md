@@ -423,7 +423,7 @@ electron/
 scripts/
   selftest.ts        # 190 项纯逻辑检查（含地图校验、道具、技能、键位、炮管过热、友伤）
   updatetest.ts      # 78 项更新检查（版本比较、换版本、镜像回退、校验、清单并发）
-  smoke.ts           # jsdom + 软件 Canvas 里跑真游戏的冒烟测试（102 项，含真 WebSocket 联机、地图同步、结算卡、复活）
+  smoke.ts           # jsdom + 软件 Canvas 里跑真游戏的冒烟测试（103 项，含真 WebSocket 联机、地图同步、结算卡、复活）
   multitest.ts       # 40 项多人房间检查（2–10 人、分队、容量、版本拦截）
   lantest.ts         # 52 项局域网中继检查（配对 / 转发 / 断线 / 重开 / 地图同步 / 版本拦截）
   desktop-test.ts    # 7 项打包后服务检查

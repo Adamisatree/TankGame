@@ -1350,6 +1350,8 @@ function render(next: OverlayState): void {
       else card.querySelector<HTMLElement>('#tuning-panel')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
   } else if (next.kind === 'paused') {
+    // A LAN guest cannot restart the room by itself – the host owns the match.
+    const lanGuest = settings.mode === 'lan' && settings.lanRole === 'guest';
     card.innerHTML = `
       <div class="kicker">Paused</div>
       <h1>暂停中</h1>
@@ -1358,7 +1360,11 @@ function render(next: OverlayState): void {
       ${keyEditor()}
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
-        <button id="btn-restart">重新开始</button>
+        ${
+          lanGuest
+            ? '<button id="btn-restart" disabled>重新开始（房主决定）</button>'
+            : '<button id="btn-restart">重新开始</button>'
+        }
         <button class="ghost" id="btn-quit">退出对局</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
         <button class="ghost" id="btn-tuning">内测</button>
