@@ -172,16 +172,20 @@ export interface DamageTarget {
  * Whether a shot is allowed to hurt someone. Two independent toggles, because
  * "can I hurt my team-mate" and "can my own ricochet hurt me" are different
  * questions and people want them separately.
+ *
+ * Teams only exist in team mode: in a free-for-all the server parks everybody
+ * on team 0, so comparing team numbers there made every shot "friendly fire"
+ * and nobody could hurt anybody.
  */
 export function canDamage(
   attacker: DamageTarget | null,
   victim: DamageTarget,
-  config: Pick<MatchConfig, 'friendlyFire' | 'selfDamage'>
+  config: Pick<MatchConfig, 'friendlyFire' | 'selfDamage'> & { mode?: MatchMode }
 ): boolean {
   if (!victim.alive) return false;
   if (!attacker) return true;
   if (attacker.id === victim.id) return config.selfDamage;
-  if (attacker.team === victim.team) return config.friendlyFire;
+  if (config.mode !== 'ffa' && attacker.team === victim.team) return config.friendlyFire;
   return true;
 }
 

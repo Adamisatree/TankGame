@@ -4,13 +4,14 @@ import { advanceBullet, type BulletTarget } from '../engine/bullet';
 import { buildLayout, type Layout, type PlayRect } from '../engine/level';
 import { isCustomLevel, levelById, levelIndexOf, levels, randomLevelIndex } from '../maps/registry';
 import { getMap } from '../maps/store';
+import { mapHash } from '../maps/format';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../engine/physics';
 import { bulletThreatAt, pickHeading, steerTo, type ThreatBullet } from '../engine/steer';
 import { BULLET, COLORS, FONT, GAME_H, GAME_W, TANK } from './config';
 import { MAX_HP } from './rules';
 import { heatCfg, heatRatio, lockSecondsLeft, shotsToOverheat } from './heat';
 import { setTuning, tuning, tuningDiff, tuningIsCustom } from './tuning';
-import { OVERLAY_EVENT, type OverlayState } from './events';
+import { MATCH_LEFT_EVENT, OVERLAY_EVENT, type OverlayState } from './events';
 import { Sketch } from './Sketch';
 import { seatColor, Tank, teamColor, TURRET_LIMIT, type TankId } from './Tank';
 import { getBindings, keyLabel, SEAT_ACTIONS, type SeatAction, type SeatBindings } from './keybinds';
@@ -186,6 +187,8 @@ export class GameScene extends Phaser.Scene {
   private guestSkillLatch = false;
   /** The custom map this host is pushing into the room ('' = a built-in). */
   private roomMapId = '';
+  /** The room's advertised level id: built-in id, `custom-…`, or 'random'. */
+  private roomLevelId = '';
   /** Guest view: the room's map has been stored and confirmed. */
   private mapConfirmed = false;
   /** Host view: seats that still owe a map confirmation. */
@@ -193,6 +196,16 @@ export class GameScene extends Phaser.Scene {
   private mapReady: string[] = [];
   /** Last lobby state, so a map confirmation can repaint without a rebuild. */
   private lastLobby: { mode: 'ffa' | 'team'; host: string | null } | null = null;
+  /** LAN: tanks waiting for their respawn, keyed by seat id (ms timestamp). */
+  private respawnQueue = new Map<string, number>();
+  /** Host: a start was requested while guests were still confirming the map. */
+  private startPending = false;
+  /** Host: hash of the map currently cached in the room (avoids re-pushing). */
+  private pushedMapHash = '';
+  /** Which room this socket belongs to (`role@address`), so a rematch keeps it. */
+  private lanTarget = '';
+  /** Set once the player asked to leave: the scene must stop touching the DOM. */
+  private leaving = false;
 
   constructor() {
     super('Game');
@@ -283,12 +296,21 @@ export class GameScene extends Phaser.Scene {
 
     this.score = 0;
     this.paused = false;
+    // A scene instance is reused when main.ts restarts it, so every latch that
+    // ends a session has to start clean here.
+    this.leaving = false;
+    this.matchOver = false;
+    this.matchElapsed = 0;
+    this.startPending = false;
+    this.pushedMapHash = '';
+    this.respawnQueue.clear();
+    this.lanClosed = false;
     this.autoDodge = settings.autoDodge;
     this.beginMatch();
     // A host restart has to reach every guest explicitly: the guest keeps its
     // socket, so nothing else would ever tell it the match was reset.
     if (this.lanMode && this.lanRole === 'host') {
-      this.lan?.send({ t: 'restart', level: this.startIndex, levelId: this.roomMapId || undefined });
+      this.lan?.send({ t: 'restart', level: this.startIndex, levelId: levels()[this.startIndex]?.id });
     }
     this.emitOverlay({ kind: 'hidden' });
 
@@ -311,6 +333,7 @@ export class GameScene extends Phaser.Scene {
     this.lanRole = role;
     this.lan?.close();
     this.lanClosed = false;
+    this.lanTarget = `${role}@${settings.lanAddress}`;
     this.lan = new LanClient(role, settings.lanAddress, {
       onPeerSkill: (skill) => {
         if (!isSkillId(skill)) return;
@@ -369,12 +392,25 @@ export class GameScene extends Phaser.Scene {
         else if (this.phase === 'lobby') this.leaveLobby();
       },
       onBegin: (info) => {
-        if (info.config) settings.match = { ...settings.match, ...(info.config as unknown as typeof settings.match) };
+        if (info.config) {
+          settings.match = { ...settings.match, ...(info.config as unknown as typeof settings.match) };
+          const levelId = info.config.levelId;
+          if (typeof levelId === 'string') this.roomLevelId = levelId;
+        }
         if (typeof info.teams === 'number') this.teamCount = info.teams;
         this.matchLive = true;
         // The room's map wins over whatever this machine had picked: resolve it
         // by id, because the two libraries order custom maps differently.
+        const announced = (info.config as { levelId?: unknown } | null)?.levelId;
+        const resolved = this.indexOfLevel(announced) >= 0;
         this.adoptRoomLevel(info.config);
+        if (this.lanRole === 'guest' && !resolved) {
+          // 随机地图: only the host resolved it, and its `restart` (sent right
+          // after `begin`) names the concrete arena. Loading a guess here would
+          // flash the wrong map.
+          this.leaveLobby();
+          return;
+        }
         this.restartLanMatch();
         this.leaveLobby();
       },
@@ -383,6 +419,7 @@ export class GameScene extends Phaser.Scene {
           // Still waiting on guests: stay in the lobby and say who is missing.
           const waiting = info.waiting ?? [];
           this.mapWaiting = waiting;
+          this.startPending = true;
           this.showBanner(waiting.length ? `等待 ${waiting.length} 台确认地图…` : '正在确认地图…', 1.8);
           this.repaintLobby();
           return;
@@ -396,6 +433,11 @@ export class GameScene extends Phaser.Scene {
         const empty = teams.map((size, index) => (size === 0 ? `第 ${index + 1} 队` : '')).filter(Boolean);
         this.showBanner(`${empty.join('、')}还没有人，不能开始`, 2.2);
       },
+      onMapCleared: () => {
+        this.roomMapId = '';
+        this.mapConfirmed = true;
+        this.repaintLobby();
+      },
       onMap: (map, ok) => {
         // Guest: the host's map is now in this machine's library.
         this.roomMapId = map.id;
@@ -407,12 +449,25 @@ export class GameScene extends Phaser.Scene {
         this.mapWaiting = info.waiting;
         this.mapReady = info.ready;
         this.repaintLobby();
+        // The host pressed 开始对局 while a map was still travelling: start now.
+        if (!info.waiting.length && this.startPending && this.lanRole === 'host' && this.phase === 'lobby') {
+          this.startPending = false;
+          this.lan?.begin();
+        }
       },
       onConfig: (config, hostTuning) => {
         // The host owns the rules and the balance: everyone plays the same match.
         if (role === 'host') return;
         if (hostTuning) setTuning(hostTuning);
         settings.match = { ...settings.match, ...config };
+        const announced = (config as { levelId?: unknown }).levelId;
+        if (typeof announced === 'string' && announced && announced !== this.roomLevelId) {
+          // The room switched maps (built-in, or a custom map whose file is
+          // arriving next): show the new name right away.
+          this.roomLevelId = announced;
+          if (announced !== 'random' && isCustomLevel(announced)) this.mapConfirmed = false;
+          this.repaintLobby();
+        }
         // Colours depend on the mode (team paint vs per-seat), so re-apply them.
         this.syncRoster(this.roster);
         this.modeText.setText(this.modeLabel());
@@ -435,9 +490,15 @@ export class GameScene extends Phaser.Scene {
       // The room's map goes out with the join message, so a guest that walks in
       // while the host is still setting up receives it immediately.
       this.roomMapId = this.pickedMapId();
+      this.roomLevelId = settings.mapId || 'random';
       const map = getMap(this.roomMapId);
-      if (map) this.lan.hostMap = map;
-      this.lan.matchConfig = { ...settings.match, levelId: this.roomMapId || undefined };
+      if (map) {
+        // The join message already carries the map, so remember its hash: a
+        // start must not re-push (and re-ack) a file the room already has.
+        this.lan.hostMap = map;
+        this.pushedMapHash = mapHash(map);
+      }
+      this.lan.matchConfig = { ...settings.match, levelId: this.roomLevelId };
       this.lan.matchConfig.mode = settings.match.mode;
       this.lan.tuning = { ...tuning() };
     }
@@ -506,6 +567,7 @@ export class GameScene extends Phaser.Scene {
       match: { ...settings.match },
       roomUrl: this.roomUrl,
       map: this.lobbyMap(),
+      maps: this.lanRole === 'host' ? this.roomMapChoices() : undefined,
     });
     if (wasPlaying) sound.ui();
   }
@@ -575,7 +637,7 @@ export class GameScene extends Phaser.Scene {
   applyRoomConfig(match: typeof settings.match): void {
     settings.match = { ...match };
     if (this.lanRole === 'host' && this.lan) {
-      this.lan.matchConfig = { ...settings.match, levelId: this.pickedMapId() || undefined };
+      this.lan.matchConfig = { ...settings.match, levelId: this.roomLevelId || settings.mapId };
       this.lan.send({ t: 'config', ...this.lan.matchConfig, tuning: { ...tuning() } });
     }
     this.hudDirty = true;
@@ -592,20 +654,34 @@ export class GameScene extends Phaser.Scene {
         return;
       }
     }
+    // 'random' is rolled here, once, and then announced as a concrete map id:
+    // otherwise the host and every guest would roll a different arena.
+    if (settings.mapId === 'random') this.startIndex = randomLevelIndex(-1);
+    if (settings.mapId !== 'random' && !this.pickedMapId()) {
+      const index = levelIndexOf(settings.mapId);
+      if (index >= 0) this.startIndex = index;
+    }
+    this.roomLevelId = this.pickedMapId()
+      ? settings.mapId
+      : settings.mapId === 'random'
+        ? 'random'
+        : levels()[this.startIndex]?.id ?? 'random';
     // Push the room's map first: guests have to confirm they hold it before the
     // server accepts `begin`, so nobody starts on a different arena.
-    const levelId = this.pickedMapId();
-    const map = getMap(levelId);
-    if (map) {
-      this.lan.sendMap(map);
-      this.mapWaiting = this.roster.filter((seat) => seat.id !== 'p1').map((seat) => seat.id);
-      this.showBanner('正在把地图发给房间…', 1.4);
-    }
-    this.lan.matchConfig = { ...settings.match, levelId: levelId || undefined };
+    this.pushRoomMap();
+    this.lan.matchConfig = { ...settings.match, levelId: this.roomLevelId };
     this.lan.send({ t: 'config', ...this.lan.matchConfig, tuning: { ...tuning() } });
+    if (this.pickedMapId() && this.mapWaiting.length) {
+      // Guests still owe an ack: the server would refuse `begin`, so remember
+      // the click and finish it as soon as the last confirmation lands.
+      this.startPending = true;
+      this.showBanner(`等 ${this.mapWaiting.length} 台确认地图…`, 1.8);
+      this.repaintLobby();
+      return;
+    }
     this.lan.begin();
-    // The start now happens when the server's `begin` arrives (onBegin), so the
-    // host also keeps the lobby until every guest has the map.
+    // The start happens when the server's `begin` arrives (onBegin), so the host
+    // also keeps the lobby until every guest has the map and `begin` is allowed.
     this.repaintLobby();
   }
 
@@ -632,10 +708,75 @@ export class GameScene extends Phaser.Scene {
     return chosen !== 'random' && isCustomLevel(chosen) ? chosen : '';
   }
 
+  /** The room's advertised map id: a level id, `''` or `'random'`. */
+  private roomLevel(): string {
+    if (this.lanRole === 'host') return settings.mapId || 'random';
+    return this.roomLevelId || '';
+  }
+
+  /** Display name of the room's map, for the lobby + banners. */
+  private roomLevelName(): string {
+    const id = this.roomLevel();
+    if (!id) return '内置地图';
+    if (id === 'random') return '随机地图';
+    return levelById(id)?.name ?? (isCustomLevel(id) ? '自定义地图' : '内置地图');
+  }
+
+  /**
+   * Host: make the room play `id` (a level id or 'random'). The map file goes
+   * out for custom maps; built-ins only need the id, so any custom map cached
+   * in the room is cleared. Safe to call from the lobby at any time.
+   */
+  public setRoomLevel(id: string): void {
+    if (!this.lanMode || this.lanRole !== 'host' || !this.lan) return;
+    // Only between matches: changing the arena under a running fight would
+    // teleport everyone mid-shell.
+    if (this.phase !== 'lobby') return;
+    const next = id && id !== 'random' && (isCustomLevel(id) || levelIndexOf(id) >= 0) ? id : 'random';
+    settings.mapId = next;
+    this.roomLevelId = next;
+    this.pushRoomMap();
+    this.lan.matchConfig = { ...settings.match, levelId: next };
+    this.lan.send({ t: 'config', ...this.lan.matchConfig, tuning: { ...tuning() } });
+    this.showBanner(`房间地图：${this.roomLevelName()}`, 1.4);
+    this.repaintLobby();
+  }
+
+  /**
+   * Host: hand the room its map. Custom maps have to travel as a file (and be
+   * acknowledged) before the server accepts `begin`; built-ins are an id.
+   */
+  private pushRoomMap(force = false): void {
+    if (!this.lanMode || this.lanRole !== 'host' || !this.lan) return;
+    const custom = this.pickedMapId();
+    if (custom) {
+      const map = getMap(custom);
+      if (map) {
+        const hash = mapHash(map);
+        // Re-sending a map the room already holds clears every ack and makes the
+        // host wait for a round trip it does not need.
+        if (!force && hash === this.pushedMapHash && !this.mapWaiting.length) return;
+        this.lan.sendMap(map);
+        this.pushedMapHash = hash;
+        this.mapReady = [];
+        this.mapWaiting = this.roster.filter((seat) => seat.id !== 'p1').map((seat) => seat.id);
+        this.mapConfirmed = false;
+        return;
+      }
+    }
+    this.lan.clearMap();
+    this.pushedMapHash = '';
+    this.mapReady = [];
+    this.mapWaiting = [];
+    this.mapConfirmed = true;
+  }
+
   /** Index of a level id in this machine's list, or -1. */
   private indexOfLevel(id: unknown): number {
     if (typeof id !== 'string' || !id) return -1;
-    return levelIndexOf(id);
+    // `levelIndexOf` clamps to 0, which would silently load the first arena for
+    // an unknown id – including 'random', which only the host can resolve.
+    return levels().findIndex((level) => level.id === id);
   }
 
   /**
@@ -653,6 +794,7 @@ export class GameScene extends Phaser.Scene {
 
   /** What the lobby shows about the room's map. */
   private lobbyMap(): {
+    id: string;
     name: string;
     custom: boolean;
     waiting: number;
@@ -661,19 +803,31 @@ export class GameScene extends Phaser.Scene {
     synced: boolean;
   } | null {
     if (!this.lanMode) return null;
-    const id = this.lanRole === 'host' ? this.pickedMapId() : this.roomMapId;
-    const custom = !!id;
-    const name = custom ? levelById(id)?.name ?? '自定义地图' : '内置地图';
+    const id = this.roomLevel();
+    const custom = !!this.pickedMapId();
     const total = Math.max(0, this.roster.filter((seat) => seat.id !== 'p1').length);
     const waiting = this.lanRole === 'host' ? this.mapWaiting.filter((seat) => seat !== 'p1').length : 0;
     return {
-      name,
+      id,
+      name: this.roomLevelName(),
       custom,
       waiting,
       ready: this.lanRole === 'host' ? this.mapReady.filter((seat) => seat !== 'p1').length : this.mapConfirmed ? 1 : 0,
       total,
       synced: this.lanRole === 'host' ? waiting === 0 : this.mapConfirmed,
     };
+  }
+
+  /** Host: every map this machine can put in the room. */
+  private roomMapChoices(): { id: string; name: string; custom: boolean }[] {
+    return [
+      { id: 'random', name: '随机地图', custom: false },
+      ...levels().map((level) => ({
+        id: level.id,
+        name: level.name,
+        custom: isCustomLevel(level.id),
+      })),
+    ];
   }
 
   /** Repaints the room after a map confirmation, without rebuilding the arena. */
@@ -767,11 +921,18 @@ export class GameScene extends Phaser.Scene {
     this.bullets = [];
     this.particles = [];
     this.levelsCleared = 0;
+    // A rematch is a fresh match: without this the clock stayed maxed out and
+    // the `matchOver` latch swallowed the second result card entirely.
+    this.matchElapsed = 0;
+    this.matchOver = false;
+    this.respawnQueue.clear();
     // Menu choices take effect on the next match.
     if (!this.lanMode || this.lanRole === 'host') this.skillP1 = settings.skillP1;
     this.skillP2 = settings.skillP2;
     this.loadLevel(this.startIndex);
-    this.lan?.send({ t: 'restart', level: this.startIndex, levelId: this.roomMapId || undefined });
+    // Announce the *resolved* map id: 'random' has just been rolled into a
+    // concrete level here, so every guest loads exactly this arena.
+    this.lan?.send({ t: 'restart', level: this.startIndex, levelId: levels()[this.startIndex]?.id });
     this.emitOverlay({ kind: 'hidden' });
   }
 
@@ -1034,12 +1195,18 @@ export class GameScene extends Phaser.Scene {
     this.bullets = [];
     this.particles = [];
     this.paused = false;
+    // 再来一局 is a fresh match: the finished latches and the clock have to go,
+    // otherwise the next result card never appears.
+    this.matchOver = false;
+    this.matchElapsed = 0;
+    this.startPending = false;
+    this.respawnQueue.clear();
     this.autoDodge = settings.autoDodge;
     this.beginMatch();
     // A host restart has to reach every guest explicitly: the guest keeps its
     // socket, so nothing else would ever tell it the match was reset.
     if (this.lanMode && this.lanRole === 'host') {
-      this.lan?.send({ t: 'restart', level: this.startIndex, levelId: this.roomMapId || undefined });
+      this.lan?.send({ t: 'restart', level: this.startIndex, levelId: levels()[this.startIndex]?.id });
     }
     this.emitOverlay({ kind: 'hidden' });
 
@@ -1050,7 +1217,13 @@ export class GameScene extends Phaser.Scene {
       this.lanRole = null;
     });
 
-    if (this.lanMode) this.connectLan();
+    // Only redial when the room itself changed. A 再来一局 keeps its socket:
+    // reconnecting as host drops the room back to the lobby and throws the
+    // rematch away.
+    if (this.lanMode) {
+      const target = `${settings.lanRole}@${settings.lanAddress}`;
+      if (!this.lan || this.lanClosed || this.lanTarget !== target) this.connectLan();
+    }
   }
 
   /** Toggle the solo autopilot (menu checkbox or the G key). */
@@ -1165,7 +1338,16 @@ export class GameScene extends Phaser.Scene {
     }
     this.hpRowCount = list.length;
 
-    if (this.versus && this.p2) {
+    if (this.lanMode) {
+      // The clock and the kill target are the two numbers that decide the
+      // match, so they live in the top bar instead of only on the result card.
+      const parts: string[] = [];
+      const clock = this.matchClockText();
+      if (clock) parts.push(clock);
+      const target = settings.match.killTarget;
+      if (target > 0 && settings.match.winCondition !== 'time') parts.push(`目标 ${target} 杀`);
+      this.scoreText.setText(parts.length ? parts.join('  ·  ') : '人头');
+    } else if (this.versus && this.p2) {
       this.scoreText.setText(`P1 ${this.p1.kills} : ${this.p2.kills} P2`);
     } else if (this.enemy) {
       this.scoreText.setText(`得分  ${String(this.score).padStart(5, '0')}`);
@@ -1176,6 +1358,15 @@ export class GameScene extends Phaser.Scene {
     // Your own barrel heat lives at the bottom and stays private.
     this.drawHeatGauge();
     this.hudDirty = false;
+  }
+
+  /** `剩 3:20` / `用时 1:05` for the top bar, or '' when the clock is off. */
+  private matchClockText(): string {
+    const limit = settings.match.timeLimit;
+    const timed = limit > 0 && settings.match.winCondition !== 'kills';
+    const seconds = Math.max(0, Math.round(timed ? limit - this.matchElapsed : this.matchElapsed));
+    const text = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    return timed ? `剩 ${text}` : '';
   }
 
   /**
@@ -1290,9 +1481,11 @@ export class GameScene extends Phaser.Scene {
     if (this.phase !== 'playing' && this.phase !== 'ready') return;
 
     const rect = this.worldRect ?? PLAY_RECT;
-    const boxW = 186;
+    // Big enough that the shape of a marker (…and not just its colour) reads at
+    // a glance – the old 186px card was a row of indistinguishable dots.
+    const boxW = 204;
     const ratio = rect.h / Math.max(1, rect.w);
-    const boxH = Math.max(78, Math.min(160, boxW * ratio));
+    const boxH = Math.max(84, Math.min(172, boxW * ratio));
     const x = PLAY_RECT.x + PLAY_RECT.w - boxW - 10;
     const y = GAME_H - boxH - 14;
     const sx = (wx: number): number => x + ((wx - rect.x) / rect.w) * boxW;
@@ -1472,6 +1665,9 @@ export class GameScene extends Phaser.Scene {
   // ------------------------------------------------------------------ update
 
   update(time: number, delta: number): void {
+    // The player asked to leave: main.ts is already swapping scenes, so never
+    // touch the HUD or the overlay again (that is what used to wedge the app).
+    if (this.leaving) return;
     const dt = Math.min(delta, 50) / 1000;
 
     const pauseKey = this.keys.get('global.pause')!;
@@ -1493,6 +1689,13 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    // A decided match is frozen: no shooting, no driving behind the result card.
+    if (this.matchOver && this.phase !== 'lobby') {
+      this.fx.clear();
+      if (this.hudDirty) this.drawHud();
+      return;
+    }
+
     // The heat gauge is private to the shooter and moves every frame, so the
     // HUD has to redraw whenever those two numbers change.
     const mine = this.localTank();
@@ -1502,6 +1705,11 @@ export class GameScene extends Phaser.Scene {
         this.heatSig = sig;
         this.hudDirty = true;
       }
+    }
+    // The clock in the top bar changes once a second; redraw only then.
+    if (this.lanMode && Math.ceil(this.matchElapsed) !== this.clockTick) {
+      this.clockTick = Math.ceil(this.matchElapsed);
+      this.hudDirty = true;
     }
     if (this.hudDirty) this.drawHud();
 
@@ -1556,6 +1764,7 @@ export class GameScene extends Phaser.Scene {
       this.updateNetHost(dt);
     }
     this.updateParticles(dt);
+    this.updateRespawns();
     for (const tank of this.tanks()) tank.coolDown(dt);
     this.updateMatch(dt);
     this.updatePhase(dt);
@@ -1572,14 +1781,53 @@ export class GameScene extends Phaser.Scene {
    * is reported as having surrendered, so the others see why the fight stopped.
    */
   public quitMatch(): void {
+    if (this.leaving) return;
+    this.leaving = true;
     if (this.lanMode) {
       this.lan?.send({ t: 'surrender', by: this.lanRole === 'host' ? 'p1' : 'p2' });
       this.lan?.close();
+      this.lan = null;
     }
     this.paused = false;
+    this.matchOver = true;
     this.phase = 'leaving';
+    this.respawnQueue.clear();
     this.emitOverlay({ kind: 'hidden' });
-    this.scene.restart();
+    // Deliberately no `this.scene.restart()`: main.ts owns the scene swap
+    // (stop Game → start Menu). Restarting here queued a fresh Game boot that
+    // ran *after* that stop, so the match scene came back on top of the menu
+    // and the whole app looked frozen.
+    this.game.events.emit(MATCH_LEFT_EVENT);
+  }
+
+  /** This machine's own seat – what the 赢/输 line on the result card reads. */
+  private localSeatId(): string {
+    if (this.lanMode) return this.myId || (this.lanRole === 'host' ? 'p1' : 'p2');
+    return 'p1';
+  }
+
+  /** The public scoreboard rows, with the seat names filled in. */
+  private resultLines(): { id: string; name: string; team: number; kills: number; deaths: number; hp: number }[] {
+    return this.scoreLines().map((line) => ({ ...line, name: this.nameOf(line.id) }));
+  }
+
+  /** Extra fields every result card carries (sides + your own verdict). */
+  private resultExtras(winners: string[], draw: boolean): {
+    mode: 'ffa' | 'team';
+    teams: number;
+    verdict: 'win' | 'lose' | 'draw';
+    elapsed: number;
+    canRestart: boolean;
+  } {
+    const me = this.localSeatId();
+    return {
+      mode: settings.match.mode,
+      teams: this.teamCount,
+      verdict: draw ? 'draw' : winners.includes(me) ? 'win' : 'lose',
+      elapsed: this.matchElapsed,
+      // Only the host can restart a LAN match for everybody.
+      canRestart: !this.lanMode || this.lanRole !== 'guest',
+    };
   }
 
   /** Someone walked away from a LAN match – show it as a surrender. */
@@ -1588,19 +1836,18 @@ export class GameScene extends Phaser.Scene {
     this.matchOver = true;
     this.phase = 'matchOver';
     this.paused = false;
-    const p1Surrendered = by === 'p1';
+    const winners = by === 'p1' ? ['p2'] : ['p1'];
     this.emitOverlay({
       kind: 'matchOver',
       reason: 'surrender',
-      scoreboard: this.scoreLines().map((line) => ({
-        ...line,
-        name: this.nameOf(line.id),
-      })),
-      winners: p1Surrendered ? ['p2'] : ['p1'],
+      scoreboard: this.resultLines(),
+      winners,
       draw: false,
       surrenderBy: by,
+      ...this.resultExtras(winners, false),
     });
     this.showBanner(`${this.nameOf(by)} 已经投降`, 2.4);
+    sound[this.localSeatId() === by ? 'lose' : 'win']();
   }
 
   private nameOf(id: string): string {
@@ -1619,19 +1866,21 @@ export class GameScene extends Phaser.Scene {
     if (result.kind === 'running') return;
     this.matchOver = true;
     this.phase = 'matchOver';
-    const scoreboard = this.scoreLines().map((line) => ({ ...line, name: this.nameOf(line.id) }));
-    if (result.kind === 'draw') {
-      this.emitOverlay({ kind: 'matchOver', reason: result.reason === 'time' ? 'time' : 'time', scoreboard, winners: [], draw: true });
-    } else {
-      this.emitOverlay({
-        kind: 'matchOver',
-        reason: result.reason,
-        scoreboard,
-        winners: result.winners,
-        draw: false,
-      });
-    }
-    sound[result.kind === 'win' && result.winners.includes('p1') ? 'win' : 'lose']();
+    const scoreboard = this.resultLines();
+    // Whatever ended it (kills, clock, a wipe), every seat gets a card that says
+    // 你赢了 / 你输了 from its own point of view.
+    const winners = result.kind === 'win' ? result.winners : [];
+    this.emitOverlay({
+      kind: 'matchOver',
+      reason: result.kind === 'draw' ? 'time' : result.reason,
+      scoreboard,
+      winners,
+      draw: result.kind === 'draw',
+      ...this.resultExtras(winners, result.kind === 'draw'),
+    });
+    const verdict = this.resultExtras(winners, result.kind === 'draw').verdict;
+    if (verdict === 'draw') sound.ping();
+    else sound[verdict === 'win' ? 'win' : 'lose']();
   }
 
   /** Runs the LAN clock and the win check; a no-op outside LAN matches. */
@@ -1644,6 +1893,8 @@ export class GameScene extends Phaser.Scene {
 
   private togglePause(): void {
     if (this.phase === 'over' || this.phase === 'victory' || this.phase === 'versusOver') return;
+    // Esc on the result card must not turn it into a pause card.
+    if (this.matchOver || this.phase === 'matchOver' || this.leaving) return;
     this.paused = !this.paused;
     sound.ui();
     this.emitOverlay(this.paused ? { kind: 'paused' } : { kind: 'hidden' });
@@ -1666,6 +1917,14 @@ export class GameScene extends Phaser.Scene {
     if (this.phaseTimer > 0) return;
 
     if (this.phase === 'dying') {
+      if (this.lanMode) {
+        // LAN: dying players come back at a safe point, the match goes on.
+        for (const tank of this.tanks()) {
+          if (tank.awaitingRespawn) this.scheduleRespawn(tank);
+        }
+        this.phase = 'playing';
+        return;
+      }
       if (this.versus) {
         // Local versus: no respawns, whoever is down loses the round outright.
         if (this.p1.hp <= 0 || (this.p2 && this.p2.hp <= 0)) {
@@ -1680,14 +1939,6 @@ export class GameScene extends Phaser.Scene {
           sound.lose();
           return;
         }
-        return;
-      }
-      if (this.lanMode) {
-        // LAN: dying players come back at a safe point, the match goes on.
-        for (const tank of this.tanks()) {
-          if (tank.awaitingRespawn) this.scheduleRespawn(tank);
-        }
-        this.phase = 'playing';
         return;
       }
       if (this.p1.hp > 0) {
@@ -1981,6 +2232,8 @@ export class GameScene extends Phaser.Scene {
 
   /** Seconds since the LAN match started – the time-limit tiebreaker. */
   private matchElapsed = 0;
+  /** Whole seconds already painted in the top bar (see update()). */
+  private clockTick = -1;
   private matchOver = false;
 
   /** Guest: the whole match lives on the host, we only read input here. */
@@ -2602,11 +2855,19 @@ export class GameScene extends Phaser.Scene {
         this.phase = 'cleared';
         this.phaseTimer = 1.5;
         this.showBanner('击毁！', 1.2);
+      } else if (this.lanMode) {
+        // LAN: a death is a short timeout, never a phase change. Freezing the
+        // whole scene here (the old `dying` path) stopped the clock and the win
+        // check, so one kill left the match running forever with no result.
+        this.queueRespawn(victim);
+        this.showBanner(
+          `${this.nameOf(victim.id)} 被击毁 · ${tuning().respawnDelay.toFixed(1)} 秒后复活`,
+          1.6
+        );
       } else {
         this.phase = 'dying';
         this.phaseTimer = tuning().respawnDelay;
         if (!this.versus) this.showBanner('被击毁！', 1.1);
-        if (this.lanMode) this.scheduleRespawn(victim);
       }
     }
   }
@@ -2638,6 +2899,30 @@ export class GameScene extends Phaser.Scene {
 
   private matchResult(): MatchResult {
     return evaluateMatch(this.scoreLines(), settings.match, this.matchElapsed);
+  }
+
+  /** LAN: park a dead tank for `respawnDelay` seconds, then bring it back. */
+  private queueRespawn(tank: Tank): void {
+    tank.awaitingRespawn = true;
+    const delay = Math.max(0.2, tuning().respawnDelay);
+    this.respawnQueue.set(tank.id, this.time.now + delay * 1000);
+  }
+
+  /** LAN: hands out respawns whose timeout has elapsed. */
+  private updateRespawns(): void {
+    if (!this.respawnQueue.size) return;
+    const now = this.time.now;
+    for (const [id, due] of [...this.respawnQueue]) {
+      if (due > now) continue;
+      this.respawnQueue.delete(id);
+      const tank = this.byId(id);
+      if (!tank) continue;
+      if (this.matchOver) {
+        tank.awaitingRespawn = false;
+        continue;
+      }
+      this.scheduleRespawn(tank);
+    }
   }
 
   /** Hands out a respawn point: mates first in team mode, farthest-away in FFA. */

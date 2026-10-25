@@ -180,13 +180,27 @@ function isMapPayload(map) {
   }
 }
 
-/** Host pushed a map: cache it, hand it to the guests, forget old acks. */
+/**
+ * Host pushed a map: cache it, hand it to the guests, forget old acks.
+ * `hash` is what the host computed; guests echo it back in `map-ack`, which is
+ * how a damaged or stale copy is caught before the first shot.
+ */
 function setRoomMap(map, hash) {
   room.map = map;
   room.mapHash = typeof hash === 'string' ? hash : '';
   room.mapAcks.clear();
   broadcast({ t: 'map', map: room.map, hash: room.mapHash });
   console.log(`[lan] map ${map.id ?? '?'} rev ${map.rev ?? '?'} -> room`);
+}
+
+/** Host switched back to a built-in map: nothing to relay, nothing to ack. */
+function clearRoomMap() {
+  if (!room.map && !room.mapHash) return;
+  room.map = null;
+  room.mapHash = '';
+  room.mapAcks.clear();
+  broadcast({ t: 'map', map: null, hash: '' });
+  console.log('[lan] room back on a built-in map');
 }
 let totalPlayers = 0;
 let currentPort = 0;
@@ -330,6 +344,13 @@ function unlink(ws) {
   ws.role = null;
   if (wasHost) room.host = null;
   room.mapAcks.delete(id);
+  // An empty room forgets the last session entirely.
+  if (!room.players.size) {
+    room.started = false;
+    room.map = null;
+    room.mapHash = '';
+    room.mapAcks.clear();
+  }
   send(ws, { t: 'bye' });
   // Tell the survivors exactly who left. An explicit surrender was already
   // broadcast by the message handler; a dropped socket only reports "left".
@@ -390,12 +411,16 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           ws.team = 0;
           ws.ready = true;
           room.players.set('p1', ws);
+          // A host walking in always lands in the lobby, never in the middle of
+          // the previous session's match (a dev server hosting several games in
+          // a row kept `started` from the room before).
+          room.started = false;
           // The host owns the room's map: drop whatever the last host left
           // behind, then take the map it announces (if any).
           room.map = null;
           room.mapHash = '';
           room.mapAcks.clear();
-          if (isMapPayload(msg.map)) setRoomMap(msg.map, msg.mapHash);
+          if (isMapPayload(msg.map)) setRoomMap(msg.map, msg.mapHash ?? msg.hash);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
           announceRoster();
@@ -474,11 +499,18 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       // Host changed the room's map: relay it and require fresh confirmations.
       if (msg.t === 'map') {
         if (ws.role !== 'host') return;
+        // A cleared map means the room went back to a built-in arena.
+        if (msg.map === null) {
+          clearRoomMap();
+          send(ws, mapStatus());
+          return;
+        }
         if (!isMapPayload(msg.map)) {
           send(ws, { t: 'lobby-error', reason: 'map-failed', waiting: [], detail: '地图文件太大或格式不对' });
           return;
         }
-        setRoomMap(msg.map, msg.mapHash);
+        // Older hosts labelled the hash `mapHash`; both are accepted.
+        setRoomMap(msg.map, msg.mapHash ?? msg.hash);
         send(ws, mapStatus());
         return;
       }

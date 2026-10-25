@@ -780,6 +780,136 @@ check(
   `${poke.keys.get('p1.up')?.keyCode} vs ${bindings.solo.up}`
 );
 
+// ------------------------------------------- v1.5: LAN fixes end to end
+// A custom map has to reach the room, a death must not freeze the match, and
+// every decided match has to show a 赢/输 card. This block runs its own room.
+{
+  const { OVERLAY_EVENT, MATCH_LEFT_EVENT } = await import('../src/game/events');
+  const overlays: any[] = [];
+  game.events.on(OVERLAY_EVENT, (state: any) => overlays.push(state));
+  let leftEvents = 0;
+  game.events.on(MATCH_LEFT_EVENT, () => {
+    leftEvents += 1;
+  });
+
+  const { createLanServer } = await import('../server/lan-server.mjs');
+  const lanServer2 = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const { emptyMap, mapHash } = await import('../src/maps/format');
+  const { saveMap } = await import('../src/maps/store');
+  const { refreshLevels } = await import('../src/maps/registry');
+  const roomMap = saveMap({ ...emptyMap({ name: '联机冒烟图' }), id: 'custom-smoke', rev: 1 } as any)!;
+  refreshLevels();
+
+  settings.mode = 'lan';
+  settings.lanRole = 'host';
+  settings.lanAddress = `127.0.0.1:${lanServer2.port}`;
+  settings.match = {
+    ...settings.match,
+    mode: 'ffa',
+    winCondition: 'kills',
+    killTarget: 2,
+    timeLimit: 120,
+    capacity: 4,
+  };
+  settings.mapId = roomMap.id;
+  poke.restartGame();
+  await wait(1600);
+  const room = poke as any;
+  check(
+    'the room opens on the map picked in the menu',
+    room.phase === 'lobby' && room.roomLevelId === roomMap.id,
+    `${room.phase} / ${room.roomLevelId}`
+  );
+
+  const peer = new NodeWebSocket(`ws://127.0.0.1:${lanServer2.port}/ws`);
+  const peerMsgs: any[] = [];
+  peer.on('message', (raw: unknown) => {
+    try {
+      peerMsgs.push(JSON.parse(String(raw)));
+    } catch {
+      /* ignore */
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    peer.once('open', () => resolve());
+    peer.once('error', reject);
+  });
+  peer.send(JSON.stringify({ t: 'join', role: 'guest' }));
+  await wait(700);
+
+  const pushed = [...peerMsgs].reverse().find((m) => m.t === 'map');
+  check('the room map reaches a joining guest', !!pushed?.map && pushed.map.id === roomMap.id, JSON.stringify(pushed?.map?.id));
+  // The server used to read the wrong field here, so the hash arrived empty and
+  // every ack failed: the room could never start on a custom map.
+  check('the map hash survives the trip', pushed?.hash === mapHash(roomMap), `${pushed?.hash}`);
+
+  peer.send(JSON.stringify({ t: 'map-ack', id: roomMap.id, rev: roomMap.rev, hash: pushed?.hash, ok: true }));
+  await wait(250);
+  poke.startRoomMatch();
+  // The room plays a short 准备 countdown before the tanks roll.
+  await wait(1700);
+  check('a confirmed custom map lets the match start', room.phase === 'playing', room.phase);
+
+  // A death is a short timeout now: the phase never freezes and the clock runs.
+  const dead = room.p2 as TankRef;
+  room.matchElapsed = 0;
+  dead.setHp(5);
+  room.damage(dead, 'p1', 0);
+  check('a LAN death keeps the match running', room.phase === 'playing', room.phase);
+  check('the victim is parked for a respawn', !dead.alive && dead.awaitingRespawn, `${dead.alive} / ${dead.awaitingRespawn}`);
+  const clockAtDeath = room.matchElapsed as number;
+  await wait(700);
+  check('the match clock keeps ticking after a death', (room.matchElapsed as number) > clockAtDeath, `${clockAtDeath} -> ${room.matchElapsed}`);
+  await wait(2400);
+  check('the dead tank respawns by itself', dead.alive && !dead.awaitingRespawn, `${dead.alive} / ${dead.awaitingRespawn}`);
+  check('the match is still open after that death', room.phase === 'playing', room.phase);
+
+  // The kill target closes the match, and this seat is told it won.
+  overlays.length = 0;
+  (room.p1 as TankRef).kills = 2;
+  await wait(500);
+  const resultCard = [...overlays].reverse().find((o) => o.kind === 'matchOver');
+  check('reaching the kill target ends the LAN match', !!resultCard, JSON.stringify(overlays.map((o) => o.kind)));
+  check('the result card says whether you won', resultCard?.verdict === 'win', `${resultCard?.verdict}`);
+  check('the result card carries the scoreboard', (resultCard?.scoreboard?.length ?? 0) >= 2, `${resultCard?.scoreboard?.length}`);
+  check('the result card names the ruleset', resultCard?.mode === 'ffa', `${resultCard?.mode}`);
+
+  // A rematch has to be decidable again (the latch used to swallow it).
+  overlays.length = 0;
+  const lanBefore = room.lan;
+  poke.restartGame();
+  await wait(900);
+  check('a rematch keeps the room socket', lanBefore === room.lan, 'socket was redialled');
+  check(
+    'a rematch clears the finished state',
+    room.matchOver === false && room.matchElapsed < 3,
+    `${room.matchOver} / ${Number(room.matchElapsed).toFixed(2)}`
+  );
+  (room.p1 as TankRef).kills = 2;
+  await wait(500);
+  check(
+    'the second match can be decided too',
+    [...overlays].reverse().some((o) => o.kind === 'matchOver'),
+    JSON.stringify(overlays.map((o) => o.kind))
+  );
+
+  peer.close();
+  lanServer2.close();
+  await wait(300);
+
+  // Quit: the scene hands the exit to main.ts and never restarts itself.
+  (poke as unknown as { quitMatch: () => void }).quitMatch();
+  await wait(250);
+  check('quitting asks main.ts to swap scenes', leftEvents === 1, `${leftEvents}`);
+  check('the scene parks itself instead of restarting', room.phase === 'leaving' && room.leaving === true, `${room.phase}`);
+  check('quitting drops the room socket', !room.lan, String(room.lan));
+
+  settings.mode = 'solo';
+  settings.lanAddress = '';
+  settings.mapId = 'random';
+  settings.match = { ...settings.match, winCondition: 'both', killTarget: 15, timeLimit: 480, capacity: 6 };
+}
+
 console.log('');
 const failed = checks.filter((c) => !c.ok);
 console.log(`${checks.length - failed.length}/${checks.length} smoke checks passed`);

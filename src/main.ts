@@ -3,7 +3,7 @@ import './style.css';
 import { GAME_H, GAME_W } from './game/config';
 import { GameScene } from './game/GameScene';
 import { MenuScene } from './game/MenuScene';
-import { OVERLAY_EVENT, type OverlayState } from './game/events';
+import { MATCH_LEFT_EVENT, OVERLAY_EVENT, type OverlayState } from './game/events';
 import { DIFFICULTIES, settings, type Difficulty, type GameMode } from './game/settings';
 import { sound } from './game/Sound';
 import { type Level } from './engine/level';
@@ -836,6 +836,27 @@ function bindSettings(root: HTMLElement): void {
   }
 }
 
+/**
+ * The single way out of a match: stop the Game scene, bring the menu back and
+ * show the start screen. Called from the pause menu, the result card and the
+ * LAN room's 离开房间 button (through the scene's MATCH_LEFT_EVENT).
+ */
+function leaveMatch(): void {
+  const scene = gameScene();
+  if (scene) {
+    scene.quitMatch();
+    return;
+  }
+  returnToMenu();
+}
+
+/** Scene swap only – safe to call twice. */
+function returnToMenu(): void {
+  if (game.scene.isActive('Game') || game.scene.isPaused('Game')) game.scene.stop('Game');
+  if (!game.scene.isActive('Menu')) game.scene.start('Menu');
+  render({ kind: 'start' });
+}
+
 function startMatch(): void {
   sound.resume();
   sound.ui();
@@ -1031,7 +1052,10 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
   `;
 }
 
-/** One tidy row: which map the room plays and whether everyone has it yet. */
+/**
+ * The room's map row. The host picks the arena right here (built-in, custom or
+ * 随机) and everyone sees whether the file has reached every machine yet.
+ */
 function lobbyMapBlock(state: Extract<OverlayState, { kind: 'lobby' }>): string {
   const map = state.map;
   if (!map) return '';
@@ -1044,16 +1068,34 @@ function lobbyMapBlock(state: Extract<OverlayState, { kind: 'lobby' }>): string 
         : '正在接收地图…'
     : '';
   const tone = !needSync || map.synced ? 'map-ok' : 'map-wait';
+  const picker =
+    state.isHost && state.maps?.length
+      ? `<select class="lobby-map-select" id="lobby-map-select" aria-label="房间地图">
+           ${state.maps
+             .map(
+               (choice) =>
+                 `<option value="${choice.id}" ${choice.id === map.id ? 'selected' : ''}>${
+                   choice.custom ? '✎ ' : ''
+                 }${escapeHtml(choice.name)}</option>`
+             )
+             .join('')}
+         </select>`
+      : `<b class="lobby-map-name">${escapeHtml(map.name)}</b>`;
   return `
     <div class="lobby-map ${tone}">
       <span class="lobby-map-label">地图</span>
-      <b class="lobby-map-name">${escapeHtml(map.name)}</b>
-      <span class="lobby-map-tag">${map.custom ? '房主自建' : '内置'}</span>
+      ${picker}
+      <span class="lobby-map-tag">${map.custom ? '房主自建' : map.id === 'random' ? '每局随机' : '内置'}</span>
       ${progress ? `<span class="lobby-map-sync">${escapeHtml(progress)}</span>` : ''}
       ${
         state.isHost && needSync && !map.synced
           ? '<button type="button" class="chip tiny" id="lobby-map-resend">重发地图</button>'
           : ''
+      }
+      ${
+        state.isHost
+          ? '<span class="lobby-map-hint">换图会立刻同步给房间</span>'
+          : '<span class="lobby-map-hint">由房主选择</span>'
       }
     </div>`;
 }
@@ -1084,6 +1126,12 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
       state.roster = state.roster.map((seat) => (seat.id === id ? { ...seat, team } : seat));
       repaint();
     });
+  });
+
+  root.querySelector<HTMLSelectElement>('#lobby-map-select')?.addEventListener('change', (event) => {
+    sound.ui();
+    const id = (event.target as HTMLSelectElement).value;
+    scene.setRoomLevel(id);
   });
 
   root.querySelector<HTMLButtonElement>('#lobby-map-resend')?.addEventListener('click', () => {
@@ -1352,35 +1400,61 @@ function render(next: OverlayState): void {
       </div>
     `;
   } else if (next.kind === 'matchOver') {
-    const rows = next.scoreboard
-      .slice()
-      .sort((a, b) => b.kills - a.kills)
-      .map(
-        (line, index) => `
-        <div class="score-row ${next.winners.includes(line.id) ? 'winner' : ''}">
+    // Everyone gets a card that says plainly whether they won: the same match
+    // used to end silently for guests, and the scoreboard rows had no styling.
+    const teamMode = next.mode === 'team';
+    const teamCount = next.teams ?? 2;
+    const nameOf = (id: string): string => next.scoreboard.find((line) => line.id === id)?.name ?? id;
+    const verdict = next.verdict ?? (next.draw ? 'draw' : 'lose');
+    const sorted = next.scoreboard.slice().sort((a, b) => {
+      if (teamMode) {
+        if (a.team !== b.team) return a.team - b.team;
+        return b.kills - a.kills || a.deaths - b.deaths;
+      }
+      return b.kills - a.kills || a.deaths - b.deaths;
+    });
+    const rows = sorted
+      .map((line, index) => {
+        const won = next.winners.includes(line.id);
+        return `
+        <div class="score-row ${won ? 'winner' : ''} ${teamMode ? `team-${Math.min(line.team, teamCount - 1)}` : ''}">
           <span class="rank">${index + 1}</span>
-          <span class="name">${line.name}</span>
+          <span class="name">${escapeHtml(line.name)}${
+            teamMode ? `<em class="score-team">${TEAM_NAMES[line.team] ?? `第${line.team + 1}队`}</em>` : ''
+          }</span>
           <span class="kills">${line.kills} 杀</span>
           <span class="deaths">${line.deaths} 死</span>
-        </div>`
-      )
+        </div>`;
+      })
       .join('');
-    const title = next.draw
-      ? '平局'
-      : next.surrenderBy
-        ? `${next.scoreboard.find((l) => l.id === next.surrenderBy)?.name ?? '对手'} 已经投降`
-        : `${next.winners
-            .map((id) => next.scoreboard.find((l) => l.id === id)?.name ?? id)
-            .join(' / ')} 获胜`;
-    const reason = next.draw ? '时间到，双方人头相同' : next.reason === 'kills' ? '达到人头目标' : next.reason === 'time' ? '时间到，人头领先' : '对手退出对局，本局判为投降';
+    const headline = verdict === 'draw' ? '平局' : verdict === 'win' ? '你赢了' : '你输了';
+    const winNames = next.winners.map(nameOf).join(' / ');
+    const detail =
+      verdict === 'draw'
+        ? '人头一样多，这一局谁也没赢'
+        : next.reason === 'surrender'
+          ? `${nameOf(next.surrenderBy ?? '')} 中途退出，判为投降`
+          : next.reason === 'time'
+            ? `时间到 · ${winNames} 人头最多`
+            : `达到人头目标 · ${winNames} 领先`;
+    const seconds = Math.max(0, Math.round(next.elapsed ?? 0));
+    const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     card.innerHTML = `
-      <div class="kicker">Match Over</div>
-      <h1>${title}<span class="accent">${next.draw ? '' : '!'}</span></h1>
+      <div class="kicker">${teamMode ? `团队赛 · ${teamCount} 队` : '乱斗'} · Match Over</div>
+      <h1 class="verdict ${verdict}">${headline}<span class="accent">${verdict === 'draw' ? '' : '!'}</span></h1>
       <div class="rule"></div>
-      <p>${reason}</p>
+      <p>${detail}</p>
       <div class="scoreboard">${rows}</div>
+      <div class="stateline">
+        <span>用时 <b>${clock}</b></span>
+        ${next.draw ? '' : `<span>获胜 <b>${escapeHtml(winNames)}</b></span>`}
+      </div>
       <div class="actions">
-        <button class="primary" id="btn-restart">再来一局</button>
+        ${
+          next.canRestart === false
+            ? '<button class="primary" id="btn-wait-host" disabled>等房主再来一局</button>'
+            : '<button class="primary" id="btn-restart">再来一局</button>'
+        }
         <button id="btn-menu">返回菜单</button>
       </div>
     `;
@@ -1419,23 +1493,10 @@ function render(next: OverlayState): void {
     render({ kind: 'hidden' });
   });
 
-  document.getElementById('btn-menu')?.addEventListener('click', () => {
-    sound.ui();
-    gameScene()?.quitMatch();
-    game.scene.stop('Game');
-    game.scene.start('Menu');
-    render({ kind: 'start' });
-  });
-
-  // "退出对局" in the pause menu: solo/versus just end, LAN reports a surrender
-  // and the opponent sees it in their own match-over screen.
-  document.getElementById('btn-quit')?.addEventListener('click', () => {
-    sound.ui();
-    gameScene()?.quitMatch();
-    game.scene.stop('Game');
-    game.scene.start('Menu');
-    render({ kind: 'start' });
-  });
+  // Both the result card and the pause menu hand the exit to the scene, which
+  // fires MATCH_LEFT_EVENT once its socket and latches are clean.
+  document.getElementById('btn-menu')?.addEventListener('click', () => leaveMatch());
+  document.getElementById('btn-quit')?.addEventListener('click', () => leaveMatch());
 
   document.getElementById('btn-mute')?.addEventListener('click', () => {
     sound.setMuted(!sound.muted);
@@ -1444,6 +1505,12 @@ function render(next: OverlayState): void {
 }
 
 game.events.on(OVERLAY_EVENT, (next: OverlayState) => render(next));
+// The scene finished tearing a match down; this is the only place that swaps
+// scenes, so a half-stopped match can never come back on top of the menu.
+game.events.on(MATCH_LEFT_EVENT, () => {
+  sound.ui();
+  returnToMenu();
+});
 
 game.events.once(Phaser.Core.Events.READY, () => {
   render({ kind: 'start' });

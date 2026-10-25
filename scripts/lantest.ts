@@ -233,6 +233,14 @@ await sleep(120);
   check('an oversized map is refused', await waitFor(() => host3.messages.some((m) => m.t === 'lobby-error' && m.reason === 'map-failed' && String(m.detail).includes('太大'))));
   check('the room keeps its previous map', guest3.messages.filter((m) => m.t === 'map').pop()?.map?.id === roomMap.id);
 
+  // Switching back to a built-in map clears the room copy (and its acks), so a
+  // later `begin` needs no confirmation at all.
+  const beforeClear = guest3.messages.length;
+  host3.send({ t: 'map', map: null, hash: '' });
+  check('clearing the map reaches the guests', await waitFor(() => guest3.messages.slice(beforeClear).some((m) => m.t === 'map' && m.map === null)));
+  const cleared = guest3.messages.slice(beforeClear).find((m) => m.t === 'map');
+  check('a cleared map carries no file and no hash', cleared?.map === null && cleared?.hash === '', JSON.stringify(cleared));
+
   host3.close();
   guest3.close();
 }

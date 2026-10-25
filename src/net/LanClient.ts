@@ -51,6 +51,8 @@ export interface LanHandlers {
   onBegin?: (info: { mode: 'ffa' | 'team'; config: Record<string, unknown> | null; teams: number }) => void;
   /** Guest: the host's map arrived (and whether its hash matched). */
   onMap?: (map: MapFile, ok: boolean) => void;
+  /** Guest: the room went back to a built-in arena, nothing to store. */
+  onMapCleared?: () => void;
   /** Host: how many seats have confirmed the room's map. */
   onMapStatus?: (info: { waiting: string[]; ready: string[] }) => void;
   /** Everyone: the room's shared rules, as set by the host. */
@@ -241,7 +243,14 @@ export class LanClient {
           break;
         case 'map':
           // Host already owns the map; only a guest has to store it.
-          if (this.role === 'guest') this.takeMap(msg.map, msg.hash);
+          if (this.role !== 'guest') break;
+          // `map: null` = the room went back to a built-in arena.
+          if (!msg.map) {
+            this.roomMapId = '';
+            this.handlers.onMapCleared?.();
+            break;
+          }
+          this.takeMap(msg.map, msg.hash);
           break;
         case 'map-status':
           this.handlers.onMapStatus?.({ waiting: msg.waiting ?? [], ready: msg.ready ?? [] });
@@ -335,6 +344,16 @@ export class LanClient {
   sendMap(map: MapFile): void {
     this.hostMap = map;
     this.send({ t: 'map', map, hash: mapHash(map) });
+  }
+
+  /**
+   * Host: the room switched back to a built-in map. Clearing has to reach the
+   * server (it caches the map and gates `begin` on the acks), otherwise the
+   * room would sit waiting for a file that is never coming.
+   */
+  clearMap(): void {
+    this.hostMap = null;
+    this.send({ t: 'map', map: null, hash: '' });
   }
 
   /**

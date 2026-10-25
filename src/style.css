@@ -260,6 +260,106 @@ button.ghost:hover {
   color: var(--enemy);
 }
 
+/* Result card: 你赢了 / 你输了 + the public scoreboard. */
+h1.verdict.win {
+  color: #2e7d5b;
+}
+
+h1.verdict.lose {
+  color: var(--enemy);
+}
+
+h1.verdict.draw {
+  color: var(--muted);
+}
+
+.scoreboard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0 4px;
+  text-align: left;
+}
+
+.score-row {
+  display: grid;
+  grid-template-columns: 26px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border: 1.5px dashed rgba(38, 34, 29, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 250, 240, 0.6);
+  font-size: 16px;
+}
+
+.score-row.winner {
+  border-style: solid;
+  border-color: rgba(46, 125, 91, 0.55);
+  background: rgba(46, 125, 91, 0.1);
+}
+
+.score-row .rank {
+  color: var(--muted);
+  font-size: 14px;
+  text-align: right;
+}
+
+.score-row .name {
+  font-weight: 400;
+}
+
+.score-row .name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.score-row .score-team {
+  font-style: normal;
+  font-size: 12px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1.3px solid currentColor;
+  opacity: 0.85;
+}
+
+.score-row .kills,
+.score-row .deaths {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.score-row.team-0 .score-team,
+.score-row.team-0 .name {
+  color: #d4552e;
+}
+
+.score-row.team-1 .score-team,
+.score-row.team-1 .name {
+  color: #2f6fb5;
+}
+
+.score-row.team-2 .score-team,
+.score-row.team-2 .name {
+  color: #2e7d5b;
+}
+
+.score-row.team-3 .score-team,
+.score-row.team-3 .name {
+  color: #8a5cc0;
+}
+
+.score-row.team-4 .score-team,
+.score-row.team-4 .name {
+  color: #b8791d;
+}
+
+.score-row.team-5 .score-team,
+.score-row.team-5 .name {
+  color: #3b7f8c;
+}
+
 .stateline {
   display: flex;
   gap: 26px;
@@ -1713,4 +1813,22 @@ a.chip.ghost {
 
 .lobby-map.map-ok .lobby-map-sync {
   color: #2e7d5b;
+}
+
+/* Host's map picker: the same hand-drawn select used in the editor. */
+.lobby-map-select {
+  font: inherit;
+  font-size: 13.5px;
+  max-width: 240px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1.4px solid rgba(38, 34, 29, 0.35);
+  background: #fffdf7;
+  color: var(--ink);
+}
+
+.lobby-map-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  opacity: 0.85;
 }
