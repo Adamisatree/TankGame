@@ -237,6 +237,10 @@ type Poked = {
   pickups: { kind: string; x: number; y: number; respawn: number; pop: number }[];
   keys: Map<string, { keyCode: number; isDown: boolean }>;
   useSkill: (tank: unknown) => boolean;
+  startRoomMatch: () => void;
+  roster: { id: string; team: number; skill: string; ready?: boolean }[];
+  /** Anything else the tests poke at. */
+  [key: string]: unknown;
   skillP1: string;
   connected: boolean;
   skillReadyAt: number;
@@ -421,6 +425,12 @@ await new Promise<void>((resolve, reject) => {
   guest.once('error', reject);
 });
 guest.send(JSON.stringify({ t: 'join', role: 'guest' }));
+await wait(500);
+// v1.4: newcomers land in the room lobby; the host starts the match.
+const hostPhase = () => (poke as any).phase as string;
+check('the room opens in a lobby', hostPhase() === 'lobby', hostPhase());
+poke.startRoomMatch();
+await wait(500);
 
 const snapSeen = () => guestMsgs.filter((m) => m.t === 'state');
 await wait(700);
@@ -450,6 +460,52 @@ check(
   !!guestTank && Math.hypot(guestTank.x - p2Start.x, guestTank.y - p2Start.y) > 10,
   JSON.stringify(guestTank)
 );
+
+// --- v1.3.1: hit zones follow the shell, and the multiplier is applied.
+{
+  const probe = poke as any;
+  const victim = probe.p1;
+  victim.alive = true;
+  victim.awaitingRespawn = false;
+  victim.invulnerableUntil = 0;
+  victim.shieldUntil = 0;
+  victim.bodyAngle = -Math.PI / 2; // nose points up (screen coordinates)
+
+  victim.setHp(100);
+  probe.damage(victim, 'p1', Math.PI / 2); // shell travelling down = hits the nose
+  const frontLoss = 100 - victim.hp;
+
+  victim.setHp(100);
+  probe.damage(victim, 'p1', -Math.PI / 2); // shell travelling up = hits the rear
+  const rearLoss = 100 - victim.hp;
+
+  victim.setHp(100);
+  probe.damage(victim, 'p1', 0); // side-on
+  const sideLoss = 100 - victim.hp;
+
+  victim.setHp(100);
+  probe.damage(victim, 'p1', Math.PI / 2, 2); // 狂暴 shell
+  const doubledLoss = 100 - victim.hp;
+
+  check('nose hits deal the least damage', frontLoss === 7, `${frontLoss}`);
+  check('flank hits deal 9', sideLoss === 9, `${sideLoss}`);
+  check('rear hits deal the most', rearLoss === 12 && rearLoss > frontLoss, `${rearLoss}`);
+  check('the damage multiplier is applied', doubledLoss === 14, `${doubledLoss}`);
+}
+
+// --- v1.3.1: every pickup starts on cooldown, staggered.
+{
+  const probe = poke as any;
+  // Rebuild just the pickup set (a full restart would tear the LAN socket down).
+  probe.resetPickups(probe.levelIndex);
+  const cooldowns = probe.pickups.map((p: { respawn: number }) => p.respawn);
+  check('pickups start the match on cooldown', cooldowns.every((c: number) => c > 0), JSON.stringify(cooldowns));
+  check(
+    'pickups do not all pop at once',
+    new Set(cooldowns.map((c: number) => Math.round(c * 10))).size === cooldowns.length,
+    JSON.stringify(cooldowns)
+  );
+}
 
 // --- barrel heat: free until the cap, then a hard lock.
 const heatProbe = poke as any;
@@ -487,6 +543,9 @@ await new Promise<void>((resolve, reject) => {
   guest2.once('error', reject);
 });
 guest2.send(JSON.stringify({ t: 'join', role: 'guest' }));
+await wait(500);
+// A new seat drops the room back to the lobby until the host starts again.
+poke.startRoomMatch();
 await wait(700);
 check('the host renders a tank per seat', heatProbe.tanks().length >= 3, `tanks=${heatProbe.tanks().length}`);
 check(
@@ -502,6 +561,18 @@ guest2Msgs.length = 0;
 guest2.close();
 await wait(500);
 check('a departing seat is removed from the field', heatProbe.tanks().length === 2 && !heatProbe.byId('p3'), `tanks=${heatProbe.tanks().length}`);
+
+// --- every tank must fit where it spawns (no materialising inside a wall).
+{
+  const insideAny = (tank: { x: number; y: number }) =>
+    poke.layout.walls.some(
+      (box) =>
+        tank.x > box.x - 18 && tank.x < box.x + box.w + 18 && tank.y > box.y - 18 && tank.y < box.y + box.h + 18
+    );
+  const allTanks = (poke as any).tanks() as { x: number; y: number }[];
+  const stuck = allTanks.filter((tank) => insideAny(tank));
+  check('nobody spawns inside a wall', stuck.length === 0, `${stuck.length} stuck`);
+}
 
 // Host can end the match / restart and the guest is told.
 guestMsgs.length = 0;

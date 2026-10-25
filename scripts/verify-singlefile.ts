@@ -191,6 +191,19 @@ const checks: [string, boolean, string?][] = [
   ['mirror choice includes an automatic option', autoOption],
   ['several mirrors can be picked by hand', mirroredOptions.length >= 3, `${mirroredOptions.length}`],
   ['checking offline fails politely instead of throwing', updaterStatus.length > 0 && errors.length === updaterErrors, updaterStatus.slice(0, 80)],
+  // v1.4: the internal tuning bench is reachable from the menu.
+  ['the internal tuning panel is present', !!doc.querySelector('#tuning-panel')],
+  ['the tuning panel is locked until the passphrase is entered', !!doc.querySelector('#tune-pass')],
+  ['the tuning panel exposes fire rate', !!doc.querySelector('[data-tune="fireCooldown"]')],
+  ['the tuning panel exposes heat and damage knobs',
+    !!doc.querySelector('[data-tune="heatPerShot"]') && !!doc.querySelector('[data-tune="dmgBack"]')],
+  ['the tuning panel can reset and export', !!doc.querySelector('#tune-reset') && !!doc.querySelector('#tune-export')],
+  // Regression: selected chips used to have no styling at all.
+  ['selected chips are visibly highlighted', /\.chip\.on\s*\{/.test(html)],
+  // v1.4 room lobby (built into the same bundle).
+  ['the room lobby ships with the build', html.includes('lobby-seat') && html.includes('开始对局')],
+  ['the lobby can add and remove teams', html.includes('补齐空队') && html.includes('+ 加队')],
+  ['other players\' skill picks stay hidden', html.includes('已选择（保密）')],
 ];
 
 let failed = 0;

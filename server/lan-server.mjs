@@ -137,6 +137,10 @@ const room = {
   mode: 'ffa',
   config: null,
   nextId: 2,
+  /** True once the host has started a match; a new join drops back to lobby. */
+  started: false,
+  /** How many teams team-mode uses. The host can add/remove teams in the lobby. */
+  teamCount: 2,
 };
 let totalPlayers = 0;
 let currentPort = 0;
@@ -156,25 +160,65 @@ function broadcast(msg, exceptWs = null) {
   }
 }
 
-/** Public snapshot of the room – identical for every client. */
-function roster() {
+/**
+ * Room snapshot, tailored per viewer.
+ *
+ * A player's summoner-skill choice is **private**: only the seat itself (and the
+ * host, which has to simulate it) ever receives the value. Everyone else just
+ * learns whether the seat has picked something yet.
+ */
+function roster(viewer = null) {
+  const viewerId = viewer?.playerId ?? null;
+  const isHost = viewer?.role === 'host';
   const players = [];
   for (const [id, ws] of room.players) {
-    players.push({ id, skill: ws.skill ?? '', team: ws.team ?? 0, host: id === 'p1' });
+    const mine = id === viewerId || isHost;
+    const chosen = ws.skill ?? '';
+    players.push({
+      id,
+      name: ws.name || `P${id.replace(/^p/, '')}`,
+      skill: mine ? chosen : '',
+      /** True once that seat has picked something (safe for others to know). */
+      hasSkill: !!chosen,
+      team: ws.team ?? 0,
+      ready: id === 'p1' ? true : !!ws.ready,
+      host: id === 'p1',
+    });
   }
   return {
     t: 'roster',
     players,
     capacity: room.capacity,
     mode: room.mode,
+    teams: room.teamCount,
     host: players.find((p) => p.host)?.id ?? null,
+    started: room.started,
+    config: room.config,
   };
 }
 
-function teamForSeat(seat) {
-  return room.mode === 'team' ? seat % 2 : seat;
+function clampTeam(team) {
+  return Math.max(0, Math.min(room.teamCount - 1, Number(team) || 0));
 }
 
+function teamForSeat(seat) {
+  return room.mode === 'team' ? seat % room.teamCount : seat;
+}
+
+/** How many players sit in each team, index = team number. */
+function teamSizes() {
+  const sizes = new Array(room.teamCount).fill(0);
+  for (const ws of room.players.values()) {
+    const team = clampTeam(ws.team ?? 0);
+    sizes[team] += 1;
+  }
+  return sizes;
+}
+
+/**
+ * Rebuilds teams from seat order. Only used when the host asks for auto
+ * balance – hand-picked teams (`team` messages) are kept as they are.
+ */
 function refreshTeams() {
   let seat = 0;
   for (const ws of room.players.values()) {
@@ -183,9 +227,41 @@ function refreshTeams() {
   }
 }
 
+/**
+ * Guarantees nobody sits on a team that does not exist, and that every team has
+ * somebody. Pulls players out of the largest team, never below one member.
+ */
+function fillTeams() {
+  for (const ws of room.players.values()) ws.team = clampTeam(ws.team ?? 0);
+  const sizes = teamSizes();
+  for (let team = 0; team < room.teamCount; team += 1) {
+    if (sizes[team] > 0) continue;
+    // Move one player from the biggest team that can spare one.
+    let donor = -1;
+    for (let i = 0; i < sizes.length; i += 1) {
+      if (sizes[i] > 1 && (donor < 0 || sizes[i] > sizes[donor])) donor = i;
+    }
+    if (donor < 0) break;
+    const mover = [...room.players.values()].find((player) => (player.team ?? 0) === donor);
+    if (!mover) break;
+    mover.team = team;
+    sizes[donor] -= 1;
+    sizes[team] += 1;
+  }
+}
+
 function announceRoster() {
-  refreshTeams();
-  broadcast(roster());
+  // Teams are sticky: a host's hand-picked sides must survive every roster
+  // broadcast. New seats get a sensible default at join time instead.
+  for (const ws of room.players.values()) send(ws, roster(ws));
+}
+
+/** Least-populated team, so a fresh seat keeps the sides roughly even. */
+function balancedTeam() {
+  const sizes = teamSizes();
+  let best = 0;
+  for (let i = 1; i < sizes.length; i += 1) if (sizes[i] < sizes[best]) best = i;
+  return best;
 }
 
 /** Legacy 1v1 pairing messages, kept so older clients (and the LAN tests) work. */
@@ -193,8 +269,9 @@ function pair() {
   const host = room.host;
   const guest = [...room.players.entries()].find(([id]) => id !== 'p1')?.[1] ?? null;
   if (!host || !guest) return;
-  send(host, { t: 'peer', state: 'joined', skill: guest.skill, version: guest.version });
-  send(guest, { t: 'paired', skill: host.skill });
+  // No skill in these messages: picks are private (see roster()).
+  send(host, { t: 'peer', state: 'joined', version: guest.version });
+  send(guest, { t: 'paired' });
   console.log('[lan] host <-> guest paired');
 }
 
@@ -263,6 +340,8 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           ws.playerId = 'p1';
           ws.role = 'host';
           if (!previous) totalPlayers += 1;
+          ws.team = 0;
+          ws.ready = true;
           room.players.set('p1', ws);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
@@ -279,8 +358,13 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         const id = `p${room.nextId++}`;
         ws.playerId = id;
         ws.role = 'guest';
+        ws.team = room.mode === 'team' ? balancedTeam() : 0;
+        ws.ready = false;
         totalPlayers += 1;
         room.players.set(id, ws);
+        // Someone walked into the room: back to the lobby so everyone can
+        // pick sides and skills before the next match.
+        room.started = false;
         send(ws, {
           t: 'joined',
           role: 'guest',
@@ -291,7 +375,9 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           peerVersion: room.host?.version,
         });
         console.log(`[lan] guest ${id} joined (${room.players.size}/${room.capacity})`);
-        if (room.host) send(room.host, { t: 'peer', state: 'joined', id, skill: ws.skill, version: ws.version });
+        // The host is the one client that may see a seat's skill, but even it
+        // gets that from the roster, not from this notification.
+        if (room.host) send(room.host, { t: 'peer', state: 'joined', id, version: ws.version });
         announceRoster();
         pair();
         return;
@@ -301,9 +387,19 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       if (msg.t === 'config') {
         if (ws.role !== 'host') return;
         const capacity = Math.max(2, Math.min(10, Number(msg.capacity) || room.capacity));
+        const previousMode = room.mode;
         room.capacity = capacity;
         room.mode = msg.mode === 'team' ? 'team' : 'ffa';
         room.config = { ...msg, capacity };
+        if (room.mode !== previousMode) {
+          // Switching to team mode with everyone on team 0 is useless, so give
+          // the seats an even split across the teams that exist.
+          let seat = 0;
+          for (const player of room.players.values()) {
+            player.team = room.mode === 'team' ? seat % room.teamCount : 0;
+            seat += 1;
+          }
+        }
         announceRoster();
         // Everyone needs the same rules, not just the roster.
         broadcast({ t: 'config', config: room.config });
@@ -320,6 +416,75 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       // Host → everyone: snapshots, level changes, match events.
       if (msg.t === 'state' || msg.t === 'start' || msg.t === 'restart' || msg.t === 'level' || msg.t === 'event') {
         if (ws.role === 'host') broadcast(msg, ws);
+        return;
+      }
+
+      // ---- lobby: each player owns their skill and ready state; the host owns
+      // teams and the start button.
+      if (msg.t === 'skill') {
+        if (!ws.playerId) return;
+        if (typeof msg.skill === 'string') ws.skill = msg.skill.slice(0, 24);
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'ready') {
+        if (!ws.playerId || ws.role === 'host') return;
+        ws.ready = !!msg.ready;
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'team') {
+        if (ws.role !== 'host') return;
+        const target = room.players.get(String(msg.id ?? ''));
+        if (!target) return;
+        target.team = clampTeam(msg.team);
+        announceRoster();
+        return;
+      }
+
+      // How many teams team-mode has. Adding a team immediately re-seats players
+      // into the empty one so it never starts life empty.
+      if (msg.t === 'teams') {
+        if (ws.role !== 'host') return;
+        room.teamCount = Math.max(2, Math.min(6, Number(msg.count) || room.teamCount));
+        for (const player of room.players.values()) player.team = clampTeam(player.team);
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'auto-teams') {
+        if (ws.role !== 'host') return;
+        refreshTeams();
+        announceRoster();
+        return;
+      }
+
+      // Fill empty teams by moving players out of the biggest one.
+      if (msg.t === 'fill-teams') {
+        if (ws.role !== 'host') return;
+        fillTeams();
+        announceRoster();
+        return;
+      }
+
+      if (msg.t === 'begin') {
+        if (ws.role !== 'host') return;
+        // Every team needs at least one player: an empty side makes the match
+        // nonsense (and a 1v1 with a phantom team is a free win).
+        if (room.mode === 'team') {
+          const sizes = teamSizes();
+          const empty = sizes.map((size, index) => (size === 0 ? index : -1)).filter((index) => index >= 0);
+          if (empty.length) {
+            send(ws, { t: 'lobby-error', reason: 'empty-team', teams: sizes });
+            return;
+          }
+        }
+        room.started = true;
+        // Everyone (host included) learns the room is live.
+        broadcast({ t: 'begin', config: room.config, roster: room.players.size ? [...room.players.keys()] : [], mode: room.mode, teams: room.teamCount });
+        announceRoster();
         return;
       }
 

@@ -55,11 +55,15 @@ export function wrapAngle(angle: number): number {
 
 export type MatchMode = 'ffa' | 'team';
 
+export type WinCondition = 'kills' | 'time' | 'both';
+
 export interface MatchConfig {
   mode: MatchMode;
   /** Player cap; 2..10 across the board. */
   capacity: number;
-  /** Kills needed to win. 0 = no kill target, time decides. */
+  /** What ends the match: kill target, clock, or whichever comes first. */
+  winCondition: WinCondition;
+  /** Kills needed to win. 0 = unlimited (the clock decides). */
   killTarget: number;
   /** Seconds before the match ends. 0 = untimed. */
   timeLimit: number;
@@ -71,6 +75,7 @@ export interface MatchConfig {
 
 export const DEFAULT_MATCH: MatchConfig = {
   mode: 'ffa',
+  winCondition: 'both',
   capacity: 6,
   killTarget: 15,
   timeLimit: 480,
@@ -79,7 +84,8 @@ export const DEFAULT_MATCH: MatchConfig = {
 };
 
 export const CAPACITY_CHOICES = [2, 3, 4, 5, 6, 8, 10];
-export const KILL_TARGET_CHOICES = [5, 10, 15, 20, 30];
+/** 0 = 不限：the match simply never ends on kills. */
+export const KILL_TARGET_CHOICES = [0, 5, 10, 15, 20, 30];
 export const TIME_LIMIT_CHOICES = [0, 180, 300, 480, 600];
 
 export interface ScoreLine {
@@ -104,15 +110,21 @@ export type MatchResult =
 export function evaluateMatch(lines: ScoreLine[], config: MatchConfig, elapsed: number): MatchResult {
   if (!lines.length) return { kind: 'running' };
 
+  // Which enders are armed. 'kills' ignores the clock, 'time' ignores kills.
+  const useKills = config.winCondition !== 'time';
+  const useTime = config.winCondition !== 'kills';
+  const killTarget = useKills ? config.killTarget : 0;
+  const timeLimit = useTime ? config.timeLimit : 0;
+
   if (config.mode === 'team') {
     const byTeam = new Map<number, number>();
     for (const line of lines) byTeam.set(line.team, (byTeam.get(line.team) ?? 0) + line.kills);
     const teams = [...byTeam.entries()].sort((a, b) => b[1] - a[1]);
-    if (config.killTarget > 0 && teams[0] && teams[0][1] >= config.killTarget) {
+    if (killTarget > 0 && teams[0] && teams[0][1] >= killTarget) {
       const winners = lines.filter((l) => l.team === teams[0][0]).map((l) => l.id);
       return { kind: 'win', winners, reason: 'kills' };
     }
-    if (config.timeLimit > 0 && elapsed >= config.timeLimit) {
+    if (timeLimit > 0 && elapsed >= timeLimit) {
       if (teams.length >= 2 && teams[0][1] === teams[1][1]) return { kind: 'draw', reason: 'time' };
       return { kind: 'win', winners: lines.filter((l) => l.team === teams[0][0]).map((l) => l.id), reason: 'time' };
     }
@@ -120,10 +132,10 @@ export function evaluateMatch(lines: ScoreLine[], config: MatchConfig, elapsed: 
   }
 
   const best = Math.max(...lines.map((l) => l.kills));
-  if (config.killTarget > 0 && best >= config.killTarget) {
+  if (killTarget > 0 && best >= killTarget) {
     return { kind: 'win', winners: lines.filter((l) => l.kills === best).map((l) => l.id), reason: 'kills' };
   }
-  if (config.timeLimit > 0 && elapsed >= config.timeLimit) {
+  if (timeLimit > 0 && elapsed >= timeLimit) {
     const leaders = lines.filter((l) => l.kills === best);
     if (leaders.length > 1) return { kind: 'draw', reason: 'time' };
     return { kind: 'win', winners: leaders.map((l) => l.id), reason: 'time' };

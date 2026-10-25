@@ -4,25 +4,15 @@ import { advanceBullet, type BulletTarget } from '../engine/bullet';
 import { LEVELS, buildLayout, levelIndexById, randomLevelIndex, type Layout, type PlayRect } from '../engine/level';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../engine/physics';
 import { bulletThreatAt, pickHeading, steerTo, type ThreatBullet } from '../engine/steer';
-import {
-  BLINK_PROTECT,
-  BULLET,
-  COLORS,
-  FIRE_COOLDOWN,
-  FONT,
-  GAME_H,
-  GAME_W,
-  RESPAWN_DELAY,
-  RESPAWN_PROTECT,
-  TANK,
-} from './config';
+import { BULLET, COLORS, FONT, GAME_H, GAME_W, TANK } from './config';
 import { MAX_HP } from './rules';
-import { heatRatio, lockSecondsLeft } from './heat';
+import { heatCfg, heatRatio, lockSecondsLeft, shotsToOverheat } from './heat';
+import { setTuning, tuning, tuningDiff, tuningIsCustom } from './tuning';
 import { OVERLAY_EVENT, type OverlayState } from './events';
 import { Sketch } from './Sketch';
 import { seatColor, Tank, teamColor, TURRET_LIMIT, type TankId } from './Tank';
 import { getBindings, keyLabel, SEAT_ACTIONS, type SeatAction, type SeatBindings } from './keybinds';
-import { makePickup, PICKUPS, PICKUP_RADIUS, PICKUP_RESPAWN, rollPickupKind, type Pickup } from './pickups';
+import { makePickup, PICKUPS, PICKUP_RADIUS, rollPickupKind, type Pickup } from './pickups';
 import { isSkillId, RAGE_SHOTS, skillById, type SkillId } from './skills';
 import { makeTextures, paperBackground } from './art';
 import { sound } from './Sound';
@@ -32,7 +22,6 @@ import {
   chooseRespawn,
   evaluateMatch,
   hitZone,
-  zoneDamage,
   type HitZone,
   type MatchResult,
   type RespawnCandidate,
@@ -50,7 +39,7 @@ const IDLE_INPUT: TankInput = { turn: 0, drive: 0, aim: 0, fire: false };
 
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
 
-type Phase = 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver' | 'matchOver' | 'leaving';
+type Phase = 'lobby' | 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver' | 'matchOver' | 'leaving';
 
 interface Bullet {
   x: number;
@@ -113,7 +102,9 @@ export class GameScene extends Phaser.Scene {
   private levelText!: Phaser.GameObjects.Text;
   private scoreText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
-  private bannerText!: Phaser.GameObjects.Text;
+  /** Corner message lines (newest at the bottom). Replaces the old centre banner. */
+  private toastTexts: Phaser.GameObjects.Text[] = [];
+  private toasts: { text: string; life: number; total: number }[] = [];
   private modeText!: Phaser.GameObjects.Text;
 
   private p1!: Tank;
@@ -151,6 +142,10 @@ export class GameScene extends Phaser.Scene {
   private heatText?: Phaser.GameObjects.Text;
   /** Reused HUD texts, keyed by slot, so redraws do not leak objects. */
   private cachedTexts = new Map<string, Phaser.GameObjects.Text>();
+  /** Screen-pinned minimap layer. */
+  private minimap!: Phaser.GameObjects.Graphics;
+  /** How many health rows were drawn last frame, so extras can be cleared. */
+  private hpRowCount = 0;
   private heatSig = '';
   private skillLabel1?: Phaser.GameObjects.Text;
   private skillLabel2?: Phaser.GameObjects.Text;
@@ -247,21 +242,22 @@ export class GameScene extends Phaser.Scene {
     this.cratesLayer = new Sketch(this, 6);
     this.fx = this.add.graphics().setDepth(30);
     this.hud = new Sketch(this, 40);
+    // The minimap is redrawn every frame and must not scroll with the camera.
+    this.minimap = this.add.graphics().setDepth(41).setScrollFactor(0);
 
     this.buildKeys();
 
-    this.levelText = this.hud.text(GAME_W / 2, 40, '', 24, COLORS.ink);
-    this.scoreText = this.hud.text(GAME_W - 48, 40, '', 22, COLORS.ink, 'right');
-    this.modeText = this.hud.text(PLAY_RECT.x + 8, 40, '', 18, COLORS.ink, 'left');
+    // ---- top bar, three columns: left = you, middle = match, right = them.
+    this.levelText = this.hud.text(GAME_W / 2, 16, '', 18, COLORS.ink);
+    this.scoreText = this.hud.text(GAME_W / 2, 56, '', 20, COLORS.ink);
+    this.modeText = this.hud.text(GAME_W / 2, 36, '', 13, COLORS.ink);
     this.modeText.setAlpha(0.55);
-    this.hintText = this.hud.text(GAME_W / 2, GAME_H - 24, '', 16, COLORS.ink);
-    this.hintText.setAlpha(0.55);
-    this.skillLabel1 = this.hud.text(PLAY_RECT.x + 8, 61, '', 15, COLORS.ink, 'left');
-    this.skillLabel1.setAlpha(0.8);
-    this.skillLabel2 = this.hud.text(PLAY_RECT.x + PLAY_RECT.w - 8, 61, '', 15, COLORS.ink, 'right');
-    this.skillLabel2.setAlpha(0.8);
-    this.bannerText = this.hud.text(GAME_W / 2, GAME_H / 2, '', 64, COLORS.ink);
-    this.bannerText.setAlpha(0);
+    this.hintText = this.hud.text(GAME_W / 2, GAME_H - 18, '', 13, COLORS.ink);
+    this.hintText.setAlpha(0.45);
+    this.skillLabel1 = this.hud.text(PLAY_RECT.x + 10, 64, '', 13, COLORS.ink, 'left');
+    this.skillLabel1.setAlpha(0.75);
+    this.skillLabel2 = this.hud.text(PLAY_RECT.x + PLAY_RECT.w - 10, 64, '', 13, COLORS.ink, 'right');
+    this.skillLabel2.setAlpha(0.75);
     this.input.mouse?.disableContextMenu();
 
     this.score = 0;
@@ -321,11 +317,10 @@ export class GameScene extends Phaser.Scene {
         if (state === 'left' && this.phase === 'playing') this.handleSurrender(this.lanRole === 'host' ? 'p2' : 'p1');
         if (state === 'joined') {
           sound.ui();
-          // A fresh opponent means a fresh match.
-          if (role === 'host') {
-            this.bullets = [];
-            this.restartLanMatch();
-          }
+          // v1.4: a new player lands in the lobby. The host decides when the
+          // match starts, so joining never yanks anyone into a firefight.
+          this.bullets = [];
+          this.particles = [];
         }
       },
       onInput: (input, from) => {
@@ -341,10 +336,31 @@ export class GameScene extends Phaser.Scene {
         this.myId = id;
         if (role === 'guest') this.applyCameraToLocal();
       },
-      onRoster: (players) => this.syncRoster(players),
-      onConfig: (config) => {
-        // The host owns the rules: everyone plays the same match.
+      onRoster: (players, capacity, info) => {
+        this.syncRoster(players);
+        this.roomCapacity = capacity;
+        this.teamCount = info.teams;
+        this.matchLive = info.started;
+        // Guests (and the host) sit in the lobby until the host starts.
+        if (!info.started) this.enterLobby(info);
+        else if (this.phase === 'lobby') this.leaveLobby();
+      },
+      onBegin: (info) => {
+        if (info.config) settings.match = { ...settings.match, ...(info.config as unknown as typeof settings.match) };
+        this.teamCount = info.teams;
+        this.matchLive = true;
+        this.leaveLobby();
+      },
+      onLobbyError: (info) => {
+        const empty = info.teams
+          .map((size, index) => (size === 0 ? `第 ${index + 1} 队` : ''))
+          .filter(Boolean);
+        this.showBanner(`${empty.join('、')}还没有人，不能开始`, 2.2);
+      },
+      onConfig: (config, hostTuning) => {
+        // The host owns the rules and the balance: everyone plays the same match.
         if (role === 'host') return;
+        if (hostTuning) setTuning(hostTuning);
         settings.match = { ...settings.match, ...config };
         // Colours depend on the mode (team paint vs per-seat), so re-apply them.
         this.syncRoster(this.roster);
@@ -363,6 +379,7 @@ export class GameScene extends Phaser.Scene {
     if (role === 'host') {
       this.lan.matchConfig = { ...settings.match };
       this.lan.matchConfig.mode = settings.match.mode;
+      this.lan.tuning = { ...tuning() };
     }
     this.lan.connect();
   }
@@ -385,11 +402,138 @@ export class GameScene extends Phaser.Scene {
   }
 
   private modeLabel(): string {
+    // A non-default balance is always labelled, so nobody wonders why the
+    // numbers feel odd (and a LAN guest knows it is the host's tuning).
+    const tag = tuningIsCustom() ? ` · 内测参数 ${tuningDiff().length} 项` : '';
     if (this.lanMode) {
       const role = this.lanRole === 'host' ? '房主' : '访客';
-      return `局域网 · ${role}`;
+      return `局域网 · ${role}${tag}`;
     }
-    return this.versus ? '双人对战' : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}`;
+    return this.versus
+      ? `双人对战${tag}`
+      : `单人 · ${preset().label}${this.autoDodge ? ' · 自动躲弹' : ''}${tag}`;
+  }
+
+  /** Room lobby: freeze the arena and let the overlay show the seat list. */
+  private enterLobby(info: { mode: 'ffa' | 'team'; host: string | null }): void {
+    if (!this.lanMode) return;
+    if (info.mode === 'team' && settings.match.mode !== 'team') settings.match.mode = 'team';
+    if (info.mode === 'ffa' && settings.match.mode !== 'ffa') settings.match.mode = 'ffa';
+    const wasPlaying = this.phase === 'playing' || this.phase === 'ready';
+    this.phase = 'lobby';
+    this.bullets = [];
+    this.particles = [];
+    this.paused = false;
+    this.emitOverlay({
+      kind: 'lobby',
+      roster: this.roster.map((entry) => ({
+        id: entry.id,
+        name: entry.name ?? this.nameOf(entry.id),
+        // Skills are private: only your own seat shows the actual choice.
+        skill: entry.id === this.myId ? entry.skill : '',
+        hasSkill: !!entry.skill,
+        team: entry.team,
+        ready: entry.ready ?? entry.id === 'p1',
+        host: entry.id === 'p1',
+      })),
+      teams: this.teamCount,
+      capacity: this.roomCapacity,
+      mode: settings.match.mode,
+      myId: this.myId,
+      isHost: this.lanRole === 'host',
+      hostId: info.host ?? 'p1',
+      match: { ...settings.match },
+      roomUrl: this.roomUrl,
+    });
+    if (wasPlaying) sound.ui();
+  }
+
+  /** Host pressed start (or a begin arrived): resume normal play. */
+  private leaveLobby(): void {
+    this.phase = 'ready';
+    this.readyTimer = 1.1;
+    this.emitOverlay({ kind: 'hidden' });
+    this.hudDirty = true;
+  }
+
+  /** Called by the lobby overlay: this seat's skill choice. */
+  setMySkill(skill: SkillId): void {
+    if (this.lanMode && this.lan && this.myId) {
+      this.lan.setSkill(skill);
+      const entry = this.roster.find((r) => r.id === this.myId);
+      if (entry) entry.skill = skill;
+    }
+    if (this.lanRole === 'host' || !this.lanMode) this.skillP1 = skill;
+    else this.skillP2 = skill;
+    // Keep the roster (and so the in-match skill lookup) in sync immediately.
+    this.roster = this.roster.map((r) => (r.id === this.myId ? { ...r, skill } : r));
+  }
+
+  setReady(ready: boolean): void {
+    this.lan?.setReady(ready);
+    this.roster = this.roster.map((r) => (r.id === this.myId ? { ...r, ready } : r));
+  }
+
+  setTeamOf(id: string, team: number): void {
+    this.lan?.setTeam(id, team);
+    this.roster = this.roster.map((r) => (r.id === id ? { ...r, team } : r));
+    this.syncRoster(this.roster);
+  }
+
+  autoTeams(): void {
+    this.lan?.autoTeams();
+  }
+
+  /** Host: how many teams there are (2..6). */
+  setTeamCount(count: number): void {
+    const next = Math.max(2, Math.min(6, Math.round(count)));
+    this.teamCount = next;
+    this.lan?.setTeamCount(next);
+    // Re-clamp every seat so nobody keeps a team that no longer exists.
+    this.roster = this.roster.map((entry) => ({ ...entry, team: Math.min(entry.team, next - 1) }));
+    this.syncRoster(this.roster);
+  }
+
+  /** Host: move players so no team is empty. */
+  fillTeams(): void {
+    this.lan?.fillTeams();
+  }
+
+  /** Teams that currently have nobody on them (team-mode only). */
+  emptyTeams(): number[] {
+    const sizes = new Array(this.teamCount).fill(0);
+    for (const entry of this.roster) {
+      const team = Math.max(0, Math.min(this.teamCount - 1, entry.team));
+      sizes[team] += 1;
+    }
+    return sizes.map((size, index) => (size === 0 ? index : -1)).filter((index) => index >= 0);
+  }
+
+  /** Host: apply lobby rule changes to the room. */
+  applyRoomConfig(match: typeof settings.match): void {
+    settings.match = { ...match };
+    if (this.lanRole === 'host' && this.lan) {
+      this.lan.matchConfig = { ...settings.match };
+      this.lan.send({ t: 'config', ...settings.match, tuning: { ...tuning() } });
+    }
+    this.hudDirty = true;
+  }
+
+  /** Host: start the match for the whole room. */
+  startRoomMatch(): void {
+    if (this.lanRole !== 'host' || !this.lan) return;
+    // Every team needs somebody; the server enforces it too, this is the fast path.
+    if (settings.match.mode === 'team') {
+      const empty = this.emptyTeams();
+      if (empty.length) {
+        this.showBanner(`${empty.map((i) => `第 ${i + 1} 队`).join('、')}还没有人，不能开始`, 2.2);
+        return;
+      }
+    }
+    this.matchLive = true;
+    this.restartLanMatch();
+    this.lan.begin();
+    this.leaveLobby();
   }
 
   /** Host: reset the arena without touching the socket. */
@@ -431,7 +575,7 @@ export class GameScene extends Phaser.Scene {
       this.hintText,
       this.skillLabel1,
       this.skillLabel2,
-      this.bannerText,
+      ...this.toastTexts,
       this.heatText,
       ...this.noticeLabels,
       ...this.cachedTexts.values(),
@@ -494,6 +638,22 @@ export class GameScene extends Phaser.Scene {
     return [this.p1, this.p2, this.enemy, ...this.extras].filter((t): t is Tank => !!t);
   }
 
+  /** Everyone with a health bar: yourself first, then by seat id. */
+  private scoreboardOrder(): Tank[] {
+    const me = this.localTank();
+    const list = this.tanks().filter((t) => t.id !== 'enemy' || !this.lanMode);
+    list.sort((a, b) => {
+      if (a === me) return -1;
+      if (b === me) return 1;
+      return a.id.localeCompare(b.id, undefined, { numeric: true });
+    });
+    return list;
+  }
+
+  private matchUsesTeams(): boolean {
+    return settings.match.mode === 'team';
+  }
+
   /** Any tank by network seat id. */
   private byId(id: string): Tank | undefined {
     return this.tanks().find((t) => t.id === id);
@@ -517,7 +677,8 @@ export class GameScene extends Phaser.Scene {
     const candidates: RespawnCandidate[] = spawns.map((spawn, index) => ({ ...spawn, id: index }));
     const pick = chooseRespawn({ spawns: candidates, players: others, team, mode: 'ffa' });
     const spawn = (pick && spawns[pick.id]) || spawns[this.tanks().length % spawns.length];
-    const tank = new Tank(this, spawn.x, spawn.y, spawn.angle, id, 22, this.colorForSeat(id, team));
+    const spot = this.nudgeSpawn(spawn.x, spawn.y, TANK.radius);
+    const tank = new Tank(this, spot.x, spot.y, spawn.angle, id, 22, this.colorForSeat(id, team));
     tank.team = team;
     if (!this.p2) this.p2 = tank;
     else this.extras.push(tank);
@@ -546,7 +707,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Makes the tank list match the roster the server just broadcast. */
-  private syncRoster(players: { id: string; team: number; skill: string }[]): void {
+  private syncRoster(
+    players: { id: string; team: number; skill: string; hasSkill?: boolean; ready?: boolean; name?: string }[]
+  ): void {
     this.roster = players;
     if (!this.lanMode) return;
     const wanted = new Set(players.map((p) => p.id));
@@ -655,19 +818,22 @@ export class GameScene extends Phaser.Scene {
 
     const d = preset();
 
-    this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
+    const p1Spot = this.nudgeSpawn(this.layout.player.x, this.layout.player.y, TANK.radius);
+    this.p1 = new Tank(this, p1Spot.x, p1Spot.y, this.layout.player.angle, 'p1', 20);
     this.p1.setHp(this.versus ? VERSUS_HP : MAX_HP);
     this.p1.skillReadyAt = this.time.now + 1200;
 
     if (this.versus) {
-      this.p2 = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'p2', 22);
+      const p2Spot = this.nudgeSpawn(this.layout.enemy.x, this.layout.enemy.y, TANK.radius);
+      this.p2 = new Tank(this, p2Spot.x, p2Spot.y, this.layout.enemy.angle, 'p2', 22);
       this.p2.setHp(VERSUS_HP);
       this.p2.team = 1;
       this.p2.skillReadyAt = this.time.now + 1200;
     } else {
       // Solo: the AI is health-based too; difficulty now only changes its aim,
       // reaction time and rate of fire.
-      this.enemy = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'enemy', 22);
+      const cpuSpot = this.nudgeSpawn(this.layout.enemy.x, this.layout.enemy.y, TANK.radius);
+      this.enemy = new Tank(this, cpuSpot.x, cpuSpot.y, this.layout.enemy.angle, 'enemy', 22);
       this.enemy.setHp(MAX_HP);
       this.enemy.team = 1;
     }
@@ -713,6 +879,11 @@ export class GameScene extends Phaser.Scene {
       this.lan = null;
       this.lanRole = null;
     }
+    // Leaving a room must not leave its seat list (and skills) behind.
+    if (!this.lanMode) {
+      this.roster = [];
+      this.matchLive = false;
+    }
     this.score = 0;
     this.bullets = [];
     this.particles = [];
@@ -743,11 +914,46 @@ export class GameScene extends Phaser.Scene {
     this.showBanner(on ? '自动躲弹：开' : '自动躲弹：关', 0.9);
   }
 
+  /**
+   * All short-lived messages go to the corner stack instead of the middle of
+   * the screen: the old 64px centre text covered the exact spot you aim at.
+   * Newest message sits at the bottom, older ones slide up and fade out.
+   */
   private showBanner(text: string, seconds: number): void {
-    this.bannerText.setText(text).setAlpha(0.9).setScale(0.85);
-    this.tweens.killTweensOf(this.bannerText);
-    this.tweens.add({ targets: this.bannerText, scale: 1, duration: 260, ease: 'Back.easeOut' });
-    this.tweens.add({ targets: this.bannerText, alpha: 0, delay: seconds * 1000, duration: 500 });
+    if (!text) return;
+    const life = Math.max(0.4, seconds) * 1000 + 450;
+    this.toasts.push({ text, life, total: life });
+    // Three lines is enough; anything older is dropped rather than stacked.
+    while (this.toasts.length > 3) this.toasts.shift();
+  }
+
+  /** Advances the corner messages and lays them out bottom-up. */
+  private refreshToasts(dt: number): void {
+    for (const toast of this.toasts) toast.life -= dt * 1000;
+    this.toasts = this.toasts.filter((toast) => toast.life > 0);
+
+    const baseY = GAME_H - 52;
+    const lineHeight = 21;
+    const x = PLAY_RECT.x + 10;
+
+    // Newest at the bottom, walking upward.
+    for (let i = 0; i < this.toasts.length; i++) {
+      const toast = this.toasts[this.toasts.length - 1 - i];
+      let label = this.toastTexts[i];
+      if (!label) {
+        label = this.hud.text(x, baseY - i * lineHeight, '', 16, COLORS.ink, 'left');
+        this.toastTexts.push(label);
+        this.pinHud();
+      }
+      if (label.text !== toast.text) label.setText(toast.text);
+      label.setPosition(x, baseY - i * lineHeight);
+      // Fade only in the last 400ms.
+      const fade = Math.min(1, toast.life / 400);
+      label.setAlpha(0.85 * fade);
+    }
+    for (let i = this.toasts.length; i < this.toastTexts.length; i++) {
+      if (this.toastTexts[i].text !== '') this.toastTexts[i].setText('');
+    }
   }
 
   // ------------------------------------------------------------------ drawing
@@ -779,29 +985,48 @@ export class GameScene extends Phaser.Scene {
 
   private drawHud(): void {
     this.hud.clear();
-    this.hud.line(PLAY_RECT.x, 72, PLAY_RECT.x + PLAY_RECT.w, 72, { width: 1.6, jitter: 1.6 });
-    this.hud.line(PLAY_RECT.x, 75, PLAY_RECT.x + PLAY_RECT.w, 75, { width: 1.1, jitter: 1.4 });
 
-    // v1.3: no more heart rows – health is a bar, and it is the same bar
-    // everybody sees (the tanks draw their own, this is the HUD summary).
-    this.drawHpBar(PLAY_RECT.x + 8, 34, 190, 14, this.p1.hpRatio(), COLORS.player, 'P1');
+    // v1.4: everyone's health in one left-hand column, so a 10-player room is
+    // readable at a glance. Old builds only ever drew p1 and p2, which is why
+    // p3+ had no bar at all.
+    const list = this.scoreboardOrder();
+    const left = PLAY_RECT.x + 10;
+    const top = 26;
+    const rowH = 26;
+    const barW = 118;
+
+    list.forEach((tank, index) => {
+      const y = top + index * rowH;
+      const color = this.colorForSeat(tank.id, tank.team);
+      const alive = tank.alive && !tank.awaitingRespawn;
+      const label = `${this.nameOf(tank.id)}${tank.team >= 0 && this.matchUsesTeams() ? `·${tank.team + 1}队` : ''}`;
+      this.drawHpBar(left, y, barW, 8, alive ? tank.hpRatio() : 0, color, label, index === 0 ? 'L' : 'L', 11);
+      // Kills next to the bar – the number the win condition is checked against.
+      const killText = this.cachedText(`hp${index}.kills`, left + barW + 8, y + 4, 11, 'left');
+      const shown = `${tank.kills}`;
+      if (killText.text !== shown) killText.setText(shown);
+    });
+    // Hide leftover rows from a bigger room.
+    for (let i = list.length; i < this.hpRowCount; i += 1) {
+      const name = this.cachedTexts.get(`hp${i}.name`);
+      if (name?.text) name.setText('');
+      const value = this.cachedTexts.get(`hp${i}.value`);
+      if (value?.text) value.setText('');
+      const kills = this.cachedTexts.get(`hp${i}.kills`);
+      if (kills?.text) kills.setText('');
+    }
+    this.hpRowCount = list.length;
+
     if (this.versus && this.p2) {
-      this.drawHpBar(PLAY_RECT.x + PLAY_RECT.w - 198, 34, 190, 14, this.p2.hpRatio(), COLORS.player2, 'P2');
       this.scoreText.setText(`P1 ${this.p1.kills} : ${this.p2.kills} P2`);
     } else if (this.enemy) {
-      this.drawHpBar(PLAY_RECT.x + PLAY_RECT.w - 198, 34, 190, 14, this.enemy.hpRatio(), COLORS.enemy, 'CPU');
       this.scoreText.setText(`得分  ${String(this.score).padStart(5, '0')}`);
+    } else {
+      this.scoreText.setText(this.scoreboardOrder().length ? '人头' : '');
     }
 
-    // v1.3: your own barrel heat. Only the owner sees this gauge.
+    // Your own barrel heat lives at the bottom and stays private.
     this.drawHeatGauge();
-
-    // Auto-dodge badge.
-    if (!this.versus && this.autoDodge) {
-      const x = GAME_W / 2;
-      this.hud.circle(x - 38, 40, 5, { width: 1.6, color: COLORS.player, jitter: 0.5 });
-      this.hud.fillCircle(x - 38, 40, 2.4, COLORS.player, 0.9);
-    }
     this.hudDirty = false;
   }
 
@@ -816,21 +1041,29 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const right = PLAY_RECT.x + PLAY_RECT.w - 10;
-    const top = 86;
-    const lineHeight = 18;
+    const top = 88;
+    const lineHeight = 19;
     this.roster.forEach((entry, index) => {
       let label = this.noticeLabels[index];
       if (!label) {
-        label = this.hud.text(right, top + index * lineHeight, '', 14, COLORS.ink, 'right');
-        label.setAlpha(0.72);
+        label = this.hud.text(right, top + index * lineHeight, '', 12, COLORS.ink, 'right');
+        label.setAlpha(0.7);
         this.noticeLabels.push(label);
         this.pinHud();
       }
       const tank = this.byId(entry.id);
-      const skill = isSkillId(entry.skill) ? skillById(entry.skill).name : '—';
+      // Skills stay private: you see your own, everyone else is just "已选".
+      const mine = entry.id === this.myId;
+      const skill = mine
+        ? isSkillId(entry.skill)
+          ? skillById(entry.skill).name
+          : '—'
+        : entry.hasSkill || entry.skill
+          ? '已选'
+          : '—';
       const teamSize = this.roster.filter((r) => r.team === entry.team).length;
       const team = teamSize > 1 ? `队${entry.team}` : 'FFA';
-      const kills = tank ? `${tank.kills}杀` : '—';
+      const kills = tank ? `${tank.kills} 杀` : '—';
       label.setText(`${this.nameOf(entry.id)} · ${team} · ${skill} · ${kills}`);
     });
     for (let i = this.roster.length; i < this.noticeLabels.length; i++) {
@@ -838,40 +1071,145 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** One public health bar plus its numeric value – identical on every screen. */
-  private drawHpBar(x: number, y: number, w: number, h: number, ratio: number, color: number, label: string): void {
-    this.hud.fillRect(x, y, w, h, COLORS.white, 0.92);
-    if (ratio > 0) this.hud.fillRect(x + 1.5, y + 1.5, Math.max(0, (w - 3) * ratio), h - 3, color, 0.92);
-    this.hud.rect(x, y, w, h, { width: 1.8, color: COLORS.ink, jitter: 0.7 });
-    const slot = x < GAME_W / 2 ? 'hpA' : 'hpB';
-    const name = this.cachedText(`${slot}.name`, x - 6, y + h / 2, 13, 'right');
+  /**
+   * One public health bar. The name sits above the bar and the number inside
+   * it, so a bar never shares a line with any other element.
+   */
+  private drawHpBar(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    ratio: number,
+    color: number,
+    label: string,
+    slot: 'L' | 'R',
+    size = 13,
+    keyOverride?: string
+  ): void {
+    const onLeft = slot === 'L';
+    this.hud.fillRect(x, y, w, h, COLORS.white, 0.9);
+    if (ratio > 0) {
+      this.hud.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * ratio), h - 2, color, 0.9);
+    }
+    this.hud.rect(x, y, w, h, { width: 1.3, color: COLORS.ink, jitter: 0.5 });
+
+    // A stable key per row keeps the text objects reused between redraws.
+    const key = keyOverride ?? (onLeft ? `hp${label}` : `hpR${label}`);
+    const name = this.cachedText(`${key}.name`, onLeft ? x : x + w, y - 9, size, onLeft ? 'left' : 'right');
     if (name.text !== label) name.setText(label);
-    const value = this.cachedText(`${slot}.value`, x + w + 6, y + h / 2, 13, 'left');
+    const value = this.cachedText(`${key}.value`, onLeft ? x + w - 5 : x + 5, y + h / 2, 10, onLeft ? 'right' : 'left');
     const shown = `${Math.max(0, Math.round(ratio * 100))}`;
     if (value.text !== shown) value.setText(shown);
   }
 
+  /**
+   * v1.4 minimap (FFA and team alike).
+   *
+   * Shows the arena's shape (walls, crates) plus every player: your own dot is
+   * a ring with a white halo, team-mates and enemies keep their team colour.
+   * Pinned to the bottom-right corner, drawn every frame, never scrolls.
+   */
+  private drawMinimap(): void {
+    const g = this.minimap;
+    g.clear();
+    if (!this.layout) return;
+    if (this.phase !== 'playing' && this.phase !== 'ready') return;
+
+    const rect = this.worldRect ?? PLAY_RECT;
+    const boxW = 186;
+    const ratio = rect.h / Math.max(1, rect.w);
+    const boxH = Math.max(78, Math.min(160, boxW * ratio));
+    const x = PLAY_RECT.x + PLAY_RECT.w - boxW - 10;
+    const y = GAME_H - boxH - 14;
+    const sx = (wx: number): number => x + ((wx - rect.x) / rect.w) * boxW;
+    const sy = (wy: number): number => y + ((wy - rect.y) / rect.h) * boxH;
+
+    // Paper card + frame so it reads as its own panel, not part of the arena.
+    g.fillStyle(COLORS.paper, 0.82);
+    g.fillRect(x - 6, y - 6, boxW + 12, boxH + 12);
+    g.lineStyle(1.4, COLORS.ink, 0.55);
+    g.strokeRect(x - 6, y - 6, boxW + 12, boxH + 12);
+
+    // Terrain: walls solid, crates small ticks, so the map shape is recognisable.
+    g.fillStyle(COLORS.ink, 0.72);
+    for (const wall of this.layout.walls) {
+      g.fillRect(sx(wall.x), sy(wall.y), Math.max(1, (wall.w / rect.w) * boxW), Math.max(1, (wall.h / rect.h) * boxH));
+    }
+    g.fillStyle(COLORS.crate, 0.8);
+    for (const crate of this.crates) {
+      if (!crate.alive) continue;
+      g.fillRect(
+        sx(crate.box.x),
+        sy(crate.box.y),
+        Math.max(1.5, (crate.box.w / rect.w) * boxW),
+        Math.max(1.5, (crate.box.h / rect.h) * boxH)
+      );
+    }
+
+    // Pickups: tiny faint dots, so you can see a fight forming around one.
+    g.fillStyle(COLORS.grid, 0.9);
+    for (const p of this.pickups) {
+      if (p.respawn > 0) continue;
+      g.fillCircle(sx(p.x), sy(p.y), 1.6);
+    }
+
+    // Players.
+    const me = this.localTank();
+    for (const tank of this.tanks()) {
+      if (tank.id === 'enemy' && !this.lanMode) continue;
+      const px = sx(tank.x);
+      const py = sy(tank.y);
+      const color = this.colorForSeat(tank.id, tank.team);
+      if (!tank.alive || tank.awaitingRespawn) {
+        g.lineStyle(1.2, color, 0.5);
+        g.strokeCircle(px, py, 3);
+        continue;
+      }
+      if (tank === me) {
+        // Yourself: white halo, then a heading tick so you know where you face.
+        g.fillStyle(COLORS.ink, 0.25);
+        g.fillCircle(px, py, 7.4);
+        g.fillStyle(COLORS.white, 0.98);
+        g.fillCircle(px, py, 6);
+        g.fillStyle(color, 1);
+        g.fillCircle(px, py, 4.2);
+        g.lineStyle(1.8, COLORS.white, 0.95);
+        g.lineBetween(px, py, px + Math.cos(tank.bodyAngle) * 8, py + Math.sin(tank.bodyAngle) * 8);
+      } else {
+        g.fillStyle(COLORS.ink, 0.18);
+        g.fillCircle(px, py, 5.4);
+        g.fillStyle(color, 1);
+        g.fillCircle(px, py, 4);
+      }
+    }
+  }
+
   /** The local player's barrel heat, drawn under the left-hand health bar. */
   private drawHeatGauge(): void {
-    const mine = this.lanMode && this.lanRole === 'guest' ? this.byId(this.myId) ?? this.p2 : this.p1;
+    const mine = this.localTank();
     if (!mine) return;
     const ratio = heatRatio(mine.heat);
     const locked = mine.heat.locked;
+    // Bottom edge, left of the minimap: private, so it never sits in the
+    // shared scoreboard column.
     const x = PLAY_RECT.x + 10;
-    const y = GAME_H - 40;
-    const w = 150;
-    const h = 10;
+    const y = GAME_H - 30;
+    const w = 140;
+    const h = 8;
 
-    this.hud.fillRect(x, y, w, h, COLORS.white, 0.9);
+    this.hud.fillRect(x, y, w, h, COLORS.white, 0.85);
     if (ratio > 0) {
       // Blue while usable, red once the gun is locked out.
       const color = locked ? COLORS.danger : ratio > 0.66 ? 0xd4a72e : 0x2f6fb5;
       this.hud.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * ratio), h - 2, color, 0.95);
     }
-    this.hud.rect(x, y, w, h, { width: 1.3, color: COLORS.ink, jitter: 0.5 });
+    this.hud.rect(x, y, w, h, { width: 1.2, color: COLORS.ink, jitter: 0.5 });
 
-    const label = locked ? `过热 ${lockSecondsLeft(mine.heat).toFixed(1)}s` : `炮管 ${Math.round(ratio * 100)}%`;
-    this.heatText ??= this.hud.text(x + w + 8, y + h / 2, '', 13, COLORS.ink, 'left').setOrigin(0, 0.5).setAlpha(0.85);
+    const label = locked
+      ? `过热 ${lockSecondsLeft(mine.heat).toFixed(1)}s`
+      : `炮管 ${Math.round(ratio * 100)}%（${shotsToOverheat(heatCfg())} 发）`;
+    this.heatText ??= this.hud.text(x + w + 8, y + h / 2, '', 12, COLORS.ink, 'left').setOrigin(0, 0.5).setAlpha(0.8);
     if (this.heatText.text !== label) this.heatText.setText(label);
     this.heatText.setColor(locked ? '#c0392b' : '#26221d');
   }
@@ -913,6 +1251,13 @@ export class GameScene extends Phaser.Scene {
     if (this.hudDirty) this.drawHud();
 
     const guest = this.lanMode && this.lanRole === 'guest';
+
+    if (this.phase === 'lobby') {
+      // Room lobby: nothing simulates, so nobody gets shot while picking sides.
+      this.fx.clear();
+      this.minimap.clear();
+      return;
+    }
 
     if (this.phase === 'ready') {
       this.readyTimer -= dt;
@@ -960,6 +1305,7 @@ export class GameScene extends Phaser.Scene {
     this.updateMatch(dt);
     this.updatePhase(dt);
     this.followCamera(dt);
+    this.refreshToasts(dt);
     this.drawFrame(time);
     this.refreshSkillLabels();
     this.refreshNotice();
@@ -1158,11 +1504,12 @@ export class GameScene extends Phaser.Scene {
     // The gun is bolted to the hull: turning the hull turns the barrel too, at
     // the same instant and by the same amount (this is the v1.3 fix – the old
     // order let the barrel stay put in world space while the hull rotated).
-    tank.turnHull(input.turn * TANK.turnRate * (slow ? 0.8 : 1) * dt);
+    const tune = tuning();
+    tank.turnHull(input.turn * tune.turnRate * (slow ? 0.8 : 1) * dt);
 
     const mul = tank.speedMultiplier(this.time.now);
-    const fwd = (slow ? TANK.tacticalSpeed : TANK.driveSpeed) * mul;
-    const rev = (slow ? TANK.tacticalReverse : TANK.reverseSpeed) * mul;
+    const fwd = (slow ? TANK.tacticalSpeed : tune.driveSpeed) * mul;
+    const rev = (slow ? TANK.tacticalReverse : tune.reverseSpeed) * mul;
     const speed = input.drive > 0 ? fwd : rev;
     const v = input.drive * speed;
     tank.vx = Math.cos(tank.bodyAngle) * v;
@@ -1188,13 +1535,13 @@ export class GameScene extends Phaser.Scene {
       this.fireCd1 -= dt;
       if (input.fire && this.fireCd1 <= 0) {
         this.fire(tank);
-        this.fireCd1 = FIRE_COOLDOWN;
+        this.fireCd1 = tune.fireCooldown;
       }
     } else {
       this.fireCd2 -= dt;
       if (input.fire && this.fireCd2 <= 0) {
         this.fire(tank);
-        this.fireCd2 = FIRE_COOLDOWN;
+        this.fireCd2 = tune.fireCooldown;
       }
     }
   }
@@ -1203,7 +1550,12 @@ export class GameScene extends Phaser.Scene {
 
   /** The skill this seat picked in the menu. */
   private skillFor(tank: Tank): SkillId {
-    return tank.id === 'p2' ? this.skillP2 : this.skillP1;
+    // v1.4: every seat picks its own skill in the lobby, so the roster wins –
+    // but only while a LAN room is open. Solo/versus use the menu choice.
+    const chosen = this.lanMode ? this.roster.find((entry) => entry.id === tank.id)?.skill : undefined;
+    if (chosen && isSkillId(chosen)) return chosen;
+    if (tank.id === 'p2') return this.skillP2;
+    return this.skillP1;
   }
 
   /** Fires the summoner skill, if it is off cooldown. Host-authoritative. */
@@ -1233,7 +1585,7 @@ export class GameScene extends Phaser.Scene {
           tank.y += Math.sin(dir) * best;
           // A blink that lands you in a stream of shells is not a dodge, so the
           // dash carries 0.5s of invulnerability.
-          tank.invulnerableUntil = Math.max(tank.invulnerableUntil, this.time.now + BLINK_PROTECT * 1000);
+          tank.invulnerableUntil = Math.max(tank.invulnerableUntil, this.time.now + tuning().blinkProtect * 1000);
           this.puff(from.x, from.y, def.color, 10);
           this.puff(tank.x, tank.y, def.color, 10);
           this.ring(tank.x, tank.y, def.color);
@@ -1280,11 +1632,15 @@ export class GameScene extends Phaser.Scene {
 
   private resetPickups(levelIndex: number): void {
     const spots = LEVELS[levelIndex]?.pickups ?? [];
-    this.pickups = spots.map((p) =>
+    const t = tuning();
+    this.pickups = spots.map((p, index) =>
       makePickup(
         rollPickupKind(),
         this.layout.rect.x + p.x * this.layout.rect.w,
-        this.layout.rect.y + p.y * this.layout.rect.h
+        this.layout.rect.y + p.y * this.layout.rect.h,
+        // v1.3.1: every pickup starts on cooldown and they come back one by
+        // one, so the opening seconds are not a race for the health pack.
+        t.pickupWarmupStart + index * t.pickupWarmupGap
       )
     );
     for (const p of this.pickups) p.pop = 0;
@@ -1325,7 +1681,7 @@ export class GameScene extends Phaser.Scene {
       tank.shieldUntil = Math.max(tank.shieldUntil, now + def.duration * 1000);
     }
 
-    p.respawn = PICKUP_RESPAWN;
+    p.respawn = tuning().pickupRespawn;
     p.pop = 0;
     this.hudDirty = true;
     this.puff(p.x, p.y, def.color, 12);
@@ -1349,7 +1705,20 @@ export class GameScene extends Phaser.Scene {
   /** Latest input from each remote seat, keyed by id. */
   private remoteInputs = new Map<string, TankInput>();
   /** Seat order + teams, straight from the server (identical for everyone). */
-  private roster: { id: string; team: number; skill: string }[] = [];
+  private roster: {
+    id: string;
+    team: number;
+    skill: string;
+    hasSkill?: boolean;
+    ready?: boolean;
+    name?: string;
+  }[] = [];
+  /** True once the host pressed 开始; until then the arena is a lobby. */
+  matchLive = false;
+  /** Seats the room allows, straight from the server. */
+  private roomCapacity = 6;
+  /** How many teams team-mode currently has (the host can add/remove). */
+  private teamCount = 2;
   /** Big maps scroll; small ones keep the classic fixed view. */
   private worldMode = false;
   private worldRect: PlayRect | null = null;
@@ -1443,6 +1812,44 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * True when a tank-sized circle fits at (x, y) without touching terrain.
+   * Respawn points authored on a coarse grid can sit flush against a wall, and
+   * with a 22px hull that put players *inside* the wall on spawn.
+   */
+  private spawnClear(x: number, y: number, radius: number): boolean {
+    const margin = radius + 3;
+    for (const box of this.layout.walls) {
+      if (circleBox(x, y, margin, box)) return false;
+    }
+    for (const crate of this.crates) {
+      if (crate.alive && circleBox(x, y, margin, crate.box)) return false;
+    }
+    // Keep everyone inside the playable rect too.
+    const r = this.worldRect ?? PLAY_RECT;
+    if (x < r.x + margin || y < r.y + margin || x > r.x + r.w - margin || y > r.y + r.h - margin) return false;
+    return true;
+  }
+
+  /**
+   * Finds a spot near `x,y` a tank actually fits in. Tries the point itself, a
+   * ring of small offsets, then the arena centre as a last resort.
+   */
+  private nudgeSpawn(x: number, y: number, radius: number): { x: number; y: number } {
+    if (this.spawnClear(x, y, radius)) return { x, y };
+    for (let ring = 1; ring <= 6; ring += 1) {
+      const distance = ring * (radius + 6);
+      for (let i = 0; i < 12; i += 1) {
+        const angle = (i / 12) * Math.PI * 2;
+        const nx = x + Math.cos(angle) * distance;
+        const ny = y + Math.sin(angle) * distance;
+        if (this.spawnClear(nx, ny, radius)) return { x: nx, y: ny };
+      }
+    }
+    const r = this.worldRect ?? PLAY_RECT;
+    return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+  }
+
   private resolveTankWalls(tank: Tank): boolean {
     let pushed = false;
     for (let iter = 0; iter < 2; iter++) {
@@ -1481,8 +1888,11 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const dir = tank.turretAngle;
-    const speed = tank.id === 'enemy' ? preset().shellSpeed : BULLET.speedPlayer;
-    const maxBounces = tank.id === 'enemy' ? Math.max(2, preset().maxBounces + 1) : BULLET.maxBounces;
+    const t = tuning();
+    const speed = tank.id === 'enemy' ? preset().shellSpeed : t.bulletSpeed;
+    // v1.3.1: exactly `maxBounces` for everyone. The old "+1 for the AI" meant
+    // the hard preset fired shells that bounced four times.
+    const maxBounces = t.maxBounces;
 
     // Keep the muzzle outside any neighbouring hull so shells never spawn inside a tank.
     let len = 44;
@@ -1619,7 +2029,7 @@ export class GameScene extends Phaser.Scene {
     const decision = this.aiDecision;
     if (decision.angle !== null) {
       const st = steerTo(decision.angle, e.bodyAngle);
-      e.bodyAngle += st.turn * TANK.turnRate * 0.95 * dt;
+      e.bodyAngle += st.turn * tuning().turnRate * 0.95 * dt;
       const v = st.drive * decision.speed;
       e.vx = Math.cos(e.bodyAngle) * v;
       e.vy = Math.sin(e.bodyAngle) * v;
@@ -1640,7 +2050,7 @@ export class GameScene extends Phaser.Scene {
     // outside the arc it swings the hull round instead of shooting sideways.
     if (Math.abs(Phaser.Math.Angle.Wrap(want - e.bodyAngle)) > TURRET_LIMIT - 0.12) {
       const st = steerTo(want, e.bodyAngle);
-      e.turnHull(st.turn * TANK.turnRate * 0.85 * dt);
+      e.turnHull(st.turn * tuning().turnRate * 0.85 * dt);
     }
     e.aimAt(want, this.aiCharge > 0 ? 7 : 2.4, dt);
 
@@ -1830,7 +2240,10 @@ export class GameScene extends Phaser.Scene {
         } else if (ev.kind === 'tank') {
           b.dead = true;
           const victim = this.tanks().find((t) => t.id === ev.id);
-          if (victim) this.damage(victim, b.owner, b.dmg);
+          // v1.3.1: the third argument is the shell's *travel angle*. Passing
+          // the damage multiplier here (as 1.3.0 did) made the hit-zone maths
+          // read a fake bearing, which reversed front and rear damage.
+          if (victim) this.damage(victim, b.owner, Math.atan2(b.vy, b.vx), b.dmg);
           break;
         } else {
           b.dead = true;
@@ -1863,7 +2276,7 @@ export class GameScene extends Phaser.Scene {
    * @param incoming direction the shell was travelling (radians). Omitted for
    *   scripted/effect damage, which then uses the frontal value.
    */
-  private damage(victim: Tank, attacker: TankId, incoming?: number): void {
+  private damage(victim: Tank, attacker: TankId, incoming?: number, multiplier = 1): void {
     if (!victim.alive || victim.awaitingRespawn || this.phase !== 'playing') return;
 
     // Friendly fire and self damage are two separate switches (see rules.ts).
@@ -1879,7 +2292,11 @@ export class GameScene extends Phaser.Scene {
     }
 
     const zone: HitZone = incoming === undefined ? 'front' : hitZone(victim.bodyAngle, incoming);
-    const amount = zoneDamage(zone, 1);
+    const t = tuning();
+    const base = zone === 'front' ? t.dmgFront : zone === 'side' ? t.dmgSide : t.dmgBack;
+    // 狂暴 shells carry a x2 flag; before 1.3.1 this multiplier was dropped on
+    // the floor because it was passed in as the shell's bearing instead.
+    const amount = Math.max(1, Math.round(base * (multiplier > 0 ? multiplier : 1)));
     if (victim.shielded()) {
       // Shield / invulnerability: absorb the hit with a visible, audible block.
       this.ring(victim.x, victim.y, PICKUPS.shield.color);
@@ -1932,7 +2349,7 @@ export class GameScene extends Phaser.Scene {
         this.showBanner('击毁！', 1.2);
       } else {
         this.phase = 'dying';
-        this.phaseTimer = RESPAWN_DELAY;
+        this.phaseTimer = tuning().respawnDelay;
         if (!this.versus) this.showBanner('被击毁！', 1.1);
         if (this.lanMode) this.scheduleRespawn(victim);
       }
@@ -1988,8 +2405,10 @@ export class GameScene extends Phaser.Scene {
       this.respawn(tank);
       return;
     }
-    tank.x = chosen.x;
-    tank.y = chosen.y;
+    // Never materialise inside a wall: the authored points get nudged out.
+    const spot = this.nudgeSpawn(chosen.x, chosen.y, tank.radius);
+    tank.x = spot.x;
+    tank.y = spot.y;
     tank.bodyAngle = chosen.angle;
     tank.turretAngle = chosen.angle;
     tank.turretOffset = 0;
@@ -1997,7 +2416,7 @@ export class GameScene extends Phaser.Scene {
     tank.coldBarrel();
     tank.setAlive(true, this.time.now);
     // Brief protection so a spawn can never be turned into a free kill.
-    tank.invulnerableUntil = this.time.now + RESPAWN_PROTECT * 1000;
+    tank.invulnerableUntil = this.time.now + tuning().respawnProtect * 1000;
     tank.awaitingRespawn = false;
     tank.sync(this.time.now);
     this.ring(tank.x, tank.y, tank.color);
@@ -2236,7 +2655,7 @@ export class GameScene extends Phaser.Scene {
       owner: b.owner,
       color: this.byId(b.owner)?.color ?? COLORS.player,
       bounces: 0,
-      maxBounces: BULLET.maxBounces,
+      maxBounces: tuning().maxBounces,
       life: BULLET.lifetime,
       dead: false,
       dmg: b.dmg ?? 1,
@@ -2273,7 +2692,8 @@ export class GameScene extends Phaser.Scene {
       for (const tank of this.tanks()) tank.destroy();
       this.extras = [];
       this.p2 = undefined;
-      this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
+      const p1Spot = this.nudgeSpawn(this.layout.player.x, this.layout.player.y, TANK.radius);
+    this.p1 = new Tank(this, p1Spot.x, p1Spot.y, this.layout.player.angle, 'p1', 20);
       this.p1.setHp(keepHp.get('p1') ?? VERSUS_HP);
       this.enemy = undefined;
       this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
@@ -2345,6 +2765,7 @@ export class GameScene extends Phaser.Scene {
   private drawFrame(time: number): void {
     const g = this.fx;
     g.clear();
+    this.drawMinimap();
 
     if (this.phase === 'playing' || this.phase === 'ready') {
       if (this.lanMode) {
@@ -2382,7 +2803,7 @@ export class GameScene extends Phaser.Scene {
         // Faint outline + countdown ring so you can plan the next grab.
         g.lineStyle(1.4, COLORS.ink, 0.14);
         g.strokeCircle(p.x, p.y, PICKUP_RADIUS);
-        const k = 1 - p.respawn / PICKUP_RESPAWN;
+        const k = 1 - Math.min(1, p.respawn / Math.max(1, tuning().pickupRespawn));
         g.lineStyle(2, def.color, 0.35);
         g.beginPath();
         g.arc(p.x, p.y, PICKUP_RADIUS + 4, -Math.PI / 2, -Math.PI / 2 + k * Math.PI * 2);
