@@ -269,6 +269,8 @@ const checks: [string, boolean, string?][] = [
   ['the room shows the map and its sync state', html.includes('lobby-map') && html.includes('地图确认')],
   ['the host can re-send the map when an ack is lost', html.includes('重发地图')],
   ['the editor card is not tilted (pointer must line up)', /#card\.wide\s*\{[^}]*transform:\s*none/.test(html)],
+  // v1.5: the minimap labels friend and foe.
+  ['the minimap has a friend/foe legend', html.includes('mm.legend')],
   ['map acknowledgements are part of the protocol', html.includes('map-ack') && html.includes('map-pending')],
   // v1.5: the editor actually opens, paints and saves from the menu.
   ['the menu offers a new-map button', !!mapNewButton],

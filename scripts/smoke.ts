@@ -257,6 +257,11 @@ const settings = (await import('../src/game/settings')).settings;
 check('game scene is active', scene.scene.isActive());
 check('game loop is running', game.loop.running, `frame=${game.loop.frame}`);
 check('solo mode by default', !poke.versus);
+// v1.5: the minimap labels yourself, your team and everyone else.
+const soloMarks = () =>
+  (poke as unknown as { minimapMarks: () => { id: string; kind: string }[] }).minimapMarks();
+check('the solo CPU shows up as an enemy on the minimap', soloMarks().some((m) => m.id === 'enemy' && m.kind === 'foe'), JSON.stringify(soloMarks()));
+check('the minimap never marks a solo run as a team', !soloMarks().some((m) => m.kind === 'mate'), JSON.stringify(soloMarks()));
 check('everyone starts on 100 HP', poke.p1.hp === 100 && poke.p1.maxHp === 100, `hp=${poke.p1.hp}`);
 check('the AI is on the same health pool', poke.enemy?.hp === 100, `hp=${poke.enemy?.hp}`);
 check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.now);
@@ -453,6 +458,35 @@ await wait(900);
 clearInterval(inputTimer);
 const p2Moved = Math.hypot(poke.p2!.x - p2Start.x, poke.p2!.y - p2Start.y);
 check('guest input drives the host-side tank', p2Moved > 10, `moved=${p2Moved.toFixed(1)}px`);
+
+// v1.5: the minimap has to say who is friendly and who is not.
+const marks = () =>
+  (poke as unknown as { minimapMarks: () => { id: string; kind: string }[] }).minimapMarks();
+check('the minimap marks yourself', marks().some((m) => m.kind === 'me'), JSON.stringify(marks()));
+check(
+  'the minimap marks the other seat as an enemy in FFA',
+  marks().some((m) => m.id === 'p2' && m.kind === 'foe'),
+  JSON.stringify(marks())
+);
+check('nobody is marked as a team-mate without teams', !marks().some((m) => m.kind === 'mate'), JSON.stringify(marks()));
+// Team mode: put the guest on our side and the mark has to switch.
+const teamScene = poke as unknown as { setTeamOf: (id: string, team: number) => void };
+settings.match.mode = 'team';
+teamScene.setTeamOf('p2', 0);
+await wait(400);
+check(
+  'a team-mate is marked as friendly',
+  marks().some((m) => m.id === 'p2' && m.kind === 'mate'),
+  JSON.stringify(marks())
+);
+teamScene.setTeamOf('p2', 1);
+await wait(350);
+check(
+  'another team is marked as an enemy again',
+  marks().some((m) => m.id === 'p2' && m.kind === 'foe'),
+  JSON.stringify(marks())
+);
+settings.match.mode = 'ffa';
 
 const guestTank = lastSnap()?.tanks?.find((t: { id: string }) => t.id === 'p2');
 check(

@@ -91,6 +91,16 @@ const COLORS_BY_ID: Record<TankId, number> = {
   enemy: COLORS.enemy,
 };
 
+/** Square rotated 45°, the "enemy" marker on the minimap and its legend. */
+function diamond(cx: number, cy: number, r: number): { x: number; y: number }[] {
+  return [
+    { x: cx, y: cy - r },
+    { x: cx + r, y: cy },
+    { x: cx, y: cy + r },
+    { x: cx - r, y: cy },
+  ];
+}
+
 export class GameScene extends Phaser.Scene {
   private levelIndex = 0;
   private layout!: Layout;
@@ -1241,11 +1251,36 @@ export class GameScene extends Phaser.Scene {
     if (value.text !== shown) value.setText(shown);
   }
 
+  /** Who is who on the minimap: yourself, your own team, everyone else. */
+  minimapMarks(): { id: string; kind: 'me' | 'mate' | 'foe'; x: number; y: number; color: number; dead: boolean; body: number }[] {
+    const me = this.localTank();
+    const teamMode = settings.match.mode === 'team';
+    const marks: { id: string; kind: 'me' | 'mate' | 'foe'; x: number; y: number; color: number; dead: boolean; body: number }[] = [];
+    for (const tank of this.tanks()) {
+      // The solo CPU is an enemy too: a map that only shows yourself is useless.
+      const mate = !!me && teamMode && tank.id !== me.id && tank.team === me.team;
+      marks.push({
+        id: tank.id,
+        kind: tank === me ? 'me' : mate ? 'mate' : 'foe',
+        x: tank.x,
+        y: tank.y,
+        color: this.colorForSeat(tank.id, tank.team),
+        dead: !tank.alive || tank.awaitingRespawn,
+        body: tank.bodyAngle,
+      });
+    }
+    return marks;
+  }
+
   /**
-   * v1.4 minimap (FFA and team alike).
+   * v1.4 minimap (FFA and team alike), v1.5 friend/foe marking.
    *
-   * Shows the arena's shape (walls, crates) plus every player: your own dot is
-   * a ring with a white halo, team-mates and enemies keep their team colour.
+   * Shows the arena's shape (walls, crates) plus every player, with the three
+   * sides drawn as three different things so nobody has to guess:
+   *   - 你自己: 白环 + 朝向刻度
+   *   - 队友:   方块 + 墨线描边（方 = 自己人）
+   *   - 敌人:   菱形 + 墨线描边（尖角 = 对手）
+   * A small legend sits just above the card and follows the current mode.
    * Pinned to the bottom-right corner, drawn every frame, never scrolls.
    */
   private drawMinimap(): void {
@@ -1292,34 +1327,116 @@ export class GameScene extends Phaser.Scene {
       g.fillCircle(sx(p.x), sy(p.y), 1.6);
     }
 
-    // Players.
-    const me = this.localTank();
-    for (const tank of this.tanks()) {
-      if (tank.id === 'enemy' && !this.lanMode) continue;
-      const px = sx(tank.x);
-      const py = sy(tank.y);
-      const color = this.colorForSeat(tank.id, tank.team);
-      if (!tank.alive || tank.awaitingRespawn) {
-        g.lineStyle(1.2, color, 0.5);
-        g.strokeCircle(px, py, 3);
+    // On a map bigger than the screen, outline where the camera is looking.
+    if (this.worldMode) {
+      const view = this.cameras.main.worldView;
+      g.lineStyle(1, COLORS.ink, 0.4);
+      g.strokeRect(
+        sx(Phaser.Math.Clamp(view.x, rect.x, rect.x + rect.w)),
+        sy(Phaser.Math.Clamp(view.y, rect.y, rect.y + rect.h)),
+        Math.max(6, (Math.min(view.width, rect.w) / rect.w) * boxW),
+        Math.max(6, (Math.min(view.height, rect.h) / rect.h) * boxH)
+      );
+    }
+
+    // Players: shape carries the meaning, colour still carries the team/seat.
+    for (const mark of this.minimapMarks()) {
+      const px = sx(mark.x);
+      const py = sy(mark.y);
+      if (mark.dead) {
+        // Dead: the same outline, hollow, so the slot is not silently empty.
+        g.lineStyle(1.2, mark.color, 0.45);
+        if (mark.kind === 'foe') g.strokePoints(diamond(px, py, 4.6), true, true);
+        else if (mark.kind === 'mate') g.strokeRect(px - 3, py - 3, 6, 6);
+        else g.strokeCircle(px, py, 3.4);
         continue;
       }
-      if (tank === me) {
+      if (mark.kind === 'me') {
         // Yourself: white halo, then a heading tick so you know where you face.
         g.fillStyle(COLORS.ink, 0.25);
         g.fillCircle(px, py, 7.4);
         g.fillStyle(COLORS.white, 0.98);
         g.fillCircle(px, py, 6);
-        g.fillStyle(color, 1);
+        g.fillStyle(mark.color, 1);
         g.fillCircle(px, py, 4.2);
         g.lineStyle(1.8, COLORS.white, 0.95);
-        g.lineBetween(px, py, px + Math.cos(tank.bodyAngle) * 8, py + Math.sin(tank.bodyAngle) * 8);
-      } else {
-        g.fillStyle(COLORS.ink, 0.18);
-        g.fillCircle(px, py, 5.4);
-        g.fillStyle(color, 1);
-        g.fillCircle(px, py, 4);
+        g.lineBetween(px, py, px + Math.cos(mark.body) * 8, py + Math.sin(mark.body) * 8);
+        continue;
       }
+      if (mark.kind === 'mate') {
+        // Team-mate: a square. Shape says "same side" — a white collar would
+        // vanish on paper-coloured ground.
+        g.fillStyle(COLORS.ink, 0.16);
+        g.fillRect(px - 6, py - 6, 12, 12);
+        g.fillStyle(mark.color, 1);
+        g.fillRect(px - 4.5, py - 4.5, 9, 9);
+        g.lineStyle(1.4, COLORS.ink, 0.9);
+        g.strokeRect(px - 4.5, py - 4.5, 9, 9);
+        continue;
+      }
+      // Enemy: a diamond with an ink edge — distinct at four pixels wide.
+      const points = diamond(px, py, 5.6);
+      g.fillStyle(COLORS.ink, 0.18);
+      g.fillPoints(diamond(px, py, 7.2), true);
+      g.fillStyle(mark.color, 1);
+      g.fillPoints(points, true);
+      g.lineStyle(1.4, COLORS.ink, 0.9);
+      g.strokePoints(points, true, true);
+    }
+
+    this.drawMinimapLegend(x, y, boxW);
+  }
+
+  /** 你 / 队友 / 敌人, drawn above the minimap card. */
+  private drawMinimapLegend(x: number, y: number, boxW: number): void {
+    const g = this.minimap;
+    const teamMode = settings.match.mode === 'team';
+    const items: { label: string; kind: 'me' | 'mate' | 'foe' }[] = [{ label: '你', kind: 'me' }];
+    if (teamMode) items.push({ label: '队友', kind: 'mate' });
+    items.push({ label: '敌人', kind: 'foe' });
+
+    const size = 10;
+    const charW = size;
+    const shapeR = 3.6;
+    const shapeGap = 6;
+    const slotGap = 12;
+    const slotWidth = (item: { label: string }): number => shapeR * 2 + shapeGap + item.label.length * charW;
+    const total = items.reduce((sum, item) => sum + slotWidth(item), 0) + slotGap * (items.length - 1);
+    const top = y - 22;
+    let cursor = x + boxW - total;
+
+    // A faint paper strip keeps the legend readable over a busy arena.
+    g.fillStyle(COLORS.paper, 0.7);
+    g.fillRect(cursor - 5, top - 7, total + 10, 14);
+
+    const color = this.localTank() ? this.colorForSeat(this.localTank()!.id, this.localTank()!.team) : COLORS.player;
+    items.forEach((item, index) => {
+      const cx = cursor + shapeR;
+      if (item.kind === 'me') {
+        g.fillStyle(COLORS.white, 1);
+        g.fillCircle(cx, top, shapeR);
+        g.lineStyle(1.4, COLORS.ink, 0.8);
+        g.strokeCircle(cx, top, shapeR);
+      } else if (item.kind === 'mate') {
+        g.fillStyle(color, 1);
+        g.fillRect(cx - shapeR, top - shapeR, shapeR * 2, shapeR * 2);
+        g.lineStyle(1.2, COLORS.ink, 0.85);
+        g.strokeRect(cx - shapeR, top - shapeR, shapeR * 2, shapeR * 2);
+      } else {
+        const points = diamond(cx, top, shapeR + 0.8);
+        g.fillStyle(COLORS.enemy, 1);
+        g.fillPoints(points, true);
+        g.lineStyle(1.2, COLORS.ink, 0.9);
+        g.strokePoints(points, true, true);
+      }
+      const text = this.cachedText(`mm.legend.${index}`, cursor + shapeR * 2 + shapeGap, top, size, 'left');
+      if (text.text !== item.label) text.setText(item.label);
+      text.setVisible(true);
+      cursor += slotWidth(item) + slotGap;
+    });
+    // Modes change between matches: hide the slots this one does not use.
+    for (let index = items.length; index < 3; index += 1) {
+      this.cachedTexts.get(`mm.legend.${index}`)?.setVisible(false);
     }
   }
 
