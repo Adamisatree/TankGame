@@ -248,22 +248,64 @@ export function eventToKeyCode(event: KeyboardEvent): number {
   return event.keyCode || event.which || 0;
 }
 
-/** Actions whose key collides with another action in the same group. */
-export function findConflicts(bindings: BindingsFile): { scope: string; code: number }[] {
-  const out: { scope: string; code: number }[] = [];
-  const scan = (scope: string, map: Record<string, number>, shared: number[] = []) => {
-    const seen = new Map<number, string>();
-    for (const [action, code] of Object.entries(map)) {
-      if (!code || shared.includes(code)) continue;
-      if (seen.has(code)) out.push({ scope, code });
-      else seen.set(code, action);
+/** Scopes a conflict can be reported for (`versus` means "both local seats"). */
+export type ConflictScope = BindingContext | 'versus.p1' | 'versus.p2' | 'lan.host' | 'lan.guest' | 'global' | 'versus';
+
+/**
+ * Keys that are bound twice in a way that can actually bite.
+ *
+ * Three things count as a conflict:
+ *  - the same key twice inside one seat map (`前进` and `后退` on W);
+ *  - a seat key that is also a *system* key (`暂停`/`静音`/`自动躲`), because both
+ *    fire off the same keyboard at the same time;
+ *  - the two local-versus seats sharing one key for *different* actions
+ *    (P1 前进 on the key P2 uses to fire). Both seats using the same key for the
+ *    same action — SHIFT slows either tank — is the shipped default, not a bug.
+ *
+ * Keys from scopes that never run together (solo vs. LAN host) are ignored on
+ * purpose: reporting them would train people to ignore the warning.
+ */
+export function findConflicts(bindings: BindingsFile): { scope: ConflictScope; code: number }[] {
+  const out: { scope: ConflictScope; code: number }[] = [];
+  const pushed = new Set<string>();
+  const report = (scope: ConflictScope, code: number): void => {
+    const key = `${scope}:${code}`;
+    if (pushed.has(key)) return;
+    pushed.add(key);
+    out.push({ scope, code });
+  };
+
+  const globalCodes = new Set(Object.values(bindings.global).filter((code) => code > 0));
+
+  const scan = (scope: ConflictScope, map: Record<string, number>, shareWith: Set<number> = new Set()): void => {
+    const seen = new Set<number>();
+    for (const code of Object.values(map)) {
+      if (!code) continue;
+      if (seen.has(code)) report(scope, code);
+      seen.add(code);
+      if (shareWith.has(code)) report(scope, code);
     }
   };
-  scan('单人', bindings.solo);
-  scan('双人 P1', bindings.versus.p1);
-  scan('双人 P2', bindings.versus.p2);
-  scan('联机房主', bindings.lan.host);
-  scan('联机访客', bindings.lan.guest);
-  scan('系统', bindings.global);
+
+  scan('solo', bindings.solo, globalCodes);
+  scan('versus.p1', bindings.versus.p1, globalCodes);
+  scan('versus.p2', bindings.versus.p2, globalCodes);
+  scan('lan.host', bindings.lan.host, globalCodes);
+  scan('lan.guest', bindings.lan.guest, globalCodes);
+  scan('global', bindings.global);
+
+  // Local versus: one keyboard, two players. Same key for the same job is fine;
+  // the same key for two different jobs means one player presses for the other.
+  const p1 = bindings.versus.p1 as unknown as Record<string, number>;
+  const p2 = bindings.versus.p2 as unknown as Record<string, number>;
+  for (const [action, code] of Object.entries(p1)) {
+    if (!code) continue;
+    const other = Object.entries(p2).find(([, c]) => c === code);
+    if (other && other[0] !== action) {
+      report('versus.p1', code);
+      report('versus.p2', code);
+    }
+  }
+
   return out;
 }

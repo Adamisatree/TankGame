@@ -21,16 +21,34 @@ import {
   saveBindings,
   SEAT_ACTIONS,
   type BindingsFile,
+  findConflicts,
+  type ConflictScope,
   type GlobalAction,
   type SeatAction,
 } from './game/keybinds';
 import { DEFAULT_LAN_PORT } from './net/protocol';
-import { CAPACITY_CHOICES, KILL_TARGET_CHOICES, TIME_LIMIT_CHOICES } from './game/rules';
+import {
+  CAPACITY_CHOICES,
+  KILL_TARGET_CHOICES,
+  TIME_LIMIT_CHOICES,
+  ensureMatchEnder,
+  matchHasEnder,
+} from './game/rules';
 import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
 import { bindTuningPanel, tuningPanelHtml } from './ui/tuningPanel';
 import { MapEditor } from './ui/mapEditor';
 import { emptyMap, fromLevel, newMapId, normalizeMapFile, type MapFile } from './maps/format';
-import { deleteMap, exportFileName, exportMapText, getMap, importMapText, listMaps, saveMap } from './maps/store';
+import {
+  MAX_MAPS,
+  deleteMap,
+  exportFileName,
+  exportMapText,
+  getMap,
+  importMapText,
+  isLibraryFull,
+  listMaps,
+  saveMap,
+} from './maps/store';
 import { refreshLevels } from './maps/registry';
 import { APP_VERSION } from './version';
 import './update/types';
@@ -151,7 +169,7 @@ function customMapsPanel(): string {
     <div class="setting-block custom-maps">
       <div class="setting-head">
         <span class="setting-label">自定义地图</span>
-        <span class="setting-hint">${maps.length} 张 · 联机收到过的图都会存在这里</span>
+        <span class="setting-hint">${maps.length}/${MAX_MAPS} 张${isLibraryFull() ? '（已满：先删几张才能再存）' : ''} · 联机收到过的图都会存在这里</span>
       </div>
       ${maps.length ? `<ul class="custom-map-list">${rows}</ul>` : '<p class="lan-hint">还没有自定义地图，点下面按钮画一张。</p>'}
       <div class="custom-map-tools">
@@ -314,14 +332,22 @@ function matchSettings(): string {
             .join('')}
         </div>
       </div>
-      <div class="setting-row">
+      ${
+        m.winCondition === 'time'
+          ? ''
+          : `<div class="setting-row">
         <span class="setting-label">人头目标</span>
         <div class="chip-row">${chipRow('killTarget', KILL_TARGET_CHOICES, (v) => (v === 0 ? '不限' : `${v} 杀`))}</div>
-      </div>
-      <div class="setting-row">
+      </div>`
+      }
+      ${
+        m.winCondition === 'kills'
+          ? ''
+          : `<div class="setting-row">
         <span class="setting-label">时间上限</span>
         <div class="chip-row">${chipRow('timeLimit', TIME_LIMIT_CHOICES, (v) => (v === 0 ? '不限时' : `${v / 60} 分钟`))}</div>
-      </div>
+      </div>`
+      }
       <div class="setting-row">
         <span class="setting-label">伤害开关</span>
         <div class="toggle-row">
@@ -476,16 +502,22 @@ function scopeSeat(scope: BindingScope): { group: Record<SeatAction, number>; pr
   }
 }
 
+/** Conflicts for the current bindings, as `scope -> codes` for quick lookups. */
+function conflictCodes(scope: ConflictScope): Set<number> {
+  return new Set(findConflicts(getBindings()).filter((c) => c.scope === scope).map((c) => c.code));
+}
+
 function keyRowsHtml(): string {
   const b = getBindings();
   const rows: string[] = [];
   const seat = scopeSeat(keyTab);
+  const clash = conflictCodes(keyTab);
   if (seat) {
     for (const action of SEAT_ACTIONS) {
       rows.push(`
         <div class="key-row">
           <span>${ACTION_LABEL[action]}</span>
-          <button type="button" class="key-btn" data-bind-scope="${keyTab}" data-bind-action="${action}">
+          <button type="button" class="key-btn${clash.has(seat.group[action]) ? ' clash' : ''}" data-bind-scope="${keyTab}" data-bind-action="${action}"${clash.has(seat.group[action]) ? ' title="这个键和另一个功能撞了"' : ''}>
             ${keyLabel(seat.group[action])}
           </button>
         </div>`);
@@ -495,13 +527,36 @@ function keyRowsHtml(): string {
       rows.push(`
         <div class="key-row">
           <span>${GLOBAL_LABEL[action]}</span>
-          <button type="button" class="key-btn" data-bind-scope="global" data-bind-action="${action}">
+          <button type="button" class="key-btn${clash.has(b.global[action]) ? ' clash' : ''}" data-bind-scope="global" data-bind-action="${action}"${clash.has(b.global[action]) ? ' title="这个键和另一个功能撞了"' : ''}>
             ${keyLabel(b.global[action])}
           </button>
         </div>`);
     }
   }
   return rows.join('');
+}
+
+const CONFLICT_LABEL: Record<string, string> = {
+  solo: '单人闯关',
+  'versus.p1': '双人 P1',
+  'versus.p2': '双人 P2',
+  versus: '双人 P1/P2',
+  'lan.host': '联机房主',
+  'lan.guest': '联机访客',
+  global: '系统',
+};
+
+/** One line above the footer: which keys are bound twice, and where. */
+function keyWarnHtml(): string {
+  const list = findConflicts(getBindings());
+  if (!list.length) return `<div class="key-warn ok">没有按键冲突</div>`;
+  const parts = list.map((c) => `${CONFLICT_LABEL[c.scope] ?? c.scope} 的 ${keyLabel(c.code)}`);
+  return `<div class="key-warn">⚠ 这些键被绑了两次：${parts.join('；')}（同一个键会同时触发两个功能）</div>`;
+}
+
+function refreshKeyWarn(root: HTMLElement): void {
+  const box = root.querySelector<HTMLElement>('[data-keywarn]');
+  if (box) box.innerHTML = keyWarnHtml();
 }
 
 function setBinding(scope: BindingScope, action: string, code: number): void {
@@ -548,6 +603,7 @@ function bindKeyEditor(root: HTMLElement): void {
     sound.ui();
     const rows = root.querySelector('.key-rows');
     if (rows) rows.innerHTML = keyRowsHtml();
+    refreshKeyWarn(root);
     bindKeyRows(root);
     render(state);
   });
@@ -573,6 +629,10 @@ function bindKeyRows(root: HTMLElement): void {
         }
         setBinding(scope, action, code);
         btn.textContent = keyLabel(code);
+        const rows = root.querySelector('.key-rows');
+        if (rows) rows.innerHTML = keyRowsHtml();
+        refreshKeyWarn(root);
+        bindKeyRows(root);
         sound.ui();
         // Re-render the footer + start card hints with the new key.
         refreshControlHints();
@@ -600,6 +660,7 @@ function keyEditor(): string {
         ).join('')}
       </div>
       <div class="key-rows">${keyRowsHtml()}</div>
+      <div data-keywarn>${keyWarnHtml()}</div>
       <div class="key-foot">
         <span>每个模式各有一套键位，改了立刻生效（下一局开始）。Esc 取消。</span>
         <button type="button" data-keyreset>恢复默认</button>
@@ -742,6 +803,9 @@ function bindSettings(root: HTMLElement): void {
         settings.match.winCondition = raw === 'kills' || raw === 'time' ? raw : 'both';
       else if (key === 'friendlyFire' || key === 'selfDamage') settings.match[key] = raw === '1';
       else settings.match[key] = Number(raw);
+      // A rule set with no end condition is not a rule set: re-arm the one the
+      // player just switched off.
+      settings.match = ensureMatchEnder(settings.match);
       sound.ui();
       render(state);
     });
@@ -982,7 +1046,10 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
             .join('')}
         </div>
       </div>
-      <div class="setting-row">
+      ${
+        state.match.winCondition === 'time'
+          ? ''
+          : `<div class="setting-row">
         <span class="setting-label">人头目标</span>
         <div class="chip-row">
           ${KILL_TARGET_CHOICES.map(
@@ -992,8 +1059,12 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
               }</button>`
           ).join('')}
         </div>
-      </div>
-      <div class="setting-row">
+      </div>`
+      }
+      ${
+        state.match.winCondition === 'kills'
+          ? ''
+          : `<div class="setting-row">
         <span class="setting-label">时间上限</span>
         <div class="chip-row">
           ${TIME_LIMIT_CHOICES.map(
@@ -1003,7 +1074,8 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
               }</button>`
           ).join('')}
         </div>
-      </div>
+      </div>`
+      }
       <div class="setting-row">
         <span class="setting-label">伤害开关</span>
         <div class="toggle-row">
@@ -1174,7 +1246,12 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
   });
 
   const setMatch = (patch: Partial<typeof state.match>) => {
-    state.match = { ...state.match, ...patch };
+    const next = ensureMatchEnder({ ...state.match, ...patch });
+    if (!matchHasEnder(next)) {
+      window.alert('这样设置这一局永远不会结束：请至少留一个结束条件（人头目标或时间上限）。');
+      return;
+    }
+    state.match = next;
     scene.applyRoomConfig(state.match);
     repaint();
   };
@@ -1226,6 +1303,10 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
 
   root.querySelector<HTMLButtonElement>('#lobby-start')?.addEventListener('click', () => {
     sound.ui();
+    if (!matchHasEnder(state.match)) {
+      window.alert('这一局没有结束条件（人头和时间都不限），先把其中一个打开。');
+      return;
+    }
     // Everyone has to be ready – the host waits instead of yanking people in.
     const waiting = state.roster.filter((seat) => !seat.ready && !seat.host);
     if (waiting.length) {

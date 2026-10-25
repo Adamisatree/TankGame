@@ -351,6 +351,31 @@ check('key labels are readable', keyLabel(87) === 'W' && keyLabel(32) === 'ç©ºæ 
 saveBindings({ ...defaults, solo: { ...defaults.solo, fire: 74 } });
 check('a rebind survives a save/load round trip', getBindings().solo.fire === 74);
 check('rebinding did not disturb other actions', getBindings().solo.up === defaults.solo.up);
+// v1.5.1 / E1: a seat key that is also a system key used to slip through.
+const clashSystem = {
+  ...defaults,
+  solo: { ...defaults.solo, up: defaults.global.pause },
+};
+check('a driving key that is also a system key is a conflict',
+  findConflicts(clashSystem as never).some((c) => c.scope === 'solo' && c.code === defaults.global.pause),
+  JSON.stringify(findConflicts(clashSystem as never)));
+// v1.5.1 / E1: two local seats on one keyboard must not share a key.
+const clashSeats = {
+  ...defaults,
+  versus: { p1: { ...defaults.versus.p1 }, p2: { ...defaults.versus.p2, fire: defaults.versus.p1.up } },
+};
+const seatClash = findConflicts(clashSeats as never);
+check('the two local seats sharing a key is a conflict',
+  seatClash.some((c) => c.scope === 'versus.p1') && seatClash.some((c) => c.scope === 'versus.p2'),
+  JSON.stringify(seatClash));
+// v1.5.1 / E1: scopes that never run together stay quiet.
+const crossScope = {
+  ...defaults,
+  lan: { host: { ...defaults.lan.host }, guest: { ...defaults.lan.guest, up: defaults.versus.p2.up } },
+};
+check('solo and LAN keys may overlap without a warning', findConflicts(crossScope as never).length === 0,
+  JSON.stringify(findConflicts(crossScope as never)));
+
 saveBindings({ ...defaults, solo: { ...defaults.solo, up: 999 } } as never);
 check('out-of-range key codes are rejected', getBindings().solo.up === defaults.solo.up);
 resetBindings();

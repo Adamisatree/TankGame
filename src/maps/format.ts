@@ -183,20 +183,16 @@ function normalizeSpawn(raw: unknown): MapSpawn | null {
  */
 export function normalizeMapFile(raw: unknown): MapFile {
   const input = (raw ?? {}) as Partial<MapFile>;
-  const sizeId = MAP_SIZES.find((entry) => entry.w === input.size?.w && entry.h === input.size?.h);
   const size = {
     w: Math.max(640, Math.min(6000, Math.round(num(input.size?.w, 1280)))),
     h: Math.max(480, Math.min(6000, Math.round(num(input.size?.h, 720)))),
   };
-  void sizeId;
 
   const walls = Array.isArray(input.walls) ? input.walls.map(normalizeBox).filter((b): b is MapBox => !!b) : [];
   const crates = Array.isArray(input.crates) ? input.crates.map(normalizeBox).filter((b): b is MapBox => !!b) : [];
   const pickups = Array.isArray(input.pickups)
     ? input.pickups.map(normalizePoint).filter((p): p is MapPoint => !!p)
-    : Array.isArray(input.pickups)
-      ? []
-      : [];
+    : [];
   const spawns = Array.isArray(input.spawns) ? input.spawns.map(normalizeSpawn).filter((s): s is MapSpawn => !!s) : [];
   // A playable map needs two ends even if the file forgot them. Keep whatever
   // was there and top it up, so a half-written file still opens as drawn.
@@ -266,8 +262,10 @@ const flip = (b: MapBox, mode: MirrorMode): MapBox => {
  */
 export function applyMirror(map: MapFile, mode: MirrorMode = map.mirror): MapFile {
   if (mode === 'none') return map;
-  const seen = new Set<string>();
-  const expand = <T extends MapBox>(list: T[]): T[] => {
+  // One dedupe set per list: a crate drawn on top of a wall is *not* a duplicate
+  // of it, and sharing a set used to drop that crate from the played map while
+  // the editor still showed it.
+  const expand = <T extends MapBox>(list: T[], seen: Set<string>): T[] => {
     const out: T[] = [];
     for (const item of list) {
       for (const candidate of [item, { ...item, ...flip(item, mode) }]) {
@@ -282,8 +280,8 @@ export function applyMirror(map: MapFile, mode: MirrorMode = map.mirror): MapFil
   return {
     ...map,
     mirror: mode,
-    walls: expand(map.walls),
-    crates: expand(map.crates),
+    walls: expand(map.walls, new Set<string>()),
+    crates: expand(map.crates, new Set<string>()),
     pickups: map.pickups.flatMap((point) => {
       const mirrored = { x: round3(1 - point.x), y: round3(1 - point.y) };
       if (mode === 'flipX') mirrored.y = point.y;
@@ -371,6 +369,15 @@ export function validateMap(map: MapFile): MapIssue[] {
   if (map.schemaVersion > MAP_SCHEMA_VERSION) {
     push('warn', 'newer', `这张图是更新版本（格式 v${map.schemaVersion}）存的，可能有些内容认不出来。`);
   }
+  // The format promises that `minAppVersion` is enforced, so enforce it. A build
+  // with no injected version (unit tests, `tsx`) never rejects anything.
+  if (APP_VERSION !== '0.0.0' && map.minAppVersion && !versionAtLeast(APP_VERSION, map.minAppVersion)) {
+    push(
+      'error',
+      'min-app',
+      `这张图需要 ${map.minAppVersion} 或更新的版本才能打开（当前 ${APP_VERSION}）。`
+    );
+  }
   if (map.pickups.length === 0) push('warn', 'no-pickups', '没有道具点，对局会少一种变数。');
 
   return issues;
@@ -378,7 +385,36 @@ export function validateMap(map: MapFile): MapIssue[] {
 
 export const mapHasErrors = (issues: MapIssue[]): boolean => issues.some((issue) => issue.severity === 'error');
 
+/**
+ * `value >= min` for dotted versions ("1.5.1"). Missing parts count as 0 and a
+ * `-beta` style suffix is ignored, which is all a map's `minAppVersion` needs.
+ */
+export function versionAtLeast(value: string, min: string): boolean {
+  const parts = (text: string): number[] =>
+    String(text)
+      .split('.')
+      .map((chunk) => parseInt(chunk, 10))
+      .map((n) => (Number.isFinite(n) ? n : 0));
+  const a = parts(value);
+  const b = parts(min);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const left = a[i] ?? 0;
+    const right = b[i] ?? 0;
+    if (left !== right) return left > right;
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------ conversions
+
+/** Screen proportions the un-scrolled play rectangle has. */
+const VIEW_ASPECT = 16 / 9;
+
+/** Does this map need a scrolling camera instead of being fitted to the screen? */
+export function needsWorld(size: { w: number; h: number }): boolean {
+  if (size.w > 1400 || size.h > 1400) return true;
+  return Math.abs(size.w / size.h / VIEW_ASPECT - 1) > 0.02;
+}
 
 /** Map file → engine level (what `buildLayout` and the AI consume). */
 export function toLevel(map: MapFile): Level {
@@ -402,8 +438,10 @@ export function toLevel(map: MapFile): Level {
     enemyGrace: 2.4,
     enemyReload: 1.9,
     // A custom map twice the screen size scrolls the camera, just like the
-    // built-in multiplayer arenas.
-    ...(map.size.w > 1400 ? { world: { w: map.size.w, h: map.size.h } } : {}),
+    // built-in multiplayer arenas. A map with different proportions also needs
+    // one: without `world` the normalised geometry is projected onto the 16:9
+    // play rectangle, which stretched a tall map thin (C2).
+    ...(needsWorld(map.size) ? { world: { w: map.size.w, h: map.size.h } } : {}),
     ...(map.seats ? { seats: map.seats } : {}),
   };
 }

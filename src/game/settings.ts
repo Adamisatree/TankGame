@@ -9,10 +9,6 @@ export interface DifficultyPreset {
   key: Difficulty;
   label: string;
   blurb: string;
-  /** Lives for the human player in solo. */
-  lives: number;
-  /** Hits needed to destroy the AI tank. */
-  enemyLives: number;
   /** Seconds between AI shots (before per-level scaling). */
   reload: number;
   /** Seconds the AI telegraphs its shot with a dashed line. */
@@ -36,8 +32,6 @@ export const DIFFICULTIES: Record<Difficulty, DifficultyPreset> = {
     key: 'easy',
     label: '轻松',
     blurb: '敌人慢 · 少反弹 · 偶尔才躲',
-    lives: 5,
-    enemyLives: 3,
     reload: 3.6,
     telegraph: 1.0,
     maxBounces: 1,
@@ -51,8 +45,6 @@ export const DIFFICULTIES: Record<Difficulty, DifficultyPreset> = {
     key: 'normal',
     label: '标准',
     blurb: '敌人会打反弹 · 会躲',
-    lives: 4,
-    enemyLives: 3,
     reload: 2.6,
     telegraph: 0.85,
     maxBounces: 2,
@@ -66,8 +58,6 @@ export const DIFFICULTIES: Record<Difficulty, DifficultyPreset> = {
     key: 'hard',
     label: '困难',
     blurb: '敌人精准 · 多反弹 · 很会躲',
-    lives: 3,
-    enemyLives: 3,
     reload: 1.9,
     telegraph: 0.65,
     maxBounces: 3,

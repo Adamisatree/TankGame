@@ -299,6 +299,25 @@ const allDead = await downloadWithFallback(`${base}/good`, join(workDir, 'never.
 });
 check('all-dead falls through to a clean failure', !allDead.ok && allDead.errors.length === 2);
 
+// v1.5.1 / D2: a download without a digest must report itself as unverified,
+// so the panel can ask instead of installing silently.
+const unchecked = await downloadWithFallback(`${base}/good`, join(workDir, 'unchecked.exe'), {
+  candidates: [{ id: 'good', label: 'good', url: `${base}/good` }],
+});
+check('a download with a digest reports verified', deadFirst.verified === true);
+check('a download without a digest reports unverified', unchecked.ok && unchecked.verified === false);
+
+// v1.5.1 / D6: probing the installer path must stop after the first chunk —
+// a range-ignoring mirror would otherwise push the whole 160 MB.
+const probeStart = Date.now();
+const ranged = await measureLatency(`${base}/good`, {
+  timeoutMs: 3000,
+  headers: { range: 'bytes=0-1023' },
+  firstByteOnly: true,
+});
+check('a first-byte probe answers', typeof ranged === 'number' && ranged >= 0);
+check('a first-byte probe does not read the whole file', Date.now() - probeStart < 2000);
+
 const slow = await measureLatency(`${base}/slow`, { timeoutMs: 300 });
 check('latency probe gives up on a stalled mirror', slow === null);
 const fast = await measureLatency(`${base}/good`, { timeoutMs: 3000 });

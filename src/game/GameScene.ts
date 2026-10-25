@@ -25,6 +25,7 @@ import {
   chooseRespawn,
   evaluateMatch,
   hitZone,
+  matchHasEnder,
   type HitZone,
   type MatchResult,
   type RespawnCandidate,
@@ -166,8 +167,15 @@ export class GameScene extends Phaser.Scene {
   // Input: one Phaser Key per bound action, keyed by "<prefix>.<action>".
   private keys = new Map<string, Phaser.Input.Keyboard.Key>();
 
-  private fireCd1 = 0;
-  private fireCd2 = 0;
+  /**
+   * Trigger cooldown, per tank.
+   *
+   * v1.5.1: this used to be two shared numbers (`fireCd1` for p1 and *every*
+   * seat from p3 up, `fireCd2` for p2), so in a room of four the whole group
+   * drained one cooldown together: the first seat in the list fired at N× the
+   * intended rate and everybody behind it never got a shot off.
+   */
+  private fireCd = new Map<string, number>();
 
   // ---- LAN
   private lan: LanClient | null = null;
@@ -198,6 +206,11 @@ export class GameScene extends Phaser.Scene {
   private lastLobby: { mode: 'ffa' | 'team'; host: string | null } | null = null;
   /** LAN: tanks waiting for their respawn, keyed by seat id (ms timestamp). */
   private respawnQueue = new Map<string, number>();
+  /**
+   * A seat that just vanished: we give it a few seconds to reconnect (the
+   * server keeps its seat for two minutes) before calling it a surrender.
+   */
+  private leftSeat: { id: string; at: number } | null = null;
   /** Host: a start was requested while guests were still confirming the map. */
   private startPending = false;
   /** Host: hash of the map currently cached in the room (avoids re-pushing). */
@@ -356,17 +369,26 @@ export class GameScene extends Phaser.Scene {
         this.modeText.setText(this.modeLabel());
       },
       onSurrender: (by) => this.handleSurrender(by),
-      onPeer: (state) => {
+      onPeer: (state, id) => {
         this.showBanner(state === 'joined' ? '对手已加入！' : '对手离开了', 1.4);
-        // A dropped opponent counts as surrendering, so the match ends cleanly
-        // instead of freezing on a snapshot that will never arrive.
-        if (state === 'left' && this.phase === 'playing') this.handleSurrender(this.lanRole === 'host' ? 'p2' : 'p1');
+        // A dropped opponent still ends the match, but not instantly: the server
+        // keeps the seat for two minutes, so a one-second Wi-Fi hiccup (or an
+        // alt-tab on a laptop) must not throw the match away. The host referees
+        // a guest's drop; a guest only has to act when it was the host's socket.
+        if (state === 'left' && this.phase === 'playing' && id && (this.lanRole === 'host' || id === 'p1')) {
+          this.leftSeat = { id, at: this.time.now + 4000 };
+        }
         if (state === 'joined') {
+          this.leftSeat = null;
           sound.ui();
           // v1.4: a new player lands in the lobby. The host decides when the
           // match starts, so joining never yanks anyone into a firefight.
-          this.bullets = [];
-          this.particles = [];
+          // Only clear the arena outside a match: a *reconnecting* guest must
+          // not wipe the shells everyone is currently dodging.
+          if (this.phase === 'lobby' || this.phase === 'ready') {
+            this.bullets = [];
+            this.particles = [];
+          }
         }
       },
       onInput: (input, from) => {
@@ -475,6 +497,20 @@ export class GameScene extends Phaser.Scene {
       },
       onSnapshot: (snap) => this.applySnapshot(snap),
       onHostMessage: (msg) => {
+        if (msg.t === 'result') {
+          // The host owns the verdict; this machine just renders the same card.
+          this.finishMatch({
+            winners: msg.winners ?? [],
+            draw: !!msg.draw,
+            reason: msg.reason ?? 'kills',
+            scoreboard: msg.scoreboard ?? [],
+            elapsed: msg.elapsed ?? this.matchElapsed,
+            mode: msg.mode,
+            teams: msg.teams,
+            surrenderBy: msg.surrenderBy,
+          });
+          return;
+        }
         if (msg.t === 'restart' || msg.t === 'start') {
           // Prefer the map id: index numbers only line up when both machines
           // hold the same custom maps in the same order.
@@ -646,6 +682,11 @@ export class GameScene extends Phaser.Scene {
   /** Host: start the match for the whole room. */
   startRoomMatch(): void {
     if (this.lanRole !== 'host' || !this.lan) return;
+    // A match nobody can win is a bug, not a setting: refuse to start one.
+    if (!matchHasEnder(settings.match)) {
+      this.showBanner('没有结束条件（人头和时间都不限），先在房间面板里开一个', 2.4);
+      return;
+    }
     // Every team needs somebody; the server enforces it too, this is the fast path.
     if (settings.match.mode === 'team') {
       const empty = this.emptyTeams();
@@ -1020,6 +1061,8 @@ export class GameScene extends Phaser.Scene {
     this.roster = players;
     if (!this.lanMode) return;
     const wanted = new Set(players.map((p) => p.id));
+    // A seat that is back in the roster is not a surrender any more.
+    if (this.leftSeat && wanted.has(this.leftSeat.id)) this.leftSeat = null;
     for (const tank of [...this.extras, this.p2].filter((t): t is Tank => !!t)) {
       if (!wanted.has(tank.id)) this.removeRemoteTank(tank.id);
     }
@@ -1148,8 +1191,7 @@ export class GameScene extends Phaser.Scene {
     this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
     this.bullets = [];
     this.particles = [];
-    this.fireCd1 = 0;
-    this.fireCd2 = 0;
+    this.fireCd.clear();
 
     this.aiThinkTimer = 0;
     this.aiDecision = { angle: null, drive: 0, speed: 0, dodging: false };
@@ -1836,21 +1878,37 @@ export class GameScene extends Phaser.Scene {
     // Walking out of the room before the start is not a surrender; the roster
     // broadcast already updates the seat list.
     if (this.phase === 'lobby') return;
-    this.matchOver = true;
-    this.phase = 'matchOver';
-    this.paused = false;
-    const winners = by === 'p1' ? ['p2'] : ['p1'];
-    this.emitOverlay({
-      kind: 'matchOver',
-      reason: 'surrender',
-      scoreboard: this.resultLines(),
+    this.leftSeat = null;
+    const scores = this.resultLines();
+    const quitter = scores.find((line) => line.id === by);
+    const teamMode = settings.match.mode === 'team';
+    // Everyone except the quitter wins – and in team mode, everyone not on the
+    // quitter's side (a ten-seat room is not "p1 vs p2" any more).
+    const winners = scores
+      .filter((line) => line.id !== by && (!teamMode || !quitter || line.team !== quitter.team))
+      .map((line) => line.id);
+    const payload = {
       winners,
       draw: false,
+      reason: 'surrender' as const,
+      scoreboard: scores,
+      elapsed: this.matchElapsed,
+      mode: settings.match.mode,
+      teams: this.teamCount,
       surrenderBy: by,
-      ...this.resultExtras(winners, false),
-    });
+    };
+    if (this.lanMode && this.lanRole === 'host') this.lan?.send({ t: 'result', ...payload });
+    this.paused = false;
+    this.finishMatch(payload);
     this.showBanner(`${this.nameOf(by)} 已经投降`, 2.4);
-    sound[this.localSeatId() === by ? 'lose' : 'win']();
+  }
+
+  /** A seat vanished mid-match: wait for a reconnect, then call it a surrender. */
+  private checkLeftSeat(): void {
+    if (!this.leftSeat || this.time.now < this.leftSeat.at) return;
+    const id = this.leftSeat.id;
+    this.leftSeat = null;
+    this.handleSurrender(id);
   }
 
   private nameOf(id: string): string {
@@ -1865,23 +1923,56 @@ export class GameScene extends Phaser.Scene {
   /** Checks the kill target / clock and closes the match when it is decided. */
   private checkMatchEnd(): void {
     if (!this.lanMode || this.matchOver || this.phase !== 'playing') return;
+    // Only the host is the referee. Two machines running the win check on their
+    // own numbers is how a guest ended up "平局" while the host had a winner.
+    if (this.lanRole !== 'host') return;
     const result = this.matchResult();
     if (result.kind === 'running') return;
+    const winners = result.kind === 'win' ? result.winners : [];
+    const draw = result.kind === 'draw';
+    const scoreboard = this.resultLines();
+    const payload = {
+      winners,
+      draw,
+      reason: (draw ? 'time' : result.reason) as 'kills' | 'time' | 'surrender',
+      scoreboard,
+      elapsed: this.matchElapsed,
+      mode: settings.match.mode,
+      teams: this.teamCount,
+    };
+    // Tell the room first, so every seat shows the same card at the same time.
+    this.lan?.send({ t: 'result', ...payload });
+    this.finishMatch(payload);
+  }
+
+  /** Turns a verdict (host-computed, or relayed by the host) into the result card. */
+  private finishMatch(payload: {
+    winners: string[];
+    draw: boolean;
+    reason: 'kills' | 'time' | 'surrender';
+    scoreboard: { id: string; name: string; team: number; kills: number; deaths: number; hp: number }[];
+    elapsed: number;
+    mode?: 'ffa' | 'team';
+    teams?: number;
+    surrenderBy?: string;
+  }): void {
+    if (this.matchOver) return;
     this.matchOver = true;
     this.phase = 'matchOver';
-    const scoreboard = this.resultLines();
+    this.leftSeat = null;
     // Whatever ended it (kills, clock, a wipe), every seat gets a card that says
     // 你赢了 / 你输了 from its own point of view.
-    const winners = result.kind === 'win' ? result.winners : [];
     this.emitOverlay({
       kind: 'matchOver',
-      reason: result.kind === 'draw' ? 'time' : result.reason,
-      scoreboard,
-      winners,
-      draw: result.kind === 'draw',
-      ...this.resultExtras(winners, result.kind === 'draw'),
+      reason: payload.reason,
+      scoreboard: payload.scoreboard,
+      winners: payload.winners,
+      draw: payload.draw,
+      surrenderBy: payload.surrenderBy,
+      ...this.resultExtras(payload.winners, payload.draw),
+      elapsed: payload.elapsed,
     });
-    const verdict = this.resultExtras(winners, result.kind === 'draw').verdict;
+    const verdict = this.resultExtras(payload.winners, payload.draw).verdict;
     if (verdict === 'draw') sound.ping();
     else sound[verdict === 'win' ? 'win' : 'lose']();
   }
@@ -1890,8 +1981,11 @@ export class GameScene extends Phaser.Scene {
   private updateMatch(dt: number): void {
     if (!this.lanMode || this.matchOver) return;
     if (this.phase !== 'playing') return;
-    this.matchElapsed += dt;
-    this.checkMatchEnd();
+    if (this.lanRole === 'host') {
+      this.matchElapsed += dt;
+      this.checkMatchEnd();
+    }
+    this.checkLeftSeat();
   }
 
   private togglePause(): void {
@@ -2039,19 +2133,14 @@ export class GameScene extends Phaser.Scene {
 
     this.separateTanks();
 
-    const seat = tank.id === 'p2' ? 2 : 1;
-    if (seat === 1) {
-      this.fireCd1 -= dt;
-      if (input.fire && this.fireCd1 <= 0) {
-        this.fire(tank);
-        this.fireCd1 = tune.fireCooldown;
-      }
+    // Per-tank trigger cooldown (see the field comment). A shot that never left
+    // the barrel – muzzle buried in a wall, gun heat-locked – does not eat it.
+    const left = (this.fireCd.get(tank.id) ?? 0) - dt;
+    if (input.fire && left <= 0) {
+      if (this.fire(tank)) this.fireCd.set(tank.id, tune.fireCooldown);
+      else this.fireCd.set(tank.id, 0);
     } else {
-      this.fireCd2 -= dt;
-      if (input.fire && this.fireCd2 <= 0) {
-        this.fire(tank);
-        this.fireCd2 = tune.fireCooldown;
-      }
+      this.fireCd.set(tank.id, left);
     }
   }
 
@@ -2075,8 +2164,13 @@ export class GameScene extends Phaser.Scene {
       sound.ping();
       return false;
     }
+    if (def.id === 'weaken' && !this.weakenTarget(tank)) {
+      // Nothing legal to hit (a solo run with the CPU already down): do not
+      // burn the cooldown on a skill that cannot do anything.
+      sound.ping();
+      return false;
+    }
     tank.skillReadyAt = this.time.now + def.cooldown * 1000;
-    this.netEvent('skill', tank.x, tank.y, { id: tank.id, color: def.color });
 
     switch (def.id) {
       case 'blink': {
@@ -2112,12 +2206,14 @@ export class GameScene extends Phaser.Scene {
         this.puff(tank.x, tank.y, def.color, 12);
         break;
       case 'weaken': {
-        const other = this.tanks().find((t) => t !== tank && t.id !== 'enemy');
-        if (other) {
-          other.slowUntil = Math.max(other.slowUntil, this.time.now + def.duration * 1000);
-          this.ring(other.x, other.y, def.color);
-          this.netEvent('skill', other.x, other.y, { id: other.id, color: def.color });
-        }
+        // Nearest target we are actually allowed to hurt. The old version took
+        // `tanks().find(t => t !== tank && t.id !== 'enemy')`, which did nothing
+        // at all in solo and slowed a random – often friendly – player in a room.
+        const target = this.weakenTarget(tank);
+        if (!target) return false;
+        target.slowUntil = Math.max(target.slowUntil, this.time.now + def.duration * 1000);
+        this.ring(target.x, target.y, def.color);
+        this.netEvent('skill', target.x, target.y, { id: target.id, color: def.color });
         break;
       }
     }
@@ -2126,6 +2222,23 @@ export class GameScene extends Phaser.Scene {
     sound.ui();
     this.hudDirty = true;
     return true;
+  }
+
+  /** Nearest tank that `weaken` may legally slow (see `canDamage`). */
+  private weakenTarget(tank: Tank): Tank | null {
+    const me = { id: tank.id, team: tank.team, alive: tank.alive };
+    let best: Tank | null = null;
+    let bestDist = Infinity;
+    for (const other of this.tanks()) {
+      if (other === tank || !other.alive) continue;
+      if (!canDamage(me, { id: other.id, team: other.team, alive: other.alive }, settings.match)) continue;
+      const d = Math.hypot(other.x - tank.x, other.y - tank.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = other;
+      }
+    }
+    return best;
   }
 
   /** Free-space test used by blink and by pickup placement. */
@@ -2387,16 +2500,16 @@ export class GameScene extends Phaser.Scene {
 
   // ------------------------------------------------------------------ firing
 
-  private fire(tank: Tank): void {
-    if (!tank.alive) return;
+  private fire(tank: Tank): boolean {
+    if (!tank.alive) return false;
     // Barrel heat: you can tap all day, but holding the trigger cooks the gun.
     if (!tank.canShoot()) {
-      if (tank === this.p1 && this.time.now - this.lastHeatWarn > 700) {
+      if (tank === this.localTank() && this.time.now - this.lastHeatWarn > 700) {
         this.lastHeatWarn = this.time.now;
         this.showBanner('炮管过热，等它冷却', 0.9);
         sound.ping();
       }
-      return;
+      return false;
     }
     const dir = tank.turretAngle;
     const t = tuning();
@@ -2425,7 +2538,7 @@ export class GameScene extends Phaser.Scene {
     if (len < 6) {
       // Hull is right against the wall and pointing into it: dry click, no ghost shell.
       sound.ping();
-      return;
+      return false;
     }
 
     const m = tank.muzzle(len, dir);
@@ -2433,13 +2546,15 @@ export class GameScene extends Phaser.Scene {
     if (!tank.canShoot()) {
       // This shot was the one that filled the bar.
       this.hudDirty = true;
-      if (tank === this.p1) this.showBanner('炮管过热！强制冷却中…', 1.1);
+      if (tank === this.localTank()) this.showBanner('炮管过热！强制冷却中…', 1.1);
     }
     const empowered = tank.rageShots > 0;
     if (empowered) tank.rageShots -= 1;
     this.spawnBullet(m.x, m.y, dir, tank.id, speed, maxBounces, empowered ? 2 : 1);
     this.burst(m.x, m.y, dir, tank.id);
-    this.netEvent('fire', m.x, m.y, { id: tank.id });
+    // The angle travels with the event: a guest cannot guess a muzzle direction
+    // from a bare (x, y), and drawing every shot pointing right looked broken.
+    this.netEvent('fire', m.x, m.y, { id: tank.id, angle: Math.round(dir * 1000) / 1000 });
     this.cameras.main.shake(60, 0.002);
     if (tank.id === 'enemy') sound.enemyFire();
     else sound.fire();
@@ -2447,6 +2562,7 @@ export class GameScene extends Phaser.Scene {
     tank.x -= Math.cos(dir) * 1.4;
     tank.y -= Math.sin(dir) * 1.4;
     this.resolveTankWalls(tank);
+    return true;
   }
 
   /** Distance from (x,y) along `dir` until a wall or crate stops a shell. */
@@ -2851,7 +2967,10 @@ export class GameScene extends Phaser.Scene {
       const killer = this.tanks().find((t) => t.id === attacker);
       if (killer && killer !== victim) killer.kills += 1;
       this.explode(victim.x, victim.y, victim.color);
-      this.bullets = this.bullets.filter((b) => b.owner === attacker);
+      // Clear the *victim's* shells, not everyone else's: the old filter kept
+      // only the killer's bullets, so one kill wiped every other player's shots
+      // out of the air in a free-for-all.
+      this.bullets = this.bullets.filter((b) => b.owner !== victim.id);
       if (victim.id === 'enemy') {
         this.score += 1000;
         this.hudDirty = true;
@@ -3096,6 +3215,9 @@ export class GameScene extends Phaser.Scene {
       seq: this.netSeq,
       level: this.levelIndex,
       phase: this.phase,
+      // The host owns the clock; guests use this instead of counting their own,
+      // so both machines agree on when the time limit runs out.
+      elapsed: Math.round(this.matchElapsed * 100) / 100,
       score: this.score,
       crates: this.crates.map((c) => (c.alive ? 1 : 0)),
       tanks: this.tanks()
@@ -3122,7 +3244,6 @@ export class GameScene extends Phaser.Scene {
             skillCd: left(t.skillReadyAt),
             heat: Math.round(t.heat.heat),
             heatLocked: t.heat.locked ? 1 : 0,
-            skill: this.roster.find((r) => r.id === t.id)?.skill ?? '',
           };
         }),
       bullets: this.bullets.map((b) => ({
@@ -3159,6 +3280,8 @@ export class GameScene extends Phaser.Scene {
 
     const snap = this.snap;
     if (!snap) return;
+    // The host owns the clock: both machines must agree on the time limit.
+    if (typeof snap.elapsed === 'number') this.matchElapsed = snap.elapsed;
     const age = Math.min(0.12, (this.time.now - this.snapAt) / 1000);
 
     // Tanks: smooth towards the authoritative transform.
@@ -3181,6 +3304,13 @@ export class GameScene extends Phaser.Scene {
       tank.rageShots = st.rageShots;
       tank.skillReadyAt = now + st.skillCd;
       tank.setHp(st.hp);
+      if (tank.kills !== st.kills || tank.deaths !== st.deaths) {
+        // The scoreboard used to stay at 0 on every guest: the host sends these
+        // numbers, nobody ever wrote them back.
+        tank.kills = st.kills;
+        tank.deaths = st.deaths;
+        this.hudDirty = true;
+      }
       tank.heat = { heat: st.heat ?? 0, locked: st.heatLocked === 1 };
       if (tank.damage !== st.damage) {
         tank.damage = st.damage;
@@ -3212,6 +3342,22 @@ export class GameScene extends Phaser.Scene {
     if (snap.phase !== this.phase && (snap.phase === 'versusOver' || snap.phase === 'playing')) {
       this.phase = snap.phase as Phase;
       this.hudDirty = true;
+    }
+    if (snap.phase === 'matchOver' && !this.matchOver) {
+      // Safety net: the host's `result` message can be lost with the socket at
+      // the exact moment a match ends. Rebuild the same verdict from the synced
+      // numbers instead of leaving a frozen arena with no card.
+      const result = this.matchResult();
+      const winners = result.kind === 'win' ? result.winners : [];
+      this.finishMatch({
+        winners,
+        draw: result.kind === 'draw',
+        reason: result.kind === 'win' ? result.reason : 'time',
+        scoreboard: this.resultLines(),
+        elapsed: this.matchElapsed,
+        mode: settings.match.mode,
+        teams: this.teamCount,
+      });
     }
   }
 
@@ -3275,7 +3421,7 @@ export class GameScene extends Phaser.Scene {
     // Effects.
     for (const ev of snap.events) {
       if (ev.k === 'fire') {
-        this.burst(ev.x, ev.y, Math.atan2(0, 1), ev.id === 'p2' ? 'p2' : 'p1');
+        this.burst(ev.x, ev.y, ev.angle ?? 0, ev.id ?? 'p1');
         sound.fire();
       } else if (ev.k === 'hit') {
         this.puff(ev.x, ev.y, ev.color ?? COLORS.danger, 8);

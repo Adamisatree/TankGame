@@ -111,7 +111,9 @@ export async function downloadWithFallback(url, destPath, options = {}) {
         continue;
       }
       // A proxy that drops the connection can still answer 200 with a short
-      // body; refuse to install a half file.
+      // body; refuse to install a half file. Mirrors often omit content-length,
+      // so the checksum is the real gate: without one we say `verified: false`
+      // and the caller asks the player instead of installing silently (D2).
       if (total > 1024 && received < total * 0.98) {
         errors.push(`${candidate.id}: truncated ${received}/${total}`);
         await rm(partPath, { force: true });
@@ -130,7 +132,15 @@ export async function downloadWithFallback(url, destPath, options = {}) {
           await new Promise((resolve) => setTimeout(resolve, 150 + attempt * 250));
         }
       }
-      return { ok: true, path: destPath, sha256, size: received, source: candidate, errors };
+      return {
+        ok: true,
+        path: destPath,
+        sha256,
+        size: received,
+        source: candidate,
+        verified: !!expectedSha,
+        errors,
+      };
     } catch (err) {
       errors.push(`${candidate.id}: ${err instanceof Error ? err.message : String(err)}`);
       if (partPath) await rm(partPath, { force: true }).catch(() => {});
@@ -139,17 +149,37 @@ export async function downloadWithFallback(url, destPath, options = {}) {
     }
   }
 
-  return { ok: false, path: '', sha256: '', size: 0, source: null, errors };
+  return { ok: false, path: '', sha256: '', size: 0, source: null, verified: false, errors };
 }
 
-/** @param {string} url @returns {Promise<number | null>} latency in ms, null on failure */
-export async function measureLatency(url, { timeoutMs = 6000, fetchImpl = fetch } = {}) {
+/**
+ * Time to a complete small response, in ms, or null on failure.
+ *
+ * `firstByteOnly` stops after the first chunk and aborts the rest: that is what
+ * makes it safe to measure the *download* path of a 160 MB installer without
+ * pulling the whole file (`range` asks for a few bytes, and mirrors that ignore
+ * it are hung up on after the first chunk).
+ * @param {string} url
+ */
+export async function measureLatency(url, { timeoutMs = 6000, fetchImpl = fetch, headers = {}, firstByteOnly = false } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
   try {
-    const res = await fetchImpl(url, { signal: controller.signal, headers: { 'user-agent': 'TankGame-Updater' } });
+    const res = await fetchImpl(url, {
+      signal: controller.signal,
+      headers: { 'user-agent': 'TankGame-Updater', ...headers },
+    });
     if (!res.ok) return null;
+    if (firstByteOnly && res.body) {
+      const reader = res.body.getReader();
+      try {
+        await reader.read();
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
+      return Date.now() - started;
+    }
     await res.arrayBuffer();
     return Date.now() - started;
   } catch {

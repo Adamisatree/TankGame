@@ -139,6 +139,12 @@ const room = {
   nextId: 2,
   /** True once the host has started a match; a new join drops back to lobby. */
   started: false,
+  /**
+   * sessionId -> the seat it owned, kept for a short grace period after a drop.
+   * A flaky Wi-Fi hiccup must not turn into "everyone back to the lobby": the
+   * same client reconnects and takes its old seat (and its tank) back.
+   */
+  sessions: new Map(),
   /** How many teams team-mode uses. The host can add/remove teams in the lobby. */
   teamCount: 2,
   /**
@@ -335,10 +341,30 @@ function pair() {
   console.log('[lan] host <-> guest paired');
 }
 
+/** How long a dropped seat waits for its owner to reconnect. */
+const SESSION_TTL_MS = 120_000;
+
+function rememberSession(ws, id) {
+  if (!ws.session || id === 'p1') return;
+  room.sessions.set(ws.session, {
+    id,
+    team: ws.team ?? 0,
+    ready: !!ws.ready,
+    name: ws.name ?? '',
+    leftAt: Date.now(),
+  });
+  // Drop stale entries so a long-running room cannot grow without bound.
+  const now = Date.now();
+  for (const [key, value] of room.sessions) {
+    if (now - value.leftAt > SESSION_TTL_MS) room.sessions.delete(key);
+  }
+}
+
 function unlink(ws) {
   const id = ws.playerId;
   if (!id || !room.players.has(id)) return;
   const wasHost = id === 'p1';
+  if (!wasHost) rememberSession(ws, id);
   room.players.delete(id);
   ws.playerId = null;
   ws.role = null;
@@ -350,6 +376,7 @@ function unlink(ws) {
     room.map = null;
     room.mapHash = '';
     room.mapAcks.clear();
+    room.sessions.clear();
   }
   send(ws, { t: 'bye' });
   // Tell the survivors exactly who left. An explicit surrender was already
@@ -411,19 +438,58 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           ws.team = 0;
           ws.ready = true;
           room.players.set('p1', ws);
-          // A host walking in always lands in the lobby, never in the middle of
-          // the previous session's match (a dev server hosting several games in
-          // a row kept `started` from the room before).
-          room.started = false;
-          // The host owns the room's map: drop whatever the last host left
-          // behind, then take the map it announces (if any).
-          room.map = null;
-          room.mapHash = '';
-          room.mapAcks.clear();
+          // A *new* host walking in always lands in the lobby, never in the
+          // middle of the previous session's match (a dev server hosting several
+          // games in a row kept `started` from the room before). A host that is
+          // just reconnecting keeps the room as it is.
+          if (!previous) {
+            room.started = false;
+            // The new host owns the room's map: drop whatever the last host left
+            // behind, then take the map it announces (if any).
+            room.map = null;
+            room.mapHash = '';
+            room.mapAcks.clear();
+          }
           if (isMapPayload(msg.map)) setRoomMap(msg.map, msg.mapHash ?? msg.hash);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
           announceRoster();
+          return;
+        }
+
+        // A returning client takes its old seat back: same id, same team, and
+        // crucially no `started = false` (the match keeps running).
+        const session = typeof msg.session === 'string' && msg.session ? msg.session.slice(0, 64) : '';
+        ws.session = session;
+        const known = session ? room.sessions.get(session) : null;
+        if (known) {
+          room.sessions.delete(session);
+          const stale = room.players.get(known.id);
+          if (stale && stale !== ws) send(stale, { t: 'replaced' });
+          if (!stale) totalPlayers += 1;
+          ws.playerId = known.id;
+          ws.role = 'guest';
+          ws.team = known.team;
+          ws.ready = known.ready;
+          room.players.set(known.id, ws);
+          send(ws, {
+            t: 'joined',
+            role: 'guest',
+            id: known.id,
+            host: true,
+            capacity: room.capacity,
+            version: VERSION,
+            peerVersion: room.host?.version,
+            resumed: true,
+          });
+          console.log(`[lan] guest ${known.id} resumed`);
+          if (room.map) {
+            room.mapAcks.delete(known.id);
+            send(ws, { t: 'map', map: room.map, hash: room.mapHash });
+          }
+          if (room.host) send(room.host, { t: 'peer', state: 'joined', id: known.id, version: ws.version });
+          announceRoster();
+          pair();
           return;
         }
 
@@ -537,7 +603,14 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
       }
 
       // Host → everyone: snapshots, level changes, match events.
-      if (msg.t === 'state' || msg.t === 'start' || msg.t === 'restart' || msg.t === 'level' || msg.t === 'event') {
+      if (
+        msg.t === 'state' ||
+        msg.t === 'start' ||
+        msg.t === 'restart' ||
+        msg.t === 'level' ||
+        msg.t === 'event' ||
+        msg.t === 'result'
+      ) {
         if (ws.role === 'host') broadcast(msg, ws);
         return;
       }

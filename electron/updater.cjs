@@ -10,7 +10,7 @@
  */
 const { app, shell } = require('electron');
 const { createHash } = require('node:crypto');
-const { mkdir, readdir, readFile, rename, rm, stat, writeFile } = require('node:fs/promises');
+const { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } = require('node:fs/promises');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -34,6 +34,8 @@ const defaultSettings = () => ({
   lastCheckAt: 0,
   cachedManifest: null,
   skippedVersion: '',
+  probeRank: [], // [{ id, ms }] from the last 镜像测速
+  probeAt: 0, // when that ranking was measured (used for an hour)
 });
 
 async function readSettings() {
@@ -72,9 +74,14 @@ async function manifestCandidates(settings) {
   const list = [];
 
   for (const raw of rawMirrors) {
-    // Every raw mirror stores the prefix up to `@`, so `prefix + "main/updates.json"`
-    // is the jsDelivr `@main` URL and the ghproxy raw URL at the same time.
-    list.push({ id: raw.id, label: raw.label, url: `${raw.prefix}main/updates.json` });
+    // Every raw mirror stores the prefix up to the point where the repo path
+    // starts — `…TankGame@` for jsDelivr, `…/TankGame/` for a ghproxy raw URL —
+    // so `prefix + "main/updates.json"` works for both. A prefix without either
+    // tail would silently build a broken URL, so make the separator explicit (D7).
+    const prefix = String(raw.prefix ?? '');
+    if (!prefix) continue;
+    const joined = prefix.endsWith('@') || prefix.endsWith('/') ? prefix : `${prefix}/`;
+    list.push({ id: raw.id, label: raw.label, url: `${joined}main/updates.json` });
   }
   for (const candidate of urlCandidates(OFFICIAL.releasesApi, mirrors, settings.mirrorId)) {
     list.push({ ...candidate, label: `${candidate.label} · API` });
@@ -99,20 +106,33 @@ async function fetchManifest(options = {}) {
 }
 
 /**
- * Measures each mirror with a tiny request; the ranking is cached for an hour.
+ * Measures each mirror and remembers the ranking for an hour, so "自动（选最快）"
+ * really downloads from the fastest host instead of `mirrors.json`'s order.
+ *
+ * The probe targets the *release download* path (a few bytes of the newest
+ * asset), not the raw manifest: those are different upstreams behind the same
+ * proxy, and measuring the wrong one ranked the wrong mirror (D5/D6).
  * @param {(msg: { mirror: string, ms: number | null }) => void} [onProgress]
  */
 async function probeMirrors(onProgress) {
   const { OFFICIAL, applyMirror } = await loadCore();
   const { mirrors } = await readMirrors();
-  // Probe with the small raw manifest: same host path the real download proxies use.
-  const probeUrl = OFFICIAL.manifestRaw;
+  const settings = await readSettings();
+  const assetUrl = newestAssetUrl(settings.cachedManifest);
+  // No cached manifest yet (first run): fall back to the small raw file.
+  const probeUrl = assetUrl || OFFICIAL.manifestRaw;
+  const range = !!assetUrl;
 
   const { measureLatency } = await import(pathToFileURL(join(__dirname, '..', 'shared', 'download.mjs')).href);
 
   const results = await Promise.all(
     mirrors.map(async (mirror) => {
-      const ms = await measureLatency(applyMirror(probeUrl, mirror), { timeoutMs: 6000 });
+      const ms = await measureLatency(applyMirror(probeUrl, mirror), {
+        timeoutMs: 6000,
+        // 1 KB of the installer through the same proxy; stops at the first chunk.
+        headers: range ? { range: 'bytes=0-1023' } : {},
+        firstByteOnly: range,
+      });
       const entry = { id: mirror.id, label: mirror.label, ms };
       onProgress?.(entry);
       return entry;
@@ -120,7 +140,34 @@ async function probeMirrors(onProgress) {
   );
 
   const ranked = [...results].sort((a, b) => (a.ms ?? Infinity) - (b.ms ?? Infinity));
-  return { ranked, probeUrl, official: OFFICIAL.releasesApi };
+  await writeSettings({
+    ...settings,
+    probeRank: ranked.map((entry) => ({ id: entry.id, ms: entry.ms })),
+    probeAt: Date.now(),
+  });
+  return { ranked, probeUrl, probeKind: range ? 'asset' : 'manifest', official: OFFICIAL.releasesApi };
+}
+
+/** The first download URL in a cached manifest, used as a realistic probe target. */
+function newestAssetUrl(manifest) {
+  const releases = Array.isArray(manifest?.releases) ? manifest.releases : [];
+  for (const release of releases) {
+    const assets = Array.isArray(release?.assets) ? release.assets : [];
+    const asset = assets.find((entry) => entry && typeof entry.url === 'string' && entry.url.startsWith('https://'));
+    if (asset) return asset.url;
+  }
+  return '';
+}
+
+/** Candidate order honouring a fresh probe ranking (unknown/failed mirrors last). */
+function rankCandidates(candidates, settings) {
+  const rank = Array.isArray(settings.probeRank) ? settings.probeRank : [];
+  const fresh = Number(settings.probeAt ?? 0) > Date.now() - 3600 * 1000;
+  if (!fresh || !rank.length) return candidates;
+  const position = new Map(rank.map((entry, index) => [entry.id, entry.ms === null ? 1e9 + index : index]));
+  return [...candidates].sort(
+    (a, b) => (position.get(a.id) ?? 1e8) - (position.get(b.id) ?? 1e8)
+  );
 }
 
 // ------------------------------------------------------------------ download
@@ -142,6 +189,7 @@ async function downloadWithMirrors(url, destPath, options = {}) {
   // When a mirror is chosen by hand, honour it. Quietly falling through to a
   // different host was why the download "was not the source I picked".
   if (preferred) candidates = candidates.filter((candidate) => candidate.id === preferred);
+  else candidates = rankCandidates(candidates, settings);
   if (!candidates.length) {
     return { ok: false, path: '', sha256: '', size: 0, source: null, errors: [`所选镜像 ${preferred} 不可用，请在更新面板改为「自动」`] };
   }
@@ -177,8 +225,22 @@ async function ensureDownloaded(url, asset, options = {}) {
     const info = await stat(dest);
     if (info.size > 0) {
       const sha256 = await sha256OfFile(dest);
-      if (!asset.sha256 || sha256 === asset.sha256) {
-        return { ok: true, path: dest, sha256, size: info.size, cached: true, errors: [] };
+      if (asset.sha256 && sha256 === asset.sha256) {
+        return { ok: true, path: dest, sha256, size: info.size, cached: true, verified: true, errors: [] };
+      }
+      if (!asset.sha256) {
+        // Nothing to check the old bytes against. Keep them (re-downloading
+        // would not make it any more trustworthy) but tell the caller, which
+        // asks the player before launching anything (D2).
+        return {
+          ok: true,
+          path: dest,
+          sha256,
+          size: info.size,
+          cached: true,
+          verified: false,
+          errors: ['清单里没有这个安装包的 sha256，无法校验'],
+        };
       }
       await rm(dest, { force: true }); // corrupt cache: fetch it again
     }
@@ -233,29 +295,83 @@ async function sha256OfFile(path) {
 async function installDownloaded(path, asset) {
   const name = String(asset?.name ?? path);
   const kind = String(asset?.kind ?? '');
+  // A digest in the manifest is a second gate: refuse to launch bytes that do
+  // not match it, even if they were already sitting in the cache (D2).
+  if (asset?.sha256) {
+    const actual = await sha256OfFile(path);
+    if (actual !== String(asset.sha256)) {
+      return { launched: false, file: path, mode: 'manual', error: '安装包校验失败（sha256 不符），已阻止安装' };
+    }
+  }
+  // The installer is *copied* to Downloads, never moved: `versions/` is the
+  // local archive that makes switching back to an older build instant, so the
+  // file the panel lists must survive the install (D1).
   const target = join(app.getPath('downloads'), name);
-  // Copy out of the temp dir so the installer survives our own exit.
   await mkdir(app.getPath('downloads'), { recursive: true });
-  await rm(target, { force: true });
-  await rename(path, target).catch(async () => {
-    await writeFile(target, await readFile(path));
-    await rm(path, { force: true });
-  });
+  let copy = target;
+  try {
+    const existing = await stat(target).catch(() => null);
+    if (existing && existing.size !== (await stat(path)).size) {
+      copy = join(app.getPath('downloads'), `${Date.now()}-${name}`);
+    }
+    await copyFile(path, copy);
+  } catch {
+    copy = path; // Downloads not writable: install from the archive instead
+  }
 
   if (process.platform === 'win32') {
     const { spawn } = require('node:child_process');
     if (kind === 'portable') {
-      await shell.openPath(target);
-      return { launched: true, file: target, mode: 'portable' };
+      await shell.openPath(path);
+      return { launched: true, file: copy, mode: 'portable' };
     }
-    const child = spawn(target, ['/S', '--updated'], { detached: true, stdio: 'ignore' });
+    const child = spawn(path, ['/S', '--updated'], { detached: true, stdio: 'ignore' });
     child.unref();
     app.quit();
-    return { launched: true, file: target, mode: 'silent-install' };
+    return { launched: true, file: copy, mode: 'silent-install' };
   }
 
-  await shell.openPath(target);
-  return { launched: true, file: target, mode: 'manual' };
+  await shell.openPath(path);
+  return { launched: true, file: copy, mode: 'manual' };
+}
+
+/**
+ * Hosts an installer may come from: GitHub itself, the jsDelivr CDN and the
+ * proxies listed in the *bundled* `mirrors.json`. A manifest (or a mirror that
+ * rewrote it) must not be able to point the desktop app at an arbitrary exe
+ * (D3) — the mirror list is read from the app directory, never from the network.
+ */
+async function allowedDownloadHosts() {
+  const hosts = new Set([
+    'github.com',
+    'api.github.com',
+    'codeload.github.com',
+    'objects.githubusercontent.com',
+    'raw.githubusercontent.com',
+    'cdn.jsdelivr.net',
+  ]);
+  const { mirrors, rawMirrors } = await readMirrors();
+  for (const entry of [...mirrors, ...rawMirrors]) {
+    try {
+      hosts.add(new URL(String(entry.prefix)).hostname.toLowerCase());
+    } catch {
+      /* a broken entry in mirrors.json simply contributes no host */
+    }
+  }
+  return hosts;
+}
+
+/** @param {string} url */
+async function isAllowedAssetUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url));
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  const hosts = await allowedDownloadHosts();
+  return hosts.has(parsed.hostname.toLowerCase());
 }
 
 async function openFolder(path) {
@@ -267,6 +383,7 @@ module.exports = {
   probeMirrors,
   downloadWithMirrors,
   installDownloaded,
+  isAllowedAssetUrl,
   sha256OfFile,
   readSettings,
   writeSettings,

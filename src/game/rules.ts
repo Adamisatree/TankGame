@@ -143,6 +143,36 @@ export function evaluateMatch(lines: ScoreLine[], config: MatchConfig, elapsed: 
   return { kind: 'running' };
 }
 
+/**
+ * Would this rule set ever end a match?
+ *
+ * `winCondition` decides which enders are armed, and `0` means "no limit", so
+ * `打到人头 + 不限` (or `时间到 + 不限时`) produced a match with no end condition
+ * at all – the only way out was surrendering.
+ */
+export function matchHasEnder(config: MatchConfig): boolean {
+  const killsArmed = config.winCondition !== 'time' && config.killTarget > 0;
+  const timeArmed = config.winCondition !== 'kills' && config.timeLimit > 0;
+  return killsArmed || timeArmed;
+}
+
+/**
+ * Repairs a rule set that could never end by re-arming the ender the host left
+ * unlimited. Called from the UI so a dead-end combination is impossible to
+ * configure, and again when the host presses start.
+ */
+export function ensureMatchEnder(config: MatchConfig): MatchConfig {
+  if (matchHasEnder(config)) return config;
+  const next = { ...config };
+  if (next.winCondition === 'time') next.timeLimit = DEFAULT_MATCH.timeLimit;
+  else if (next.winCondition === 'kills') next.killTarget = DEFAULT_MATCH.killTarget;
+  else {
+    next.killTarget = DEFAULT_MATCH.killTarget;
+    next.timeLimit = DEFAULT_MATCH.timeLimit;
+  }
+  return next;
+}
+
 // ------------------------------------------------------------------ teams
 
 /** Alternates players across `teamCount` teams so sides stay even. */
