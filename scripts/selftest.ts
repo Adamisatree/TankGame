@@ -339,6 +339,93 @@ check('out-of-range key codes are rejected', getBindings().solo.up === defaults.
 resetBindings();
 check('reset restores the defaults', getBindings().solo.fire === defaults.solo.fire);
 
+// ---------------------------------------------------------------- v1.3 rules
+{
+  const R = await import('../src/game/rules');
+  // Damage by body part: front 7, side 9, back 12.
+  check('front hit does 7', R.ZONE_DAMAGE.front === 7);
+  check('side hit does 9', R.ZONE_DAMAGE.side === 9);
+  check('rear hit does 12', R.ZONE_DAMAGE.back === 12);
+  // Hull facing right (0). A shell travelling right hits the nose from the
+  // front; one travelling left hits the tail.
+  check('a shell coming at the nose is a front hit', R.hitZone(0, Math.PI) === 'front', R.hitZone(0, Math.PI));
+  check('a shell coming at the tail is a back hit', R.hitZone(0, 0) === 'back', R.hitZone(0, 0));
+  check('a shell from the side is a side hit', R.hitZone(0, Math.PI / 2) === 'side', R.hitZone(0, Math.PI / 2));
+  check('the zone follows the hull as it turns', R.hitZone(Math.PI, Math.PI) === 'back', R.hitZone(Math.PI, Math.PI));
+  // 9 damage a hit: 12 flank hits kill, 11 nearly do – a duel is a real fight
+  // rather than the old three-tap.
+  check('a flank kill takes a dozen hits', Math.ceil(R.MAX_HP / R.zoneDamage('side')) === 12);
+  check('a rear kill is quicker', Math.ceil(R.MAX_HP / R.zoneDamage('back')) === 9);
+  check('a frontal kill is the slowest', Math.ceil(R.MAX_HP / R.zoneDamage('front')) === 15);
+  check('rear shots kill faster than frontal ones', R.zoneDamage('back') > R.zoneDamage('side') && R.zoneDamage('side') > R.zoneDamage('front'));
+
+  // Damage switches are independent.
+  const me = { id: 'p1', team: 0, alive: true };
+  const mate = { id: 'p2', team: 0, alive: true };
+  const foe = { id: 'p3', team: 1, alive: true };
+  check('self damage on when enabled', R.canDamage(me, me, { friendlyFire: false, selfDamage: true }));
+  check('self damage off when disabled', !R.canDamage(me, me, { friendlyFire: true, selfDamage: false }));
+  check('friendly fire off by default', !R.canDamage(me, mate, { friendlyFire: false, selfDamage: true }));
+  check('friendly fire on when enabled', R.canDamage(me, mate, { friendlyFire: true, selfDamage: false }));
+  check('enemies always take damage', R.canDamage(me, foe, { friendlyFire: false, selfDamage: false }));
+  check('the dead do not take damage', !R.canDamage(me, { ...mate, alive: false }, { friendlyFire: true, selfDamage: true }));
+
+  // Match outcomes.
+  const cfg = { mode: 'ffa' as const, capacity: 6, killTarget: 10, timeLimit: 300, friendlyFire: false, selfDamage: true };
+  const line = (id: string, kills: number, team = 0) => ({ id, team, kills, deaths: 0, hp: 100, connected: true });
+  check('no winner below the kill target', R.evaluateMatch([line('p1', 3), line('p2', 4)], cfg, 10).kind === 'running');
+  const killWin = R.evaluateMatch([line('p1', 10), line('p2', 4)], cfg, 10);
+  check('reaching the kill target wins', killWin.kind === 'win' && killWin.winners[0] === 'p1');
+  const timeWin = R.evaluateMatch([line('p1', 4), line('p2', 3)], cfg, 300);
+  check('time up with a leader is a win', timeWin.kind === 'win' && timeWin.reason === 'time');
+  const tie = R.evaluateMatch([line('p1', 4), line('p2', 4)], cfg, 300);
+  check('time up on equal kills is a draw', tie.kind === 'draw');
+  const teamCfg = { ...cfg, mode: 'team' as const, killTarget: 10 };
+  const teamWin = R.evaluateMatch([line('p1', 6, 0), line('p2', 4, 0), line('p3', 3, 1), line('p4', 3, 1)], teamCfg, 30);
+  check('team kills are summed', teamWin.kind === 'win' && teamWin.winners.includes('p1') && teamWin.winners.includes('p2'));
+  const teamTie = R.evaluateMatch([line('p1', 5, 0), line('p3', 5, 1)], teamCfg, 300);
+  check('equal team scores draw on time', teamTie.kind === 'draw');
+
+  // Teams alternate.
+  const teams = R.assignTeams(['a', 'b', 'c', 'd']);
+  check('teams alternate', teams.a === 0 && teams.b === 1 && teams.c === 0 && teams.d === 1);
+
+  // Respawns: FFA keeps you away from the living, teams put you by a mate.
+  const spawns = [
+    { x: 0, y: 0, angle: 0, id: 0 },
+    { x: 100, y: 0, angle: 0, id: 1 },
+    { x: 500, y: 500, angle: 0, id: 2 },
+  ];
+  const ffa = R.chooseRespawn({
+    spawns,
+    players: [{ x: 0, y: 0, team: 0, alive: true }],
+    mode: 'ffa',
+    random: () => 0,
+  });
+  check('FFA respawns far from the only living player', ffa?.id !== 0, JSON.stringify(ffa));
+  const team = R.chooseRespawn({
+    spawns,
+    players: [{ x: 90, y: 0, team: 0, alive: true }],
+    team: 0,
+    mode: 'team',
+    random: () => 0,
+  });
+  check('team respawn picks the point next to a living mate', team?.id === 1, JSON.stringify(team));
+  const aloneTeam = R.chooseRespawn({
+    spawns,
+    players: [{ x: 0, y: 0, team: 1, alive: true }],
+    team: 0,
+    mode: 'team',
+    random: () => 0,
+  });
+  check('a wiped team falls back to the far-away rule', aloneTeam?.id !== 0, JSON.stringify(aloneTeam));
+  check('no spawns means no respawn point', R.chooseRespawn({ spawns: [], players: [], mode: 'ffa' }) === null);
+
+  // Caps and defaults the menu offers.
+  check('capacity goes up to 10', R.CAPACITY_CHOICES.includes(2) && R.CAPACITY_CHOICES.includes(10));
+  check('friendly fire and self damage default separately', R.DEFAULT_MATCH.friendlyFire === false && R.DEFAULT_MATCH.selfDamage === true);
+}
+
 console.log(`\n${passed} checks passed, ${failures.length} failed`);
 if (failures.length) {
   for (const f of failures) console.error(` - ${f}`);
