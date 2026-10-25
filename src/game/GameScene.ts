@@ -250,6 +250,9 @@ export class GameScene extends Phaser.Scene {
     this.paused = false;
     this.autoDodge = settings.autoDodge;
     this.beginMatch();
+    // A host restart has to reach every guest explicitly: the guest keeps its
+    // socket, so nothing else would ever tell it the match was reset.
+    if (this.lanMode && this.lanRole === 'host') this.lan?.send({ t: 'restart', level: this.startIndex });
     this.emitOverlay({ kind: 'hidden' });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -509,6 +512,9 @@ export class GameScene extends Phaser.Scene {
     this.paused = false;
     this.autoDodge = settings.autoDodge;
     this.beginMatch();
+    // A host restart has to reach every guest explicitly: the guest keeps its
+    // socket, so nothing else would ever tell it the match was reset.
+    if (this.lanMode && this.lanRole === 'host') this.lan?.send({ t: 'restart', level: this.startIndex });
     this.emitOverlay({ kind: 'hidden' });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {

@@ -207,9 +207,9 @@ function unlink(ws) {
   ws.role = null;
   if (wasHost) room.host = null;
   send(ws, { t: 'bye' });
-  // Tell the survivors exactly who left, so they can show "X 投降了".
+  // Tell the survivors exactly who left. An explicit surrender was already
+  // broadcast by the message handler; a dropped socket only reports "left".
   broadcast({ t: 'peer', state: 'left', id, host: wasHost });
-  broadcast({ t: 'surrender', by: id, left: true });
   announceRoster();
 }
 
@@ -255,16 +255,14 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         }
 
         if (role === 'host') {
-          // A new host starts a fresh room.
-          for (const other of [...room.players.values()]) {
-            if (other !== ws) send(other, { t: 'replaced' });
-          }
-          room.players.clear();
+          // A reconnecting host takes the p1 seat back and keeps the guests –
+          // a restart in the middle of a match must not kick everybody.
+          const previous = room.players.get('p1');
+          if (previous && previous !== ws) send(previous, { t: 'replaced' });
           room.host = ws;
-          room.nextId = 2;
           ws.playerId = 'p1';
           ws.role = 'host';
-          totalPlayers += 1;
+          if (!previous) totalPlayers += 1;
           room.players.set('p1', ws);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
