@@ -1,4 +1,5 @@
 import { DEFAULT_LEVEL_ID } from '../engine/level';
+import { DEFAULT_MATCH, type MatchConfig } from './rules';
 import { DEFAULT_SKILL, type SkillId } from './skills';
 
 export type GameMode = 'solo' | 'versus' | 'lan';
@@ -93,6 +94,11 @@ export interface Settings {
   skillP1: SkillId;
   /** P2's summoner skill in local versus / LAN. */
   skillP2: SkillId;
+  /**
+   * v1.3 multiplayer rules: FFA or teams, player cap 2–10, kill target, time
+   * limit, and the two independent damage switches.
+   */
+  match: MatchConfig;
 }
 
 /** Mutated by the DOM overlay, read by the game scene when it boots. */
@@ -106,14 +112,18 @@ export const settings: Settings = {
   mapId: DEFAULT_LEVEL_ID,
   skillP1: DEFAULT_SKILL,
   skillP2: 'invincible',
+  match: { ...DEFAULT_MATCH },
 };
 
 export function preset(): DifficultyPreset {
   return DIFFICULTIES[settings.difficulty];
 }
 
-/** Lives each side starts a versus (and LAN) match with. */
-export const VERSUS_LIVES = 3;
+/**
+ * Local versus used to be "3 lives each"; v1.3 makes every mode health-based,
+ * so this is only kept for the level-scoped health of a versus round.
+ */
+export const VERSUS_HP = 100;
 
 /** Default port of the bundled LAN server. */
 export { DEFAULT_LAN_PORT } from '../net/protocol';

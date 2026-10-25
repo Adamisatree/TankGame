@@ -53,12 +53,24 @@ export const BULLET = {
   speedPlayer: 830,
   /** Default enemy speed; the difficulty preset can override it. */
   speedEnemy: 600,
-  maxBounces: 4,
+  /** v1.3: two bounces, down from four – long bank shots were too strong. */
+  maxBounces: 2,
   lifetime: 6,
 };
 
-/** Seconds of mercy after taking a hit, so one wild shell can't chain-kill you. */
-export const HIT_MERCY = 1.1;
+/**
+ * Seconds between your own shots. 0.24s (four a second) made duels a spray
+ * fight; one second per shot makes every trigger pull a decision.
+ */
+export const FIRE_COOLDOWN = 1.0;
+
+/**
+ * v1.3 removed the post-hit mercy window entirely – with 100 HP and per-part
+ * damage there is no one-shot kill to protect against. Only respawning gives
+ * brief protection, so people can't be spawn-camped.
+ */
+export const RESPAWN_PROTECT = 1.0;
+export const RESPAWN_DELAY = 2.5;
 
 export const FONT = '"Patrick Hand", "Comic Sans MS", "Segoe Print", system-ui, sans-serif';
 

@@ -4,7 +4,8 @@ import { advanceBullet, type BulletTarget } from '../engine/bullet';
 import { LEVELS, buildLayout, levelIndexById, randomLevelIndex, type Layout, type PlayRect } from '../engine/level';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../engine/physics';
 import { bulletThreatAt, pickHeading, steerTo, type ThreatBullet } from '../engine/steer';
-import { BULLET, COLORS, GAME_H, GAME_W, HIT_MERCY, TANK } from './config';
+import { BULLET, COLORS, FIRE_COOLDOWN, FONT, GAME_H, GAME_W, RESPAWN_DELAY, RESPAWN_PROTECT, TANK } from './config';
+import { MAX_HP } from './rules';
 import { OVERLAY_EVENT, type OverlayState } from './events';
 import { Sketch } from './Sketch';
 import { Tank, TURRET_LIMIT, type TankId } from './Tank';
@@ -13,7 +14,18 @@ import { makePickup, PICKUPS, PICKUP_RADIUS, PICKUP_RESPAWN, rollPickupKind, typ
 import { isSkillId, RAGE_SHOTS, skillById, type SkillId } from './skills';
 import { makeTextures, paperBackground } from './art';
 import { sound } from './Sound';
-import { preset, settings, VERSUS_LIVES, type DifficultyPreset } from './settings';
+import { preset, settings, VERSUS_HP, type DifficultyPreset } from './settings';
+import {
+  canDamage,
+  chooseRespawn,
+  evaluateMatch,
+  hitZone,
+  zoneDamage,
+  type HitZone,
+  type MatchResult,
+  type RespawnCandidate,
+  type ScoreLine,
+} from './rules';
 import { fetchLanInfo, LanClient } from '../net/LanClient';
 import { DEFAULT_LAN_PORT } from '../net/protocol';
 import type { NetEvent, Snapshot, TankInput } from '../net/protocol';
@@ -24,7 +36,7 @@ const SOLO_CAMPAIGN_LENGTH = 5;
 
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
 
-type Phase = 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver';
+type Phase = 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver' | 'matchOver' | 'leaving';
 
 interface Bullet {
   x: number;
@@ -280,8 +292,12 @@ export class GameScene extends Phaser.Scene {
         if (this.netBanner) this.showBanner(this.netBanner, 1.6);
         this.modeText.setText(this.modeLabel());
       },
+      onSurrender: (by) => this.handleSurrender(by),
       onPeer: (state) => {
         this.showBanner(state === 'joined' ? '对手已加入！' : '对手离开了', 1.4);
+        // A dropped opponent counts as surrendering, so the match ends cleanly
+        // instead of freezing on a snapshot that will never arrive.
+        if (state === 'left' && this.phase === 'playing') this.handleSurrender(this.lanRole === 'host' ? 'p2' : 'p1');
         if (state === 'joined') {
           sound.ui();
           // A fresh opponent means a fresh match.
@@ -434,16 +450,20 @@ export class GameScene extends Phaser.Scene {
     const d = preset();
 
     this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
-    this.p1.lives = this.versus ? VERSUS_LIVES : d.lives;
+    this.p1.setHp(this.versus ? VERSUS_HP : MAX_HP);
     this.p1.skillReadyAt = this.time.now + 1200;
 
     if (this.versus) {
       this.p2 = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'p2', 22);
-      this.p2.lives = VERSUS_LIVES;
+      this.p2.setHp(VERSUS_HP);
+      this.p2.team = 1;
       this.p2.skillReadyAt = this.time.now + 1200;
     } else {
+      // Solo: the AI is health-based too; difficulty now only changes its aim,
+      // reaction time and rate of fire.
       this.enemy = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'enemy', 22);
-      this.enemy.lives = d.enemyLives;
+      this.enemy.setHp(MAX_HP);
+      this.enemy.team = 1;
     }
 
     this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
@@ -544,61 +564,19 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private drawHeart(cx: number, cy: number, size: number, filled: boolean, color: number = COLORS.danger): void {
-    const g = this.hud;
-    const pts = [
-      { x: cx, y: cy + size * 0.85 },
-      { x: cx - size, y: cy - size * 0.05 },
-      { x: cx - size * 0.62, y: cy - size * 0.72 },
-      { x: cx - size * 0.2, y: cy - size * 0.55 },
-      { x: cx, y: cy - size * 0.12 },
-      { x: cx + size * 0.2, y: cy - size * 0.55 },
-      { x: cx + size * 0.62, y: cy - size * 0.72 },
-      { x: cx + size, y: cy - size * 0.05 },
-    ];
-    if (filled) {
-      g.graphics.fillStyle(color, 0.28);
-      g.graphics.beginPath();
-      g.graphics.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) g.graphics.lineTo(pts[i].x, pts[i].y);
-      g.graphics.closePath();
-      g.graphics.fillPath();
-    }
-    g.poly(pts, { width: 2.4, color: filled ? color : COLORS.ink, jitter: 0.7 });
-  }
-
   private drawHud(): void {
     this.hud.clear();
     this.hud.line(PLAY_RECT.x, 72, PLAY_RECT.x + PLAY_RECT.w, 72, { width: 1.6, jitter: 1.6 });
     this.hud.line(PLAY_RECT.x, 75, PLAY_RECT.x + PLAY_RECT.w, 75, { width: 1.1, jitter: 1.4 });
 
-    const total = (tank: Tank): number => {
-      if (this.versus) return VERSUS_LIVES;
-      return tank.id === 'p1' ? preset().lives : preset().enemyLives;
-    };
-
-    // Left side: player one.
-    const p1Hearts = total(this.p1);
-    for (let i = 0; i < p1Hearts; i++) {
-      this.drawHeart(PLAY_RECT.x + 10 + i * 30, 40, 12, i < this.p1.lives, COLORS.player);
-    }
-
+    // v1.3: no more heart rows – health is a bar, and it is the same bar
+    // everybody sees (the tanks draw their own, this is the HUD summary).
+    this.drawHpBar(PLAY_RECT.x + 8, 34, 190, 14, this.p1.hpRatio(), COLORS.player, 'P1');
     if (this.versus && this.p2) {
-      const n = total(this.p2);
-      for (let i = 0; i < n; i++) {
-        this.drawHeart(PLAY_RECT.x + PLAY_RECT.w - 10 - i * 30, 40, 12, i < this.p2.lives, COLORS.player2);
-      }
-      this.scoreText.setText('');
+      this.drawHpBar(PLAY_RECT.x + PLAY_RECT.w - 198, 34, 190, 14, this.p2.hpRatio(), COLORS.player2, 'P2');
+      this.scoreText.setText(`P1 ${this.p1.kills} : ${this.p2.kills} P2`);
     } else if (this.enemy) {
-      for (let i = 0; i < this.enemy.lives; i++) {
-        const x = PLAY_RECT.x + PLAY_RECT.w - 8 - i * 22;
-        this.hud.fillCircle(x, 60, 6, COLORS.enemy, 0.7);
-        this.hud.circle(x, 60, 6, { width: 1.8, color: COLORS.enemy, jitter: 0.6, passes: 2 });
-      }
-      for (let i = this.enemy.lives; i < total(this.enemy); i++) {
-        const x = PLAY_RECT.x + PLAY_RECT.w - 8 - i * 22;
-        this.hud.circle(x, 60, 6, { width: 1.5, color: COLORS.ink, jitter: 0.6, passes: 1 });
-      }
+      this.drawHpBar(PLAY_RECT.x + PLAY_RECT.w - 198, 34, 190, 14, this.enemy.hpRatio(), COLORS.enemy, 'CPU');
       this.scoreText.setText(`得分  ${String(this.score).padStart(5, '0')}`);
     }
 
@@ -609,6 +587,15 @@ export class GameScene extends Phaser.Scene {
       this.hud.fillCircle(x - 38, 40, 2.4, COLORS.player, 0.9);
     }
     this.hudDirty = false;
+  }
+
+  /** One public health bar plus its numeric value – identical on every screen. */
+  private drawHpBar(x: number, y: number, w: number, h: number, ratio: number, color: number, label: string): void {
+    this.hud.fillRect(x, y, w, h, COLORS.white, 0.92);
+    if (ratio > 0) this.hud.fillRect(x + 1.5, y + 1.5, Math.max(0, (w - 3) * ratio), h - 3, color, 0.92);
+    this.hud.rect(x, y, w, h, { width: 1.8, color: COLORS.ink, jitter: 0.7 });
+    this.hud.text(x - 6, y + h / 2, label, 13, COLORS.ink, 'right').setOrigin(1, 0.5);
+    this.hud.text(x + w + 6, y + h / 2, `${Math.max(0, Math.round(ratio * 100))}`, 13, COLORS.ink, 'left').setOrigin(0, 0.5);
   }
 
   // ------------------------------------------------------------------ update
@@ -669,10 +656,82 @@ export class GameScene extends Phaser.Scene {
       this.updateNetHost(dt);
     }
     this.updateParticles(dt);
+    this.updateMatch(dt);
     this.updatePhase(dt);
     this.drawFrame(time);
     this.refreshSkillLabels();
     for (const tank of this.tanks()) tank.sync(time);
+  }
+
+  /**
+   * Leaves the match on purpose. Solo and local versus just end; a LAN player
+   * is reported as having surrendered, so the others see why the fight stopped.
+   */
+  public quitMatch(): void {
+    if (this.lanMode) {
+      this.lan?.send({ t: 'surrender', by: this.lanRole === 'host' ? 'p1' : 'p2' });
+      this.lan?.close();
+    }
+    this.paused = false;
+    this.phase = 'leaving';
+    this.emitOverlay({ kind: 'hidden' });
+    this.scene.restart();
+  }
+
+  /** Someone walked away from a LAN match – show it as a surrender. */
+  private handleSurrender(by: string): void {
+    if (this.matchOver) return;
+    this.matchOver = true;
+    this.phase = 'matchOver';
+    this.paused = false;
+    const p1Surrendered = by === 'p1';
+    this.emitOverlay({
+      kind: 'matchOver',
+      reason: 'surrender',
+      scoreboard: this.scoreLines().map((line) => ({
+        ...line,
+        name: this.nameOf(line.id),
+      })),
+      winners: p1Surrendered ? ['p2'] : ['p1'],
+      draw: false,
+      surrenderBy: by,
+    });
+    this.showBanner(`${this.nameOf(by)} 已经投降`, 2.4);
+  }
+
+  private nameOf(id: string): string {
+    return id === 'p1' ? (this.lanRole === 'host' || !this.lanMode ? 'P1' : '房主') :
+      id === 'p2' ? (this.lanMode ? '访客' : 'P2') : id === 'enemy' ? 'CPU' : id;
+  }
+
+  /** Checks the kill target / clock and closes the match when it is decided. */
+  private checkMatchEnd(): void {
+    if (!this.lanMode || this.matchOver || this.phase !== 'playing') return;
+    const result = this.matchResult();
+    if (result.kind === 'running') return;
+    this.matchOver = true;
+    this.phase = 'matchOver';
+    const scoreboard = this.scoreLines().map((line) => ({ ...line, name: this.nameOf(line.id) }));
+    if (result.kind === 'draw') {
+      this.emitOverlay({ kind: 'matchOver', reason: result.reason === 'time' ? 'time' : 'time', scoreboard, winners: [], draw: true });
+    } else {
+      this.emitOverlay({
+        kind: 'matchOver',
+        reason: result.reason,
+        scoreboard,
+        winners: result.winners,
+        draw: false,
+      });
+    }
+    sound[result.kind === 'win' && result.winners.includes('p1') ? 'win' : 'lose']();
+  }
+
+  /** Runs the LAN clock and the win check; a no-op outside LAN matches. */
+  private updateMatch(dt: number): void {
+    if (!this.lanMode || this.matchOver) return;
+    if (this.phase !== 'playing') return;
+    this.matchElapsed += dt;
+    this.checkMatchEnd();
   }
 
   private togglePause(): void {
@@ -683,7 +742,15 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updatePhase(dt: number): void {
-    if (this.phase === 'ready' || this.phase === 'playing' || this.phase === 'over' || this.phase === 'victory' || this.phase === 'versusOver') {
+    if (
+      this.phase === 'ready' ||
+      this.phase === 'playing' ||
+      this.phase === 'over' ||
+      this.phase === 'victory' ||
+      this.phase === 'versusOver' ||
+      this.phase === 'matchOver' ||
+      this.phase === 'leaving'
+    ) {
       return;
     }
 
@@ -692,17 +759,31 @@ export class GameScene extends Phaser.Scene {
 
     if (this.phase === 'dying') {
       if (this.versus) {
-        const losers = this.humans().filter((t) => t.lives <= 0);
-        if (losers.length > 0) {
+        // Local versus: no respawns, whoever is down loses the round outright.
+        if (this.p1.hp <= 0 || (this.p2 && this.p2.hp <= 0)) {
           this.phase = 'versusOver';
-          const p1Dead = this.p1.lives <= 0;
-          const winner: 'p1' | 'p2' = p1Dead ? 'p2' : 'p1';
-          this.emitOverlay({ kind: 'versusOver', winner, p1Lives: this.p1.lives, p2Lives: this.p2?.lives ?? 0 });
+          const winner: 'p1' | 'p2' = this.p1.hp <= 0 ? 'p2' : 'p1';
+          this.emitOverlay({
+            kind: 'versusOver',
+            winner,
+            p1Lives: Math.max(0, Math.round(this.p1.hp)),
+            p2Lives: Math.max(0, Math.round(this.p2?.hp ?? 0)),
+          });
           sound.lose();
           return;
         }
-        for (const tank of this.humans()) if (!tank.alive) this.respawn(tank);
-      } else if (this.p1.lives > 0) {
+        return;
+      }
+      if (this.lanMode) {
+        // LAN: dying players come back at a safe point, the match goes on.
+        for (const tank of this.tanks()) {
+          if (tank.awaitingRespawn) this.scheduleRespawn(tank);
+        }
+        this.phase = 'playing';
+        return;
+      }
+      if (this.p1.hp > 0) {
+        this.p1.awaitingRespawn = false;
         this.respawn(this.p1);
       } else {
         this.phase = 'over';
@@ -741,6 +822,8 @@ export class GameScene extends Phaser.Scene {
       drive = auto.drive;
     }
 
+    // v1.3: one control for turning. The gun rides the hull, so aiming is
+    // either "the mouse" or "straight ahead" – no second pair of keys.
     let aim: number;
     if (mouseAim) {
       const pointer = this.input.activePointer;
@@ -748,10 +831,9 @@ export class GameScene extends Phaser.Scene {
       const my = pointer.worldY || GAME_H / 2;
       aim = Math.atan2(my - tank.y, mx - tank.x);
     } else {
-      // Trim nudges the barrel around its mount; the mount follows the hull.
-      const trim = (this.keyDown(prefix, 'aimRight') ? 1 : 0) - (this.keyDown(prefix, 'aimLeft') ? 1 : 0);
-      aim = tank.bodyAngle + tank.turretOffset + trim * 1.9 * dt;
+      aim = tank.bodyAngle;
     }
+    void dt;
 
     if (this.keyJustDown(prefix, 'skill')) this.useSkill(tank);
 
@@ -763,10 +845,12 @@ export class GameScene extends Phaser.Scene {
 
   /** Applies one input frame to a tank – shared by local players and the guest. */
   private applyInput(tank: Tank, input: TankInput, dt: number, opts: { slow?: boolean; aimRate?: number } = {}): void {
-    if (!tank.alive) return;
+    if (!tank.alive || tank.awaitingRespawn) return;
 
     const slow = opts.slow ?? input.slow ?? false;
-    // The gun is bolted to the hull: turning the hull turns the barrel too.
+    // The gun is bolted to the hull: turning the hull turns the barrel too, at
+    // the same instant and by the same amount (this is the v1.3 fix – the old
+    // order let the barrel stay put in world space while the hull rotated).
     tank.turnHull(input.turn * TANK.turnRate * (slow ? 0.8 : 1) * dt);
 
     const mul = tank.speedMultiplier(this.time.now);
@@ -785,8 +869,9 @@ export class GameScene extends Phaser.Scene {
 
     if (Number.isFinite(input.aim)) {
       // aimAt() clamps the offset, so the barrel can never fly off the hull.
-      tank.aimAt(input.aim, opts.aimRate ?? 16, dt);
-      tank.turretAngle = tank.bodyAngle + tank.turretOffset;
+      // A finite aim is a *world* angle; the hull angle already includes this
+      // frame's turn, so the offset is measured against the new heading.
+      tank.aimAt(input.aim, opts.aimRate ?? 10, dt);
     }
 
     this.separateTanks();
@@ -796,13 +881,13 @@ export class GameScene extends Phaser.Scene {
       this.fireCd1 -= dt;
       if (input.fire && this.fireCd1 <= 0) {
         this.fire(tank);
-        this.fireCd1 = 0.24;
+        this.fireCd1 = FIRE_COOLDOWN;
       }
     } else {
       this.fireCd2 -= dt;
       if (input.fire && this.fireCd2 <= 0) {
         this.fire(tank);
-        this.fireCd2 = 0.24;
+        this.fireCd2 = FIRE_COOLDOWN;
       }
     }
   }
@@ -921,7 +1006,7 @@ export class GameScene extends Phaser.Scene {
     const now = this.time.now;
 
     if (p.kind === 'health') {
-      tank.lives = Math.min(this.maxLives(tank), tank.lives + 1);
+      tank.setHp(tank.hp + 40);
       tank.damage = Math.max(0, tank.damage - 1);
       tank.redraw();
     } else if (p.kind === 'speed') {
@@ -943,23 +1028,22 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  private maxLives(tank: Tank): number {
-    if (this.versus) return VERSUS_LIVES;
-    return tank.id === 'p1' ? preset().lives : preset().enemyLives;
-  }
+  /** Seconds since the LAN match started – the time-limit tiebreaker. */
+  private matchElapsed = 0;
+  private matchOver = false;
 
   /** Guest: the whole match lives on the host, we only read input here. */
-  private readGuestInput(dt: number): TankInput {
+  private readGuestInput(_dt: number): TankInput {
     const prefix = 'guest';
     const pointer = this.input.activePointer;
     const tank = this.p2;
     const aim = tank ? Math.atan2((pointer.worldY || 0) - tank.y, (pointer.worldX || 0) - tank.x) : 0;
-    const trim = (this.keyDown(prefix, 'aimRight') ? 1 : 0) - (this.keyDown(prefix, 'aimLeft') ? 1 : 0);
     if (this.keyJustDown(prefix, 'skill')) this.guestSkillLatch = true;
     const skill = this.guestSkillLatch;
-    // Without the mouse the guest still gets trim keys to swing the barrel.
+    // v1.3: no trim keys – the barrel points where the hull points unless the
+    // mouse says otherwise.
     const useMouse = Math.abs(pointer.worldX) > 0 || Math.abs(pointer.worldY) > 0;
-    const worldAim = useMouse && tank ? aim : (tank?.turretAngle ?? 0) + trim * 1.9 * dt;
+    const worldAim = useMouse && tank ? aim : (tank?.bodyAngle ?? 0);
     return {
       turn: (this.keyDown(prefix, 'right') ? 1 : 0) - (this.keyDown(prefix, 'left') ? 1 : 0),
       drive: (this.keyDown(prefix, 'up') ? 1 : 0) - (this.keyDown(prefix, 'down') ? 1 : 0),
@@ -1431,22 +1515,51 @@ export class GameScene extends Phaser.Scene {
     this.bullets = this.bullets.filter((b) => !b.dead);
   }
 
-  private damage(victim: Tank, attacker: TankId, amount = 1): void {
-    if (!victim.alive || this.phase !== 'playing') return;
+  /**
+   * v1.3: health-based, per-part damage.
+   *
+   * @param incoming direction the shell was travelling (radians). Omitted for
+   *   scripted/effect damage, which then uses the frontal value.
+   */
+  private damage(victim: Tank, attacker: TankId, incoming?: number): void {
+    if (!victim.alive || victim.awaitingRespawn || this.phase !== 'playing') return;
+
+    // Friendly fire and self damage are two separate switches (see rules.ts).
+    const attackerTank = this.tanks().find((t) => t.id === attacker) ?? null;
+    if (!canDamage(
+      attackerTank ? { id: attackerTank.id, team: attackerTank.team, alive: true } : null,
+      { id: victim.id, team: victim.team, alive: victim.alive },
+      settings.match
+    )) {
+      // Blocked by a toggle: still show that the shell connected.
+      this.puff(victim.x, victim.y, COLORS.ink, 3);
+      return;
+    }
+
+    const zone: HitZone = incoming === undefined ? 'front' : hitZone(victim.bodyAngle, incoming);
+    const amount = zoneDamage(zone, 1);
     if (victim.shielded()) {
       // Shield / invulnerability: absorb the hit with a visible, audible block.
       this.ring(victim.x, victim.y, PICKUPS.shield.color);
       this.puff(victim.x, victim.y, PICKUPS.shield.color, 5);
       this.netEvent('hit', victim.x, victim.y, { id: victim.id, color: PICKUPS.shield.color });
       sound.ping();
+      // v1.3: the *pickup* shield is one-shot – it eats a single hit and is
+      // gone. Skill invulnerability still runs for its full duration.
+      if (victim.shieldUntil > this.time.now) {
+        victim.shieldUntil = 0;
+        this.showBanner('护盾挡下一击，已消耗', 1.0);
+      }
       return;
     }
 
     const self = attacker === victim.id;
-    victim.lives = Math.max(0, victim.lives - amount);
+    victim.setHp(victim.hp - amount);
     victim.damage += 1;
     victim.redraw();
     this.hudDirty = true;
+    // Public float: everyone sees the same number, including the shooter.
+    this.floatText(victim.x, victim.y - 26, `-${amount}`, zone === 'back' ? COLORS.danger : COLORS.ink);
 
     if (!this.versus && victim.id !== 'p1') this.score += 150;
 
@@ -1461,8 +1574,12 @@ export class GameScene extends Phaser.Scene {
       this.showBanner('被自己的炮弹打到了！', 1.0);
     }
 
-    if (victim.lives <= 0) {
+    if (victim.hp <= 0) {
       victim.setAlive(false, this.time.now);
+      victim.deaths += 1;
+      victim.awaitingRespawn = true;
+      const killer = this.tanks().find((t) => t.id === attacker);
+      if (killer && killer !== victim) killer.kills += 1;
       this.explode(victim.x, victim.y, victim.color);
       this.bullets = this.bullets.filter((b) => b.owner === attacker);
       if (victim.id === 'enemy') {
@@ -1473,12 +1590,74 @@ export class GameScene extends Phaser.Scene {
         this.showBanner('击毁！', 1.2);
       } else {
         this.phase = 'dying';
-        this.phaseTimer = 1.15;
-        if (!this.versus) this.showBanner(`被击中！剩余 ${victim.lives === 0 ? 0 : victim.lives}`, 1.1);
+        this.phaseTimer = RESPAWN_DELAY;
+        if (!this.versus) this.showBanner('被击毁！', 1.1);
+        if (this.lanMode) this.scheduleRespawn(victim);
       }
-    } else {
-      victim.invulnerableUntil = this.time.now + HIT_MERCY * 1000;
     }
+  }
+
+  // ------------------------------------------------------------------ v1.3 match
+
+  /** Current score lines – the single source of truth for the win check. */
+  private scoreLines(): ScoreLine[] {
+    const list: ScoreLine[] = [];
+    for (const tank of this.tanks()) {
+      if (tank.id === 'enemy' && !this.lanMode) {
+        // Solo: the AI is an opponent but not a competitor for the win check.
+        continue;
+      }
+      list.push({
+        id: tank.id,
+        team: tank.team,
+        kills: tank.kills,
+        deaths: tank.deaths,
+        hp: tank.hp,
+        connected: true,
+      });
+    }
+    if (this.p2) {
+      // p2 is already in tanks(); nothing extra.
+    }
+    return list;
+  }
+
+  private matchResult(): MatchResult {
+    return evaluateMatch(this.scoreLines(), settings.match, this.matchElapsed);
+  }
+
+  /** Hands out a respawn point: mates first in team mode, farthest-away in FFA. */
+  private scheduleRespawn(tank: Tank): void {
+    const spawns: RespawnCandidate[] = (this.layout.spawns ?? [
+      { x: this.layout.player.x, y: this.layout.player.y, angle: this.layout.player.angle, id: 0 },
+      { x: this.layout.enemy.x, y: this.layout.enemy.y, angle: this.layout.enemy.angle, id: 1 },
+    ]).map((spawn, index) => ({ ...spawn, id: index }));
+
+    const chosen = chooseRespawn({
+      spawns,
+      players: this.tanks()
+        .filter((t) => t !== tank)
+        .map((t) => ({ x: t.x, y: t.y, team: t.team, alive: t.alive && !t.awaitingRespawn })),
+      team: tank.team,
+      mode: settings.match.mode,
+    });
+
+    if (!chosen) {
+      this.respawn(tank);
+      return;
+    }
+    tank.x = chosen.x;
+    tank.y = chosen.y;
+    tank.bodyAngle = chosen.angle;
+    tank.turretAngle = chosen.angle;
+    tank.turretOffset = 0;
+    tank.setHp(tank.maxHp);
+    tank.setAlive(true, this.time.now);
+    // Brief protection so a spawn can never be turned into a free kill.
+    tank.invulnerableUntil = this.time.now + RESPAWN_PROTECT * 1000;
+    tank.awaitingRespawn = false;
+    tank.sync(this.time.now);
+    this.ring(tank.x, tank.y, tank.color);
   }
 
   private breakCrate(crate: Crate, x: number, y: number): void {
@@ -1493,6 +1672,26 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ------------------------------------------------------------------ effects
+
+  /** Small drifting number, e.g. the damage a hit just did. */
+  private floatText(x: number, y: number, value: string, color: number): void {
+    const label = this.add
+      .text(x, y, value, {
+        fontFamily: FONT,
+        fontSize: '20px',
+        color: `#${color.toString(16).padStart(6, '0')}`,
+      })
+      .setOrigin(0.5)
+      .setDepth(60);
+    this.tweens.add({
+      targets: label,
+      y: y - 34,
+      alpha: 0,
+      duration: 700,
+      ease: 'Quad.easeOut',
+      onComplete: () => label.destroy(),
+    });
+  }
 
   private impactSpark(x: number, y: number, nx: number, ny: number, color: number): void {
     for (let i = 0; i < 5; i++) {
@@ -1604,7 +1803,10 @@ export class GameScene extends Phaser.Scene {
             y: Math.round(t.y * 10) / 10,
             body: Math.round(t.bodyAngle * 100) / 100,
             turret: Math.round(t.turretAngle * 100) / 100,
-            lives: t.lives,
+            hp: Math.round(t.hp),
+            kills: t.kills,
+            deaths: t.deaths,
+            team: t.team,
             damage: t.damage,
             alive: t.alive ? 1 : 0,
             shield: left(t.shieldUntil),
@@ -1668,7 +1870,7 @@ export class GameScene extends Phaser.Scene {
       tank.slowUntil = now + st.slow;
       tank.rageShots = st.rageShots;
       tank.skillReadyAt = now + st.skillCd;
-      tank.lives = st.lives;
+      tank.setHp(st.hp);
       if (tank.damage !== st.damage) {
         tank.damage = st.damage;
         tank.redraw();
@@ -1709,7 +1911,7 @@ export class GameScene extends Phaser.Scene {
 
     if (snap.level !== this.levelIndex) {
       // Level changed on the host – rebuild the arena locally.
-      const keepLives = { p1: this.p1?.lives ?? VERSUS_LIVES, p2: this.p2?.lives ?? VERSUS_LIVES };
+      const keepHp = { p1: this.p1?.hp ?? VERSUS_HP, p2: this.p2?.hp ?? VERSUS_HP };
       this.levelIndex = snap.level;
       this.layout = buildLayout(LEVELS[snap.level], PLAY_RECT);
       const level = LEVELS[snap.level];
@@ -1717,8 +1919,8 @@ export class GameScene extends Phaser.Scene {
       this.p2?.destroy();
       this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
       this.p2 = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'p2', 22);
-      this.p1.lives = keepLives.p1;
-      this.p2.lives = keepLives.p2;
+      this.p1.setHp(keepHp.p1);
+      this.p2.setHp(keepHp.p2);
       this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
       this.resetPickups(snap.level);
       this.particles = [];

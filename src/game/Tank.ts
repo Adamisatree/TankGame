@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { COLORS, FONT } from './config';
+import { MAX_HP } from './rules';
 import { Sketch } from './Sketch';
 
 export type TankId = 'p1' | 'p2' | 'enemy';
@@ -12,6 +13,13 @@ const COLORS_BY_ID: Record<TankId, number> = {
   p2: COLORS.player2,
   enemy: COLORS.enemy,
 };
+
+/** Team colours used by LAN team mode / FFA fallback. */
+export const TEAM_COLORS = [COLORS.player, COLORS.player2, 0xd4a72e, COLORS.enemy];
+
+export function teamColor(team: number): number {
+  return TEAM_COLORS[(((team ?? 0) % TEAM_COLORS.length) + TEAM_COLORS.length) % TEAM_COLORS.length];
+}
 
 const LABEL_BY_ID: Record<TankId, string> = {
   p1: 'P1',
@@ -35,7 +43,8 @@ const HULL: { x: number; y: number }[] = [
 export class Tank {
   readonly scene: Phaser.Scene;
   readonly id: TankId;
-  readonly color: number;
+  /** Settable so LAN players can be recoloured by team. */
+  color: number;
   readonly radius = 22;
 
   x: number;
@@ -53,7 +62,16 @@ export class Tank {
   invulnerableUntil = 0;
   /** How many hits this tank has taken (drawn as tally marks). */
   damage = 0;
-  lives = 3;
+  /** v1.3: every mode is health-based. `lives` is gone. */
+  hp = MAX_HP;
+  maxHp = MAX_HP;
+  /** Kills / deaths, shown on the public score bar. */
+  kills = 0;
+  deaths = 0;
+  /** Team index (0 = none in FFA). Drives the colour of the name tag. */
+  team = 0;
+  /** False while waiting to respawn. */
+  awaitingRespawn = false;
 
   // ---- temporary states, all absolute timestamps (ms on the scene clock)
   /** Pickup shield: blocks damage. */
@@ -71,6 +89,8 @@ export class Tank {
 
   private hull: Sketch;
   private turret: Sketch;
+  private overlay: Sketch;
+  private bar: Sketch;
   private tag: Phaser.GameObjects.Text;
 
   constructor(scene: Phaser.Scene, x: number, y: number, angle: number, id: TankId, depth = 20) {
@@ -84,6 +104,10 @@ export class Tank {
 
     this.hull = new Sketch(scene, depth);
     this.turret = new Sketch(scene, depth + 1);
+    // Firing arc + rear marker sit under the hull so they never hide the enemy.
+    this.overlay = new Sketch(scene, depth - 1);
+    // Health bar floats above the tank.
+    this.bar = new Sketch(scene, depth + 3);
     this.tag = scene.add
       .text(x, y - 38, LABEL_BY_ID[id], {
         fontFamily: FONT,
@@ -99,23 +123,106 @@ export class Tank {
   }
 
   setDepth(depth: number): void {
+    this.overlay.setDepth(depth - 1);
     this.hull.setDepth(depth);
     this.turret.setDepth(depth + 1);
     this.tag.setDepth(depth + 2);
+    this.bar.setDepth(depth + 3);
   }
 
   private applyVisual(now: number): void {
     if (!this.alive) {
       this.hull.setAlpha(0);
       this.turret.setAlpha(0);
+      this.overlay.setAlpha(0);
       this.tag.setAlpha(0);
+      this.bar.setAlpha(0);
       return;
     }
     const invuln = this.invulnerableUntil > now;
     const blink = invuln ? (Math.floor(now / 90) % 2 === 0 ? 0.35 : 1) : 1;
     this.hull.setAlpha(blink);
     this.turret.setAlpha(blink);
+    this.overlay.setAlpha(blink);
     this.tag.setAlpha(0.85 * blink);
+    this.bar.setAlpha(1);
+  }
+
+  /** Fraction of health left, clamped to 0..1. */
+  hpRatio(): number {
+    return Math.max(0, Math.min(1, this.hp / Math.max(1, this.maxHp)));
+  }
+
+  setHp(hp: number): void {
+    this.hp = Math.max(0, Math.min(this.maxHp, hp));
+  }
+
+  /**
+   * Redraws the bits that change every frame: the firing arc, the rear marker
+   * and the public health bar.
+   */
+  drawOverlay(): void {
+    const o = this.overlay;
+    o.clear();
+    o.graphics.setPosition(this.x, this.y).setRotation(this.bodyAngle);
+
+    // ---- firing arc (the "攻角范围" the player asked to see)
+    const r = 40;
+    o.graphics.lineStyle(1.6, COLORS.ink, 0.28);
+    o.graphics.beginPath();
+    o.graphics.arc(0, 0, r, -TURRET_LIMIT, TURRET_LIMIT, false);
+    o.graphics.strokePath();
+    // End stops, so the limits are unmistakable.
+    for (const end of [-TURRET_LIMIT, TURRET_LIMIT]) {
+      o.graphics.lineStyle(1.8, COLORS.ink, 0.42);
+      o.graphics.beginPath();
+      o.graphics.moveTo(Math.cos(end) * (r - 5), Math.sin(end) * (r - 5));
+      o.graphics.lineTo(Math.cos(end) * (r + 5), Math.sin(end) * (r + 5));
+      o.graphics.strokePath();
+    }
+    // The barrel's actual line, so the arc reads as "this is where I can shoot".
+    o.graphics.lineStyle(1.2, this.color, 0.5);
+    o.graphics.beginPath();
+    o.graphics.moveTo(0, 0);
+    const aim = this.turretAngle - this.bodyAngle;
+    o.graphics.lineTo(Math.cos(aim) * r, Math.sin(aim) * r);
+    o.graphics.strokePath();
+
+    // ---- rear marker: a red dot on the tail, so front vs back is obvious
+    const back = -this.radius - 6;
+    o.graphics.fillStyle(COLORS.danger, 0.85);
+    o.graphics.fillCircle(back, 0, 4.2);
+    o.graphics.lineStyle(1.4, COLORS.ink, 0.5);
+    o.graphics.beginPath();
+    o.graphics.arc(0, 0, this.radius + 6, Math.PI - 0.45, Math.PI + 0.45, false);
+    o.graphics.strokePath();
+
+    // ---- health bar under the tank, always public
+    const b = this.bar;
+    b.clear();
+    const w = 62;
+    const h = 9;
+    const x = this.x - w / 2;
+    const y = this.y + this.radius + 10;
+    b.graphics.fillStyle(COLORS.white, 0.9);
+    b.graphics.fillRoundedRect(x, y, w, h, 3);
+    const ratio = this.hpRatio();
+    const fill = ratio > 0.6 ? this.color : ratio > 0.3 ? 0xd4a72e : COLORS.danger;
+    if (ratio > 0) {
+      b.graphics.fillStyle(fill, 0.95);
+      b.graphics.fillRoundedRect(x + 1, y + 1, Math.max(0, (w - 2) * ratio), h - 2, 2);
+    }
+    b.graphics.lineStyle(1.4, COLORS.ink, 0.55);
+    b.graphics.strokeRoundedRect(x, y, w, h, 3);
+    // Ten notches: easy to read ~10 HP per shot at a glance.
+    b.graphics.lineStyle(0.9, COLORS.ink, 0.25);
+    for (let i = 1; i < 10; i += 1) {
+      const nx = x + (w / 10) * i;
+      b.graphics.beginPath();
+      b.graphics.moveTo(nx, y + 1);
+      b.graphics.lineTo(nx, y + h - 1);
+      b.graphics.strokePath();
+    }
   }
 
   /** Speed multiplier from all active effects. */
@@ -170,7 +277,8 @@ export class Tank {
   sync(now = this.scene.time.now): void {
     this.hull.graphics.setPosition(this.x, this.y).setRotation(this.bodyAngle);
     this.turret.graphics.setPosition(this.x, this.y).setRotation(this.turretAngle);
-    this.tag.setPosition(this.x, this.y - 38);
+    this.tag.setPosition(this.x, this.y - 42);
+    this.drawOverlay();
     this.applyVisual(now);
   }
 
@@ -296,6 +404,8 @@ export class Tank {
   destroy(): void {
     this.hull.destroy();
     this.turret.destroy();
+    this.overlay.destroy();
+    this.bar.destroy();
     this.tag.destroy();
   }
 }

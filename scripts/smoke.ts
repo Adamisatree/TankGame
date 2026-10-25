@@ -198,7 +198,13 @@ type TankRef = {
   x: number;
   y: number;
   alive: boolean;
-  lives: number;
+  hp: number;
+  maxHp: number;
+  kills: number;
+  deaths: number;
+  team: number;
+  shieldUntil: number;
+  awaitingRespawn: boolean;
   invulnerableUntil: number;
   radius: number;
   bodyAngle: number;
@@ -246,7 +252,8 @@ const settings = (await import('../src/game/settings')).settings;
 check('game scene is active', scene.scene.isActive());
 check('game loop is running', game.loop.running, `frame=${game.loop.frame}`);
 check('solo mode by default', !poke.versus);
-check('easy preset gives five lives', poke.p1.lives === 5, `lives=${poke.p1.lives}`);
+check('everyone starts on 100 HP', poke.p1.hp === 100 && poke.p1.maxHp === 100, `hp=${poke.p1.hp}`);
+check('the AI is on the same health pool', poke.enemy?.hp === 100, `hp=${poke.enemy?.hp}`);
 check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.now);
 
 // Wait for the ready banner, then let a real skirmish run.
@@ -278,23 +285,26 @@ check('the AI fires shells', sawEnemyShell);
 poke.bullets.length = 0;
 poke.aiGraceUntil = 1e15;
 poke.aiCharge = 0;
-const beforeSelf = poke.p1.lives;
+const beforeSelf = poke.p1.hp;
 poke.p1.invulnerableUntil = 0;
 // Fire a shell into the wall right behind us, so it comes straight back.
 const wallDir = Math.PI;
 poke.spawnBullet(poke.p1.x + Math.cos(wallDir) * 60, poke.p1.y, wallDir, 'p1', 1200, 4);
 await wait(1500);
 check('own shells are tracked as p1', true);
-check('our own ricochet can hurt us', poke.p1.lives < beforeSelf, `lives=${poke.p1.lives}`);
+check('our own ricochet can hurt us', poke.p1.hp < beforeSelf, `hp=${poke.p1.hp}`);
 
 // --- enemy shell must cost a life too.
 await wait(1400);
 poke.bullets.length = 0;
 poke.p1.invulnerableUntil = 0;
-const beforeEnemy = poke.p1.lives;
-poke.spawnBullet(poke.p1.x - 60, poke.p1.y, 0, 'enemy', 700, 4);
+const beforeEnemy = poke.p1.hp;
+poke.spawnBullet(poke.p1.x - 60, poke.p1.y, 0, 'enemy', 700, 2);
 await wait(400);
-check('an enemy shell costs a life', poke.p1.lives === beforeEnemy - 1, `lives=${poke.p1.lives} phase=${poke.phase}`);
+// Exact per-part numbers are covered by the pure rules test; here we only
+// prove an enemy shell really takes health off.
+check('an enemy shell costs HP', poke.p1.hp < beforeEnemy, `hp=${poke.p1.hp} phase=${poke.phase}`);
+check('damage stays in the per-part range', beforeEnemy - poke.p1.hp <= 24, `${beforeEnemy} -> ${poke.p1.hp}`);
 await wait(1800);
 check('the player respawns after dying', poke.p1.alive && poke.phase === 'playing', `phase=${poke.phase}`);
 
@@ -312,13 +322,17 @@ poke.setAutoDodge(false);
 poke.bullets.length = 0;
 poke.p1.invulnerableUntil = 1e15;
 const levelBefore = poke.levelIndex;
-for (let i = 0; i < 3; i++) {
+// Short health so the test is about the kill → next-level flow, not about how
+// many shells a 100 HP target needs.
+poke.enemy!.setHp(20);
+for (let i = 0; i < 4; i++) {
   const e = poke.enemy!;
+  if (!e || !e.alive) break;
   e.invulnerableUntil = 0;
-  poke.spawnBullet(e.x - 60, e.y, 0, 'p1', 900, 4);
-  await wait(320);
+  poke.spawnBullet(e.x - 60, e.y, 0, 'p1', 900, 2);
+  await wait(340);
 }
-check('the AI tank is destroyed after three hits', poke.phase === 'cleared' || !poke.enemy?.alive, poke.phase);
+check('the AI tank dies after enough hits', poke.phase === 'cleared' || !poke.enemy?.alive, poke.phase);
 await wait(2200);
 check('the next level loads', poke.levelIndex === levelBefore + 1 || poke.phase === 'victory', `level=${poke.levelIndex}`);
 
@@ -327,20 +341,20 @@ settings.mode = 'versus';
 poke.restartGame();
 await wait(1500);
 check('versus mode has two human tanks', !!poke.p2 && !poke.enemy);
-check('versus uses three lives each', poke.p1.lives === 3 && poke.p2?.lives === 3, `p1=${poke.p1.lives} p2=${poke.p2?.lives}`);
-const p2LivesBefore = poke.p2!.lives;
+check('versus gives both sides 100 HP', poke.p1.hp === 100 && poke.p2?.hp === 100, `p1=${poke.p1.hp} p2=${poke.p2?.hp}`);
+const p2HpBefore = poke.p2!.hp;
 poke.p2!.invulnerableUntil = 0;
-poke.spawnBullet(poke.p2!.x - 60, poke.p2!.y, 0, 'p1', 900, 4);
+poke.spawnBullet(poke.p2!.x - 60, poke.p2!.y, 0, 'p1', 900, 2);
 await wait(400);
-check('P1 can damage P2', poke.p2!.lives === p2LivesBefore - 1, `p2=${poke.p2!.lives}`);
+check('P1 can damage P2', poke.p2!.hp < p2HpBefore, `p2=${poke.p2!.hp}`);
 
 // --- restart resets everything.
 poke.restartGame();
 await wait(1400);
 check(
-  'restart resets lives and level',
-  poke.p1.lives === 3 && poke.p2?.lives === 3 && poke.levelIndex === 0,
-  `p1=${poke.p1.lives} p2=${poke.p2?.lives} level=${poke.levelIndex}`
+  'restart resets health and level',
+  poke.p1.hp === 100 && poke.p2?.hp === 100 && poke.levelIndex === 0,
+  `p1=${poke.p1.hp} p2=${poke.p2?.hp} level=${poke.levelIndex}`
 );
 
 // --- back to solo: the AI must dodge and must find shots.
@@ -414,7 +428,7 @@ check('the guest starts receiving snapshots', snapSeen().length > 0, `got ${snap
 const lastSnap = () => snapSeen()[snapSeen().length - 1];
 check('snapshots describe both tanks', (lastSnap()?.tanks?.length ?? 0) === 2, JSON.stringify(lastSnap()?.tanks?.length));
 check(
-  'snapshots carry lives, phase and level',
+  'snapshots carry health, phase and level',
   typeof lastSnap()?.phase === 'string' && typeof lastSnap()?.level === 'number' && Array.isArray(lastSnap()?.crates),
   JSON.stringify({ phase: lastSnap()?.phase, level: lastSnap()?.level })
 );
@@ -467,12 +481,12 @@ check(
 const spot = poke.pickups[0];
 spot.kind = 'health';
 spot.respawn = 0;
-poke.p1.lives = 2;
-const beforeLives = poke.p1.lives;
+poke.p1.setHp(40);
+const beforeHp = poke.p1.hp;
 poke.p1.x = spot.x;
 poke.p1.y = spot.y;
 await wait(250);
-check('touching a medkit heals immediately', poke.p1.lives === beforeLives + 1, `${beforeLives} -> ${poke.p1.lives}`);
+check('touching a medkit heals 40 HP', poke.p1.hp === beforeHp + 40, `${beforeHp} -> ${poke.p1.hp}`);
 check('a collected pickup goes on cooldown', spot.respawn > 0, `${spot.respawn.toFixed(1)}s`);
 
 // A shield must absorb the next hit instead of costing a life.
@@ -482,11 +496,17 @@ shieldSpot.respawn = 0;
 poke.p1.x = shieldSpot.x;
 poke.p1.y = shieldSpot.y;
 await wait(200);
-const shielded = poke.p1.lives;
+const shielded = poke.p1.hp;
 poke.p1.invulnerableUntil = 0;
-poke.fire(poke.p1);
-await wait(700);
-check('a shield blocks damage', poke.p1.lives === shielded, `${shielded} -> ${poke.p1.lives}`);
+// Park the tank mid-arena and shoot it point blank, so the test does not depend
+// on where its own ricochet happens to go.
+poke.p1.x = 640;
+poke.p1.y = 420;
+poke.spawnBullet(poke.p1.x - 50, poke.p1.y, 0, 'enemy', 600, 2);
+await wait(500);
+check('a shield blocks the hit', poke.p1.hp === shielded, `${shielded} -> ${poke.p1.hp}`);
+// v1.3: one hit is all it stops.
+check('the shield is used up by that hit', poke.p1.shieldUntil <= scene.time.now, `until=${poke.p1.shieldUntil} now=${scene.time.now}`);
 
 // Turret is mounted on the hull: turning the hull carries the barrel.
 poke.p1.x = 640;

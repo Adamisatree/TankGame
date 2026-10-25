@@ -8,6 +8,12 @@ export interface TankSpawn {
 }
 
 export interface Level {
+  /** v1.3: multiplayer levels may be larger than the screen (world pixels). */
+  world?: { w: number; h: number };
+  /** v1.3: respawn points for FFA / team matches. */
+  spawns?: { x: number; y: number; angle: number }[];
+  /** v1.3: how many players this map is comfortable with. */
+  seats?: number[];
   /** Stable id, used by the menu and by saved selections. */
   id: string;
   name: string;
@@ -40,6 +46,8 @@ export interface Layout {
   crates: Box[];
   player: TankSpawn;
   enemy: TankSpawn;
+  /** v1.3 multiplayer: every respawn point, best-away-first chosen at death. */
+  spawns: TankSpawn[];
 }
 
 const box = (x: number, y: number, w: number, h: number): Box => ({ x, y, w, h });
@@ -90,9 +98,13 @@ export function buildLayout(level: Level, rect: PlayRect, thickness = 14): Layou
     angle: s.angle,
   });
 
+  const fallbackSpawns: TankSpawn[] = [level.player, level.enemy];
+  const spawnPoints = (level.spawns && level.spawns.length >= 2 ? level.spawns : fallbackSpawns).map(place);
+
   return {
     rect,
     walls,
+    spawns: spawnPoints,
     crates: level.crates.map(project),
     player: place(level.player),
     enemy: place(level.enemy),

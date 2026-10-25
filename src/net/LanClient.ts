@@ -21,6 +21,8 @@ export interface LanHandlers {
   /** The other player's summoner skill choice, announced when pairing. */
   onPeerSkill?: (skill: string) => void;
   onLog?: (line: string) => void;
+  /** The other side quit on purpose (not a dropped connection). */
+  onSurrender?: (by: string) => void;
 }
 
 /**
@@ -110,6 +112,10 @@ export class LanClient {
             /* already gone */
           }
           break;
+        case 'surrender':
+          // Relayed by the server when the other side quits on purpose.
+          this.handlers.onSurrender?.(msg.by);
+          break;
         case 'joined':
           if (msg.skill) this.handlers.onPeerSkill?.(msg.skill);
           if (this.role === 'guest' && msg.host) this.setStatus('playing');
@@ -184,7 +190,7 @@ export class LanClient {
   }
 
   send(message: HostMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.role !== 'host') return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(message));
   }
 
