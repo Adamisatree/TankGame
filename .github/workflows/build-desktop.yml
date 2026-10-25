@@ -65,10 +65,20 @@ jobs:
           path: release/desktop/*.exe
           if-no-files-found: error
 
+      - name: Find the single-file build
+        shell: bash
+        run: |
+          # Only the build we just made: a stale file left in release/ must never
+          # ride along into the next release's assets.
+          version=$(node -p "require('./package.json').version")
+          echo "PORTABLE_HTML=release/TankGame-${version}-portable.html" >> "$GITHUB_ENV"
+          ls -l "release/TankGame-${version}-portable.html"
+
       - uses: actions/upload-artifact@v4
         with:
           name: TankGame-portable-html
-          path: release/TankGame-*-portable.html
+          path: ${{ env.PORTABLE_HTML }}
+          if-no-files-found: error
 
   macos:
     name: macOS (dmg, Apple Silicon + Intel)
