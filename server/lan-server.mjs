@@ -116,10 +116,11 @@ function send(ws, msg) {
   if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
+/** The guest's menu choice travels with the pairing so the host can use it. */
 function pair() {
   if (!room.host || !room.guest) return;
-  send(room.host, { t: 'peer', state: 'joined' });
-  send(room.guest, { t: 'paired' });
+  send(room.host, { t: 'peer', state: 'joined', skill: room.guest.skill });
+  send(room.guest, { t: 'paired', skill: room.host.skill });
   console.log('[lan] host <-> guest paired');
 }
 
@@ -163,6 +164,7 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
 
       if (msg.t === 'join') {
         const role = msg.role === 'host' ? 'host' : 'guest';
+        ws.skill = typeof msg.skill === 'string' ? msg.skill : undefined;
         if (role === 'host') {
           if (room.host && room.host !== ws) send(room.host, { t: 'replaced' });
           room.host = ws;
@@ -176,7 +178,7 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
           room.guest = ws;
           ws.role = 'guest';
           totalPlayers++;
-          send(ws, { t: 'joined', role: 'guest', host: !!room.host });
+          send(ws, { t: 'joined', role: 'guest', host: !!room.host, skill: room.host?.skill });
           console.log('[lan] guest joined');
           pair();
         }

@@ -25,3 +25,6 @@ dist-single/
 
 # electron-builder output (installers are attached to GitHub releases)
 release/desktop/
+
+# generated portable build (attached to releases by CI)
+release/*.html

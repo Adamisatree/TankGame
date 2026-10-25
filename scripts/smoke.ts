@@ -194,9 +194,22 @@ const check = (name: string, ok: boolean, detail?: string): void => {
   console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail && !ok ? ` — ${detail}` : ''}`);
 };
 
-type TankRef = { x: number; y: number; alive: boolean; lives: number; invulnerableUntil: number; radius: number };
+type TankRef = {
+  x: number;
+  y: number;
+  alive: boolean;
+  lives: number;
+  invulnerableUntil: number;
+  radius: number;
+  bodyAngle: number;
+  turretAngle: number;
+  turretOffset: number;
+  rageShots: number;
+  aimAt: (angle: number) => void;
+  turnHull: (delta: number) => void;
+};
 type Poked = {
-  bullets: { owner: string; dead: boolean }[];
+  bullets: { owner: string; dead: boolean; x: number; y: number; vx: number; vy: number; dmg: number }[];
   particles: unknown[];
   score: number;
   levelIndex: number;
@@ -208,7 +221,18 @@ type Poked = {
   p1: TankRef;
   p2?: TankRef;
   enemy?: TankRef;
-  layout: { player: { x: number; y: number } };
+  layout: {
+    player: { x: number; y: number };
+    enemy: { x: number; y: number };
+    walls: { x: number; y: number; w: number; h: number }[];
+    crates: { x: number; y: number; w: number; h: number }[];
+  };
+  pickups: { kind: string; x: number; y: number; respawn: number; pop: number }[];
+  keys: Map<string, { keyCode: number; isDown: boolean }>;
+  useSkill: (tank: unknown) => boolean;
+  skillP1: string;
+  connected: boolean;
+  skillReadyAt: number;
   spawnBullet: (x: number, y: number, dir: number, owner: 'p1' | 'p2' | 'enemy', speed: number, maxBounces: number) => void;
   fire: (tank: unknown) => void;
   firePlayer?: () => void;
@@ -229,21 +253,24 @@ check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.no
 await wait(1600);
 check('the match starts playing', poke.phase === 'playing', poke.phase);
 
-const fireTimer = setInterval(() => {
-  const tank = poke.p1;
-  if (tank.alive) poke.fire(tank);
-}, 200);
-await wait(2600);
-clearInterval(fireTimer);
-
 let sawEnemyShell = false;
 let sawPlayerShell = false;
-for (let i = 0; i < 70 && !(sawEnemyShell && sawPlayerShell); i++) {
-  const shells = poke.bullets;
-  sawEnemyShell ||= shells.some((b) => b.owner === 'enemy');
-  sawPlayerShell ||= shells.some((b) => b.owner === 'p1');
-  if (!(sawEnemyShell && sawPlayerShell)) await wait(100);
-}
+const fireTimer = setInterval(() => {
+  const tank = poke.p1;
+  if (!tank.alive) return;
+  // The barrel is mounted on the hull, so aim by pointing the tank.
+  if (poke.enemy) {
+    const a = Math.atan2(poke.enemy.y - tank.y, poke.enemy.x - tank.x);
+    tank.bodyAngle = a;
+    tank.aimAt(a);
+  }
+  poke.fire(tank);
+  // Sample while the shells are in flight – they die fast against the walls.
+  sawPlayerShell ||= poke.bullets.some((b) => b.owner === 'p1');
+  sawEnemyShell ||= poke.bullets.some((b) => b.owner === 'enemy');
+}, 120);
+for (let i = 0; i < 40 && !(sawEnemyShell && sawPlayerShell); i++) await wait(100);
+clearInterval(fireTimer);
 check('player shells exist', sawPlayerShell);
 check('the AI fires shells', sawEnemyShell);
 
@@ -255,8 +282,8 @@ const beforeSelf = poke.p1.lives;
 poke.p1.invulnerableUntil = 0;
 // Fire a shell into the wall right behind us, so it comes straight back.
 const wallDir = Math.PI;
-poke.spawnBullet(poke.p1.x + Math.cos(wallDir) * 60, poke.p1.y, wallDir, 'p1', 900, 4);
-await wait(900);
+poke.spawnBullet(poke.p1.x + Math.cos(wallDir) * 60, poke.p1.y, wallDir, 'p1', 1200, 4);
+await wait(1500);
 check('own shells are tracked as p1', true);
 check('our own ricochet can hurt us', poke.p1.lives < beforeSelf, `lives=${poke.p1.lives}`);
 
@@ -425,6 +452,102 @@ settings.lanAddress = '';
 poke.restartGame();
 await wait(1200);
 check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown }).lan, 'socket still open');
+
+// ---------------------------------------------------------------- new systems
+
+// Pickups: scattered on the chosen map and collectable by touch.
+check('the map seeds pickups', poke.pickups.length >= 3, `${poke.pickups.length}`);
+check(
+  'pickups sit inside the arena',
+  poke.pickups.every(
+    (p) => p.x > 0 && p.y > 0 && p.x < 1280 && p.y < 720
+  )
+);
+
+const spot = poke.pickups[0];
+spot.kind = 'health';
+spot.respawn = 0;
+poke.p1.lives = 2;
+const beforeLives = poke.p1.lives;
+poke.p1.x = spot.x;
+poke.p1.y = spot.y;
+await wait(250);
+check('touching a medkit heals immediately', poke.p1.lives === beforeLives + 1, `${beforeLives} -> ${poke.p1.lives}`);
+check('a collected pickup goes on cooldown', spot.respawn > 0, `${spot.respawn.toFixed(1)}s`);
+
+// A shield must absorb the next hit instead of costing a life.
+const shieldSpot = poke.pickups[1];
+shieldSpot.kind = 'shield';
+shieldSpot.respawn = 0;
+poke.p1.x = shieldSpot.x;
+poke.p1.y = shieldSpot.y;
+await wait(200);
+const shielded = poke.p1.lives;
+poke.p1.invulnerableUntil = 0;
+poke.fire(poke.p1);
+await wait(700);
+check('a shield blocks damage', poke.p1.lives === shielded, `${shielded} -> ${poke.p1.lives}`);
+
+// Turret is mounted on the hull: turning the hull carries the barrel.
+poke.p1.x = 640;
+poke.p1.y = 420;
+poke.p1.turretOffset = 0.4;
+poke.p1.bodyAngle = 0;
+poke.p1.turretAngle = 0.4;
+const bodyBefore = { body: poke.p1.bodyAngle, turret: poke.p1.turretAngle, offset: poke.p1.turretOffset };
+poke.p1.turnHull(0.5);
+check(
+  'the barrel rotates with the hull',
+  Math.abs(poke.p1.turretAngle - (bodyBefore.turret + 0.5)) < 1e-6,
+  `turret ${poke.p1.turretAngle}`
+);
+check(
+  'the barrel keeps its offset from the nose',
+  Math.abs(poke.p1.turretOffset - bodyBefore.offset) < 1e-6,
+  `${poke.p1.turretOffset}`
+);
+poke.p1.aimAt(poke.p1.bodyAngle + 3);
+check(
+  'aiming is clamped to the mount arc',
+  Math.abs(poke.p1.turretOffset) <= Math.PI / 2 + 1e-6,
+  `${poke.p1.turretOffset.toFixed(2)} rad`
+);
+
+// Bug fix: a barrel pressed against a wall must not fire through it.
+// The outer frame is appended last: [level walls..., top, bottom, left, right].
+const topWall = poke.layout.walls[poke.layout.walls.length - 4];
+poke.p1.x = 500;
+poke.p1.y = topWall.y + topWall.h + poke.p1.radius + 0.5;
+poke.p1.bodyAngle = -Math.PI / 2;
+poke.p1.turretOffset = 0;
+poke.p1.turretAngle = -Math.PI / 2;
+poke.bullets.length = 0;
+poke.fire(poke.p1);
+const shot = poke.bullets[0];
+check(
+  'a point-blank shot never starts behind the wall',
+  !shot || shot.y >= topWall.y + topWall.h - 1,
+  shot ? `spawned at y=${shot.y.toFixed(1)}, wall ends ${(topWall.y + topWall.h).toFixed(1)}` : 'no shell (dry click)'
+);
+
+// Summoner skills.
+settings.skillP1 = 'rage';
+poke.restartGame();
+await wait(1500);
+check('the skill choice is applied to the scuffle', poke.skillP1 === 'rage', poke.skillP1);
+const used = poke.useSkill(poke.p1);
+check('the skill can be triggered', used);
+check('rage loads extra-damage shells', poke.p1.rageShots === 5, `${poke.p1.rageShots}`);
+check('the skill goes on cooldown', poke.useSkill(poke.p1) === false);
+
+// Bound keys are live in the running scene.
+const bindings = (await import('../src/game/keybinds')).getBindings();
+check(
+  'the scene listens on the rebound keys',
+  poke.keys.get('p1.up')?.keyCode === bindings.solo.up &&
+    poke.keys.get('p1.fire')?.keyCode === bindings.solo.fire,
+  `${poke.keys.get('p1.up')?.keyCode} vs ${bindings.solo.up}`
+);
 
 console.log('');
 const failed = checks.filter((c) => !c.ok);

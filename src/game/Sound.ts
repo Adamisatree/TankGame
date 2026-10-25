@@ -94,6 +94,12 @@ export class Sound {
     this.tone('sawtooth', 180, 40, 0.5, 0.3);
   }
 
+  /** Bright two-note chime when a pickup is collected. */
+  pickup(): void {
+    this.tone('triangle', 720, 1180, 0.12, 0.35);
+    this.tone('triangle', 1180, 1560, 0.14, 0.22, 0.07);
+  }
+
   ui(): void {
     this.tone('triangle', 660, 880, 0.08, 0.18);
   }

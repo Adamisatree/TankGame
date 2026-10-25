@@ -1,20 +1,27 @@
 import Phaser from 'phaser';
 import { planRicochetShot, type ShotPlan } from '../engine/ai';
 import { advanceBullet, type BulletTarget } from '../engine/bullet';
-import { LEVELS, buildLayout, type Layout, type PlayRect } from '../engine/level';
+import { LEVELS, buildLayout, levelIndexById, randomLevelIndex, type Layout, type PlayRect } from '../engine/level';
 import { circleBox, reflect, sweepCircleBox, type Box } from '../engine/physics';
 import { bulletThreatAt, pickHeading, steerTo, type ThreatBullet } from '../engine/steer';
 import { BULLET, COLORS, GAME_H, GAME_W, HIT_MERCY, TANK } from './config';
 import { OVERLAY_EVENT, type OverlayState } from './events';
 import { Sketch } from './Sketch';
-import { Tank, type TankId } from './Tank';
+import { Tank, TURRET_LIMIT, type TankId } from './Tank';
+import { getBindings, keyLabel, SEAT_ACTIONS, type SeatAction, type SeatBindings } from './keybinds';
+import { makePickup, PICKUPS, PICKUP_RADIUS, PICKUP_RESPAWN, rollPickupKind, type Pickup } from './pickups';
+import { isSkillId, RAGE_SHOTS, skillById, type SkillId } from './skills';
 import { makeTextures, paperBackground } from './art';
 import { sound } from './Sound';
 import { preset, settings, VERSUS_LIVES, type DifficultyPreset } from './settings';
-import { LanClient } from '../net/LanClient';
+import { fetchLanInfo, LanClient } from '../net/LanClient';
+import { DEFAULT_LAN_PORT } from '../net/protocol';
 import type { NetEvent, Snapshot, TankInput } from '../net/protocol';
 
 /** Drawing area, leaving room for the sketch HUD at the top and hints below. */
+/** Arenas per solo run. */
+const SOLO_CAMPAIGN_LENGTH = 5;
+
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
 
 type Phase = 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver';
@@ -30,6 +37,8 @@ interface Bullet {
   maxBounces: number;
   life: number;
   dead: boolean;
+  /** 1 normally, 2 while 狂暴 is up. */
+  dmg: number;
   trail: { x: number; y: number }[];
 }
 
@@ -49,13 +58,6 @@ interface Particle {
   color: number;
   kind: 'spark' | 'puff' | 'ring' | 'debris';
   angle: number;
-}
-
-interface DriveKeys {
-  up: Phaser.Input.Keyboard.Key;
-  down: Phaser.Input.Keyboard.Key;
-  left: Phaser.Input.Keyboard.Key;
-  right: Phaser.Input.Keyboard.Key;
 }
 
 interface AiDecision {
@@ -92,6 +94,7 @@ export class GameScene extends Phaser.Scene {
   private p2?: Tank;
   private enemy?: Tank;
   private crates: Crate[] = [];
+  private pickups: Pickup[] = [];
   private bullets: Bullet[] = [];
   private particles: Particle[] = [];
 
@@ -112,21 +115,18 @@ export class GameScene extends Phaser.Scene {
   private aiRoam = { x: 0, y: 0 };
   private aiRoamTimer = 0;
 
-  // Input.
-  private wasd!: DriveKeys;
-  private arrows!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private fire1!: Phaser.Input.Keyboard.Key;
-  private fire2!: Phaser.Input.Keyboard.Key;
-  private trimLeft1!: Phaser.Input.Keyboard.Key;
-  private trimRight1!: Phaser.Input.Keyboard.Key;
-  private trimLeft2!: Phaser.Input.Keyboard.Key;
-  private trimRight2!: Phaser.Input.Keyboard.Key;
-  private shiftKey!: Phaser.Input.Keyboard.Key;
-  private pauseKey!: Phaser.Input.Keyboard.Key;
-  private escKey!: Phaser.Input.Keyboard.Key;
-  private muteKey!: Phaser.Input.Keyboard.Key;
-  private autoKey!: Phaser.Input.Keyboard.Key;
-  private guestKeys!: { w: Phaser.Input.Keyboard.Key; a: Phaser.Input.Keyboard.Key; s: Phaser.Input.Keyboard.Key; d: Phaser.Input.Keyboard.Key };
+  /** Map index the current match started on (solo marches on from here). */
+  private startIndex = 0;
+  /** How many arenas the solo run has cleared. */
+  private levelsCleared = 0;
+  /** Summoner skills, per seat. */
+  private skillP1: SkillId = 'blink';
+  private skillP2: SkillId = 'blink';
+  private skillLabel1?: Phaser.GameObjects.Text;
+  private skillLabel2?: Phaser.GameObjects.Text;
+
+  // Input: one Phaser Key per bound action, keyed by "<prefix>.<action>".
+  private keys = new Map<string, Phaser.Input.Keyboard.Key>();
 
   private fireCd1 = 0;
   private fireCd2 = 0;
@@ -143,9 +143,60 @@ export class GameScene extends Phaser.Scene {
   private snap: Snapshot | null = null;
   private snapAt = 0;
   private netBanner = '';
+  /** Address the host should hand to the guest, discovered from the server. */
+  private roomUrl = '';
+  /** Latched so a skill press is never lost between 30 Hz packets. */
+  private guestSkillLatch = false;
 
   constructor() {
     super('Game');
+  }
+
+  /**
+   * Turns the saved bindings into Phaser Key objects. Only the seats this
+   * machine actually drives are bound, so a guest never listens for P1 keys.
+   */
+  private buildKeys(): void {
+    const kb = this.input.keyboard!;
+    const b = getBindings();
+    const bindSeat = (prefix: string, seat: SeatBindings): void => {
+      for (const action of SEAT_ACTIONS) {
+        this.keys.set(`${prefix}.${action}`, kb.addKey(seat[action]));
+      }
+    };
+
+    if (settings.mode === 'solo') {
+      bindSeat('p1', b.solo);
+      this.skillP1 = settings.skillP1;
+    } else if (settings.mode === 'versus') {
+      bindSeat('p1', b.versus.p1);
+      bindSeat('p2', b.versus.p2);
+      this.skillP1 = settings.skillP1;
+      this.skillP2 = settings.skillP2;
+    } else if (settings.lanRole === 'host') {
+      bindSeat('p1', b.lan.host);
+      this.skillP1 = settings.skillP1;
+      this.skillP2 = settings.skillP2;
+    } else {
+      bindSeat('guest', b.lan.guest);
+      this.skillP1 = settings.skillP2;
+      this.skillP2 = settings.skillP2;
+    }
+
+    this.keys.set('global.pause', kb.addKey(b.global.pause));
+    this.keys.set('global.mute', kb.addKey(b.global.mute));
+    this.keys.set('global.autoDodge', kb.addKey(b.global.autoDodge));
+    // Escape always pauses, whatever the bindings say.
+    this.keys.set('global.esc', kb.addKey('ESC'));
+  }
+
+  private keyDown(prefix: string, action: SeatAction): boolean {
+    return this.keys.get(`${prefix}.${action}`)?.isDown ?? false;
+  }
+
+  private keyJustDown(prefix: string, action: SeatAction): boolean {
+    const key = this.keys.get(`${prefix}.${action}`);
+    return key ? Phaser.Input.Keyboard.JustDown(key) : false;
   }
 
   private get versus(): boolean {
@@ -167,21 +218,7 @@ export class GameScene extends Phaser.Scene {
     this.fx = this.add.graphics().setDepth(30);
     this.hud = new Sketch(this, 40);
 
-    const kb = this.input.keyboard!;
-    this.wasd = kb.addKeys({ up: 'W', down: 'S', left: 'A', right: 'D' }) as DriveKeys;
-    this.arrows = kb.createCursorKeys();
-    this.fire1 = kb.addKey('SPACE');
-    this.fire2 = kb.addKey('ENTER');
-    this.trimLeft1 = kb.addKey('Q');
-    this.trimRight1 = kb.addKey('E');
-    this.trimLeft2 = kb.addKey('COMMA');
-    this.trimRight2 = kb.addKey('PERIOD');
-    this.shiftKey = kb.addKey('SHIFT');
-    this.pauseKey = kb.addKey('P');
-    this.escKey = kb.addKey('ESC');
-    this.muteKey = kb.addKey('M');
-    this.autoKey = kb.addKey('G');
-    this.guestKeys = { w: kb.addKey('W'), a: kb.addKey('A'), s: kb.addKey('S'), d: kb.addKey('D') };
+    this.buildKeys();
 
     this.levelText = this.hud.text(GAME_W / 2, 40, '', 24, COLORS.ink);
     this.scoreText = this.hud.text(GAME_W - 48, 40, '', 22, COLORS.ink, 'right');
@@ -189,6 +226,10 @@ export class GameScene extends Phaser.Scene {
     this.modeText.setAlpha(0.55);
     this.hintText = this.hud.text(GAME_W / 2, GAME_H - 24, '', 16, COLORS.ink);
     this.hintText.setAlpha(0.55);
+    this.skillLabel1 = this.hud.text(PLAY_RECT.x + 8, 61, '', 15, COLORS.ink, 'left');
+    this.skillLabel1.setAlpha(0.8);
+    this.skillLabel2 = this.hud.text(PLAY_RECT.x + PLAY_RECT.w - 8, 61, '', 15, COLORS.ink, 'right');
+    this.skillLabel2.setAlpha(0.8);
     this.bannerText = this.hud.text(GAME_W / 2, GAME_H / 2, '', 64, COLORS.ink);
     this.bannerText.setAlpha(0);
     this.input.mouse?.disableContextMenu();
@@ -196,8 +237,7 @@ export class GameScene extends Phaser.Scene {
     this.score = 0;
     this.paused = false;
     this.autoDodge = settings.autoDodge;
-    this.levelIndex = 0;
-    this.loadLevel(0);
+    this.beginMatch();
     this.emitOverlay({ kind: 'hidden' });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -220,9 +260,17 @@ export class GameScene extends Phaser.Scene {
     this.lan?.close();
     this.lanClosed = false;
     this.lan = new LanClient(role, settings.lanAddress, {
+      onPeerSkill: (skill) => {
+        if (!isSkillId(skill)) return;
+        // The other player's choice always wins over our local guess.
+        if (role === 'host') this.skillP2 = skill;
+        else this.skillP1 = skill;
+        this.showBanner(`对手技能：${skillById(skill).name}`, 1.2);
+      },
       onStatus: (status, detail) => {
         // The socket can report after the scene is torn down (mode change, quit).
         if (this.lanClosed) return;
+        if (status === 'waiting' || status === 'playing') this.announceRoom();
         if (status === 'waiting') this.netBanner = '等待对手加入…';
         else if (status === 'playing') this.netBanner = '';
         else if (status === 'error') this.netBanner = detail ?? '连接失败';
@@ -253,7 +301,25 @@ export class GameScene extends Phaser.Scene {
         }
       },
     });
+    this.lan.skill = role === 'host' ? this.skillP1 : this.skillP2;
     this.lan.connect();
+  }
+
+  /**
+   * Host: ask the local server which LAN addresses it is reachable on and show
+   * the result, so "what is my IP" is answered instead of asked.
+   */
+  private announceRoom(): void {
+    if (this.roomUrl || this.lanRole !== 'host') return;
+    void fetchLanInfo(settings.lanAddress).then((info) => {
+      if (this.lanClosed || !info) return;
+      const port = info.port ?? DEFAULT_LAN_PORT;
+      const ip = (info.addresses ?? []).find((a) => !a.startsWith('127.'));
+      if (!ip) return;
+      this.roomUrl = `http://${ip}:${port}`;
+      this.showBanner(`房间地址 ${ip}:${port}`, 3.2);
+      this.modeText.setText(`${this.modeLabel()} · 房间 ${ip}:${port}`);
+    });
   }
 
   private modeLabel(): string {
@@ -269,8 +335,12 @@ export class GameScene extends Phaser.Scene {
     this.score = 0;
     this.bullets = [];
     this.particles = [];
-    this.loadLevel(0);
-    this.lan?.send({ t: 'restart', level: 0 });
+    this.levelsCleared = 0;
+    // Menu choices take effect on the next match.
+    if (!this.lanMode || this.lanRole === 'host') this.skillP1 = settings.skillP1;
+    this.skillP2 = settings.skillP2;
+    this.loadLevel(this.startIndex);
+    this.lan?.send({ t: 'restart', level: this.startIndex });
     this.emitOverlay({ kind: 'hidden' });
   }
 
@@ -288,16 +358,65 @@ export class GameScene extends Phaser.Scene {
   }
 
   private refreshHeaderText(): void {
-    this.hintText.setText(
-      this.lanMode
-        ? settings.lanRole === 'host'
-          ? '房主：WASD 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · P 暂停'
-          : '访客：WASD / 方向键 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · P 暂停'
-        : this.versus
-          ? 'P1: WASD 驾驶 · Q/E 微调炮口 · 空格 开火      P2: 方向键 驾驶 · ,/. 微调炮口 · Enter 开火      P 暂停'
-          : 'WASD / 方向键 驾驶 · 鼠标瞄准 · 左键 / 空格 开火 · Shift 慢速 · G 自动躲弹 · P 暂停'
-    );
+    const b = getBindings();
+    const k = (code: number): string => keyLabel(code);
+    const drive = (seat: SeatBindings): string =>
+      `${k(seat.up)}${k(seat.left)}${k(seat.down)}${k(seat.right)}`;
+
+    if (this.lanMode) {
+      const seat = this.lanRole === 'host' ? b.lan.host : b.lan.guest;
+      this.hintText.setText(
+        `${this.lanRole === 'host' ? '房主' : '访客'}：${drive(seat)} 驾驶 · 鼠标瞄准 · ${k(seat.fire)} 开火 · ${k(seat.skill)} 技能 · ${k(seat.slow)} 慢速 · ${k(b.global.pause)} 暂停`
+      );
+    } else if (this.versus) {
+      const a = b.versus.p1;
+      const c = b.versus.p2;
+      this.hintText.setText(
+        `P1：${drive(a)} · ${k(a.fire)} 开火 · ${k(a.skill)} 技能        P2：${drive(c)} · ${k(c.fire)} 开火 · ${k(c.skill)} 技能        ${k(b.global.pause)} 暂停`
+      );
+    } else {
+      const seat = b.solo;
+      this.hintText.setText(
+        `${drive(seat)} 驾驶 · 鼠标瞄准 · ${k(seat.fire)} 开火 · ${k(seat.slow)} 慢速 · ${k(seat.skill)} 技能 · ${k(b.global.autoDodge)} 自动躲弹 · ${k(b.global.pause)} 暂停`
+      );
+    }
     this.modeText.setText(this.modeLabel());
+  }
+
+  /** Skill chip under each side's hearts: name + cooldown. */
+  private refreshSkillLabels(): void {
+    const now = this.time.now;
+    const paint = (label: Phaser.GameObjects.Text | undefined, tank: Tank | undefined, skill: SkillId): void => {
+      if (!label) return;
+      if (!tank) {
+        if (label.text !== '') label.setText('');
+        return;
+      }
+      const def = skillById(skill);
+      const left = Math.max(0, tank.skillReadyAt - now);
+      const text = left <= 0 ? `${def.name} · 就绪` : `${def.name} · ${(left / 1000).toFixed(1)}s`;
+      if (label.text !== text) label.setText(text);
+      label.setAlpha(left <= 0 ? 0.9 : 0.4);
+    };
+
+    if (this.lanMode && this.lanRole === 'guest') {
+      paint(this.skillLabel1, undefined, this.skillP2);
+      paint(this.skillLabel2, this.p2, this.skillP2);
+    } else {
+      paint(this.skillLabel1, this.p1, this.skillP1);
+      paint(this.skillLabel2, this.p2, this.skillP2);
+    }
+  }
+
+  /** Picks the map chosen in the menu ('random' rolls a fresh one) and starts. */
+  private beginMatch(): void {
+    const chosen = settings.mapId;
+    this.startIndex = chosen === 'random' ? randomLevelIndex(-1) : levelIndexById(chosen);
+    this.levelsCleared = 0;
+    // Menu choices take effect on the next match.
+    if (!this.lanMode || this.lanRole === 'host') this.skillP1 = settings.skillP1;
+    this.skillP2 = settings.skillP2;
+    this.loadLevel(this.startIndex);
   }
 
   private loadLevel(index: number): void {
@@ -305,6 +424,7 @@ export class GameScene extends Phaser.Scene {
     this.refreshHeaderText();
     const level = LEVELS[index];
     this.layout = buildLayout(level, PLAY_RECT);
+    this.resetPickups(index);
 
     for (const tank of this.tanks()) tank.destroy();
     this.p2 = undefined;
@@ -314,10 +434,12 @@ export class GameScene extends Phaser.Scene {
 
     this.p1 = new Tank(this, this.layout.player.x, this.layout.player.y, this.layout.player.angle, 'p1', 20);
     this.p1.lives = this.versus ? VERSUS_LIVES : d.lives;
+    this.p1.skillReadyAt = this.time.now + 1200;
 
     if (this.versus) {
       this.p2 = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'p2', 22);
       this.p2.lives = VERSUS_LIVES;
+      this.p2.skillReadyAt = this.time.now + 1200;
     } else {
       this.enemy = new Tank(this, this.layout.enemy.x, this.layout.enemy.y, this.layout.enemy.angle, 'enemy', 22);
       this.enemy.lives = d.enemyLives;
@@ -365,7 +487,7 @@ export class GameScene extends Phaser.Scene {
     this.particles = [];
     this.paused = false;
     this.autoDodge = settings.autoDodge;
-    this.loadLevel(0);
+    this.beginMatch();
     this.emitOverlay({ kind: 'hidden' });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -493,15 +615,18 @@ export class GameScene extends Phaser.Scene {
   update(time: number, delta: number): void {
     const dt = Math.min(delta, 50) / 1000;
 
-    if (Phaser.Input.Keyboard.JustDown(this.pauseKey) || Phaser.Input.Keyboard.JustDown(this.escKey)) {
+    const pauseKey = this.keys.get('global.pause')!;
+    if (Phaser.Input.Keyboard.JustDown(pauseKey) || Phaser.Input.Keyboard.JustDown(this.keys.get('global.esc')!)) {
       this.togglePause();
     }
-    if (Phaser.Input.Keyboard.JustDown(this.muteKey)) {
+    const muteKey = this.keys.get('global.mute')!;
+    if (muteKey && Phaser.Input.Keyboard.JustDown(muteKey)) {
       sound.setMuted(!sound.muted);
       this.showBanner(sound.muted ? '静音' : '开启声音', 0.8);
     }
-    if (!this.versus && Phaser.Input.Keyboard.JustDown(this.autoKey)) {
-      this.setAutoDodge(!this.autoDodge);
+    if (!this.versus) {
+      const autoKey = this.keys.get('global.autoDodge');
+      if (autoKey && Phaser.Input.Keyboard.JustDown(autoKey)) this.setAutoDodge(!this.autoDodge);
     }
 
     if (this.paused) {
@@ -519,13 +644,21 @@ export class GameScene extends Phaser.Scene {
     } else if (this.phase === 'playing' && !guest) {
       // Host / solo / local versus: simulate everything on this machine.
       const mouseAim = settings.mode !== 'versus';
-      const slow = settings.mode === 'solo' && this.shiftKey.isDown;
+      const slow = settings.mode === 'solo' && this.keyDown('p1', 'slow');
       this.applyInput(this.p1, this.readLocalInput(1, this.p1, dt, mouseAim), dt, { slow });
       if (this.p2) {
-        if (this.lanMode) this.applyInput(this.p2, this.remoteInput, dt, { aimRate: 22 });
-        else this.applyInput(this.p2, this.readLocalInput(2, this.p2, dt, false), dt);
+        if (this.lanMode) {
+          this.applyInput(this.p2, this.remoteInput, dt, { aimRate: 22 });
+          if (this.remoteInput.skill) {
+            this.remoteInput.skill = false;
+            this.useSkill(this.p2);
+          }
+        } else {
+          this.applyInput(this.p2, this.readLocalInput(2, this.p2, dt, false), dt);
+        }
       }
       if (this.enemy) this.updateAi(dt);
+      this.updatePickups(dt);
     }
 
     if (guest) {
@@ -537,6 +670,7 @@ export class GameScene extends Phaser.Scene {
     this.updateParticles(dt);
     this.updatePhase(dt);
     this.drawFrame(time);
+    this.refreshSkillLabels();
     for (const tank of this.tanks()) tank.sync(time);
   }
 
@@ -578,8 +712,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (this.phase === 'cleared') {
-      if (this.levelIndex + 1 < LEVELS.length) {
-        this.loadLevel(this.levelIndex + 1);
+      this.levelsCleared += 1;
+      if (this.levelsCleared < SOLO_CAMPAIGN_LENGTH) {
+        this.loadLevel((this.levelIndex + 1) % LEVELS.length);
       } else {
         this.phase = 'victory';
         this.emitOverlay({ kind: 'victory', score: this.score });
@@ -592,13 +727,10 @@ export class GameScene extends Phaser.Scene {
 
   /** Reads this machine's keyboard/mouse for the given seat. */
   private readLocalInput(which: 1 | 2, tank: Tank, dt: number, mouseAim: boolean): TankInput {
-    const keys = which === 1 ? this.wasd : this.arrows;
-    const trimLeft = which === 1 ? this.trimLeft1 : this.trimLeft2;
-    const trimRight = which === 1 ? this.trimRight1 : this.trimRight2;
-    const fireKey = which === 1 ? this.fire1 : this.fire2;
+    const prefix = which === 1 ? 'p1' : 'p2';
 
-    let turn = (keys.right.isDown ? 1 : 0) - (keys.left.isDown ? 1 : 0);
-    let drive = (keys.up.isDown ? 1 : 0) - (keys.down.isDown ? 1 : 0);
+    let turn = (this.keyDown(prefix, 'right') ? 1 : 0) - (this.keyDown(prefix, 'left') ? 1 : 0);
+    let drive = (this.keyDown(prefix, 'up') ? 1 : 0) - (this.keyDown(prefix, 'down') ? 1 : 0);
 
     // Solo: let the autopilot drive when the player isn't steering.
     const manual = turn !== 0 || drive !== 0;
@@ -615,23 +747,30 @@ export class GameScene extends Phaser.Scene {
       const my = pointer.worldY || GAME_H / 2;
       aim = Math.atan2(my - tank.y, mx - tank.x);
     } else {
-      const trim = (trimRight.isDown ? 1 : 0) - (trimLeft.isDown ? 1 : 0);
-      aim = Phaser.Math.Angle.Wrap(tank.turretAngle + trim * 1.9 * dt);
+      // Trim nudges the barrel around its mount; the mount follows the hull.
+      const trim = (this.keyDown(prefix, 'aimRight') ? 1 : 0) - (this.keyDown(prefix, 'aimLeft') ? 1 : 0);
+      aim = tank.bodyAngle + tank.turretOffset + trim * 1.9 * dt;
     }
 
+    if (this.keyJustDown(prefix, 'skill')) this.useSkill(tank);
+
     const mouseFire = mouseAim && this.input.activePointer.leftButtonDown();
-    return { turn, drive, aim, fire: fireKey.isDown || mouseFire };
+    const fire = this.keyDown(prefix, 'fire') || mouseFire;
+    const slow = this.keyDown(prefix, 'slow');
+    return { turn, drive, aim, fire, slow };
   }
 
   /** Applies one input frame to a tank – shared by local players and the guest. */
   private applyInput(tank: Tank, input: TankInput, dt: number, opts: { slow?: boolean; aimRate?: number } = {}): void {
     if (!tank.alive) return;
 
-    const slow = opts.slow ?? false;
-    tank.bodyAngle += input.turn * TANK.turnRate * (slow ? 0.8 : 1) * dt;
+    const slow = opts.slow ?? input.slow ?? false;
+    // The gun is bolted to the hull: turning the hull turns the barrel too.
+    tank.turnHull(input.turn * TANK.turnRate * (slow ? 0.8 : 1) * dt);
 
-    const fwd = slow ? TANK.tacticalSpeed : TANK.driveSpeed;
-    const rev = slow ? TANK.tacticalReverse : TANK.reverseSpeed;
+    const mul = tank.speedMultiplier(this.time.now);
+    const fwd = (slow ? TANK.tacticalSpeed : TANK.driveSpeed) * mul;
+    const rev = (slow ? TANK.tacticalReverse : TANK.reverseSpeed) * mul;
     const speed = input.drive > 0 ? fwd : rev;
     const v = input.drive * speed;
     tank.vx = Math.cos(tank.bodyAngle) * v;
@@ -644,7 +783,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (Number.isFinite(input.aim)) {
-      tank.turretAngle = turnToward(tank.turretAngle, input.aim, opts.aimRate ?? 16, dt);
+      // aimAt() clamps the offset, so the barrel can never fly off the hull.
+      tank.aimAt(input.aim, opts.aimRate ?? 16, dt);
+      tank.turretAngle = tank.bodyAngle + tank.turretOffset;
     }
 
     this.separateTanks();
@@ -665,28 +806,167 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  // ------------------------------------------------------------------ skills
+
+  /** The skill this seat picked in the menu. */
+  private skillFor(tank: Tank): SkillId {
+    return tank.id === 'p2' ? this.skillP2 : this.skillP1;
+  }
+
+  /** Fires the summoner skill, if it is off cooldown. Host-authoritative. */
+  useSkill(tank: Tank): boolean {
+    if (!tank.alive || this.phase !== 'playing' && this.phase !== 'ready') return false;
+    const def = skillById(this.skillFor(tank));
+    if (this.time.now < tank.skillReadyAt) {
+      sound.ping();
+      return false;
+    }
+    tank.skillReadyAt = this.time.now + def.cooldown * 1000;
+    this.netEvent('skill', tank.x, tank.y, { id: tank.id, color: def.color });
+
+    switch (def.id) {
+      case 'blink': {
+        const from = { x: tank.x, y: tank.y };
+        const dir = tank.turretAngle;
+        let best = 0;
+        for (let d = 10; d <= 170; d += 8) {
+          const nx = tank.x + Math.cos(dir) * d;
+          const ny = tank.y + Math.sin(dir) * d;
+          if (this.spotBlocked(nx, ny, tank.radius + 2, tank)) break;
+          best = d;
+        }
+        if (best > 0) {
+          tank.x += Math.cos(dir) * best;
+          tank.y += Math.sin(dir) * best;
+          this.puff(from.x, from.y, def.color, 10);
+          this.puff(tank.x, tank.y, def.color, 10);
+          this.ring(tank.x, tank.y, def.color);
+          this.netEvent('blink', from.x, from.y, { id: tank.id, color: def.color });
+        }
+        break;
+      }
+      case 'invincible':
+        tank.invulnerableUntil = Math.max(tank.invulnerableUntil, this.time.now + def.duration * 1000);
+        this.ring(tank.x, tank.y, def.color);
+        break;
+      case 'rage':
+        tank.rageUntil = Math.max(tank.rageUntil, this.time.now + def.duration * 1000);
+        tank.rageShots = Math.max(tank.rageShots, RAGE_SHOTS);
+        this.puff(tank.x, tank.y, def.color, 12);
+        break;
+      case 'weaken': {
+        const other = this.tanks().find((t) => t !== tank && t.id !== 'enemy');
+        if (other) {
+          other.slowUntil = Math.max(other.slowUntil, this.time.now + def.duration * 1000);
+          this.ring(other.x, other.y, def.color);
+          this.netEvent('skill', other.x, other.y, { id: other.id, color: def.color });
+        }
+        break;
+      }
+    }
+
+    this.showBanner(`${tank.id === 'p1' ? 'P1' : tank.id === 'p2' ? 'P2' : 'CPU'} · ${def.name}`, 0.9);
+    sound.ui();
+    this.hudDirty = true;
+    return true;
+  }
+
+  /** Free-space test used by blink and by pickup placement. */
+  private spotBlocked(x: number, y: number, radius: number, ignore?: Tank): boolean {
+    if (this.layout.walls.some((box) => circleBox(x, y, radius, box))) return true;
+    if (this.crates.some((c) => c.alive && circleBox(x, y, radius, c.box))) return true;
+    return this.tanks().some(
+      (t) => t !== ignore && t.alive && Math.hypot(t.x - x, t.y - y) < radius + t.radius
+    );
+  }
+
+  // ------------------------------------------------------------------ pickups
+
+  private resetPickups(levelIndex: number): void {
+    const spots = LEVELS[levelIndex]?.pickups ?? [];
+    this.pickups = spots.map((p) =>
+      makePickup(
+        rollPickupKind(),
+        this.layout.rect.x + p.x * this.layout.rect.w,
+        this.layout.rect.y + p.y * this.layout.rect.h
+      )
+    );
+    for (const p of this.pickups) p.pop = 0;
+  }
+
+  /** Touching a pickup always applies it – there is no way to refuse. */
+  private updatePickups(dt: number): void {
+    for (const p of this.pickups) {
+      if (p.respawn > 0) {
+        p.respawn = Math.max(0, p.respawn - dt);
+        if (p.respawn === 0) {
+          p.kind = rollPickupKind();
+          p.pop = 0;
+        }
+        continue;
+      }
+      p.pop = Math.min(1, p.pop + dt * 4);
+      for (const tank of this.tanks()) {
+        if (!tank.alive) continue;
+        if (Math.hypot(tank.x - p.x, tank.y - p.y) > tank.radius + PICKUP_RADIUS) continue;
+        this.collectPickup(tank, p);
+        break;
+      }
+    }
+  }
+
+  private collectPickup(tank: Tank, p: Pickup): void {
+    const def = PICKUPS[p.kind];
+    const now = this.time.now;
+
+    if (p.kind === 'health') {
+      tank.lives = Math.min(this.maxLives(tank), tank.lives + 1);
+      tank.damage = Math.max(0, tank.damage - 1);
+      tank.redraw();
+    } else if (p.kind === 'speed') {
+      tank.speedUntil = Math.max(tank.speedUntil, now + def.duration * 1000);
+    } else {
+      tank.shieldUntil = Math.max(tank.shieldUntil, now + def.duration * 1000);
+    }
+
+    p.respawn = PICKUP_RESPAWN;
+    p.pop = 0;
+    this.hudDirty = true;
+    this.puff(p.x, p.y, def.color, 12);
+    this.ring(p.x, p.y, def.color);
+    this.netEvent('pickup', p.x, p.y, { id: tank.id, color: def.color });
+    sound.pickup();
+    this.showBanner(
+      `${tank.id === 'p1' ? 'P1' : tank.id === 'p2' ? 'P2' : 'CPU'} 吃到 ${def.name}`,
+      0.85
+    );
+  }
+
+  private maxLives(tank: Tank): number {
+    if (this.versus) return VERSUS_LIVES;
+    return tank.id === 'p1' ? preset().lives : preset().enemyLives;
+  }
+
   /** Guest: the whole match lives on the host, we only read input here. */
   private readGuestInput(dt: number): TankInput {
-    const gk = this.guestKeys;
-    const left = gk.a.isDown || this.arrows.left.isDown;
-    const right = gk.d.isDown || this.arrows.right.isDown;
-    const up = gk.w.isDown || this.arrows.up.isDown;
-    const down = gk.s.isDown || this.arrows.down.isDown;
+    const prefix = 'guest';
     const pointer = this.input.activePointer;
     const tank = this.p2;
     const aim = tank ? Math.atan2((pointer.worldY || 0) - tank.y, (pointer.worldX || 0) - tank.x) : 0;
-    const fire = this.spaceKeyDown() || pointer.leftButtonDown();
-    void dt;
+    const trim = (this.keyDown(prefix, 'aimRight') ? 1 : 0) - (this.keyDown(prefix, 'aimLeft') ? 1 : 0);
+    if (this.keyJustDown(prefix, 'skill')) this.guestSkillLatch = true;
+    const skill = this.guestSkillLatch;
+    // Without the mouse the guest still gets trim keys to swing the barrel.
+    const useMouse = Math.abs(pointer.worldX) > 0 || Math.abs(pointer.worldY) > 0;
+    const worldAim = useMouse && tank ? aim : (tank?.turretAngle ?? 0) + trim * 1.9 * dt;
     return {
-      turn: (right ? 1 : 0) - (left ? 1 : 0),
-      drive: (up ? 1 : 0) - (down ? 1 : 0),
-      aim,
-      fire,
+      turn: (this.keyDown(prefix, 'right') ? 1 : 0) - (this.keyDown(prefix, 'left') ? 1 : 0),
+      drive: (this.keyDown(prefix, 'up') ? 1 : 0) - (this.keyDown(prefix, 'down') ? 1 : 0),
+      aim: worldAim,
+      fire: this.keyDown(prefix, 'fire') || pointer.leftButtonDown(),
+      slow: this.keyDown(prefix, 'slow'),
+      skill,
     };
-  }
-
-  private spaceKeyDown(): boolean {
-    return this.fire1.isDown || this.fire2.isDown;
   }
 
   /** Auto-dodge: choose the safest heading, ignore walls we would hit. */
@@ -714,7 +994,9 @@ export class GameScene extends Phaser.Scene {
     tank.x = spawn.x;
     tank.y = spawn.y;
     tank.bodyAngle = spawn.angle;
+    tank.turretOffset = 0;
     tank.turretAngle = spawn.angle;
+    tank.clearEffects();
     tank.vx = 0;
     tank.vy = 0;
     tank.setAlive(true, this.time.now);
@@ -793,8 +1075,21 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // A barrel pushed into a wall used to spawn the shell on the far side of it.
+    // Clamp the muzzle to the first solid surface instead, so the shot either
+    // bounces off immediately or simply cannot be taken.
+    const limit = this.muzzleLimit(tank.x, tank.y, dir, Math.max(len, 46));
+    len = Math.min(len, Math.max(0, limit - BULLET.radius - 1.5));
+    if (len < 6) {
+      // Hull is right against the wall and pointing into it: dry click, no ghost shell.
+      sound.ping();
+      return;
+    }
+
     const m = tank.muzzle(len, dir);
-    this.spawnBullet(m.x, m.y, dir, tank.id, speed, maxBounces);
+    const empowered = tank.rageShots > 0;
+    if (empowered) tank.rageShots -= 1;
+    this.spawnBullet(m.x, m.y, dir, tank.id, speed, maxBounces, empowered ? 2 : 1);
     this.burst(m.x, m.y, dir, tank.id);
     this.netEvent('fire', m.x, m.y, { id: tank.id });
     this.cameras.main.shake(60, 0.002);
@@ -806,7 +1101,29 @@ export class GameScene extends Phaser.Scene {
     this.resolveTankWalls(tank);
   }
 
-  private spawnBullet(x: number, y: number, dir: number, owner: TankId, speed: number, maxBounces: number): void {
+  /** Distance from (x,y) along `dir` until a wall or crate stops a shell. */
+  private muzzleLimit(x: number, y: number, dir: number, max: number): number {
+    const dx = Math.cos(dir) * max;
+    const dy = Math.sin(dir) * max;
+    const r = BULLET.radius + 0.5;
+    let best = max;
+    const wallHit = sweepCircleBox(x, y, r, dx, dy, this.layout.walls);
+    if (wallHit) best = Math.min(best, max - wallHit.remaining);
+    const crateBoxes = this.crates.filter((c) => c.alive).map((c) => c.box);
+    const crateHit = sweepCircleBox(x, y, r, dx, dy, crateBoxes);
+    if (crateHit) best = Math.min(best, max - crateHit.remaining);
+    return best;
+  }
+
+  private spawnBullet(
+    x: number,
+    y: number,
+    dir: number,
+    owner: TankId,
+    speed: number,
+    maxBounces: number,
+    dmg = 1
+  ): void {
     this.bullets.push({
       x,
       y,
@@ -818,6 +1135,7 @@ export class GameScene extends Phaser.Scene {
       maxBounces,
       life: BULLET.lifetime,
       dead: false,
+      dmg,
       trail: [],
     });
   }
@@ -891,7 +1209,13 @@ export class GameScene extends Phaser.Scene {
     const target = this.p1.alive ? this.p1 : this.p2 ?? this.p1;
     const track = Math.atan2(target.y - e.y, target.x - e.x);
     const want = this.aiCharge > 0 ? this.aiAimDir : track;
-    e.turretAngle = turnToward(e.turretAngle, want, this.aiCharge > 0 ? 7 : 2.4, dt);
+    // The AI obeys the same hull-mounted gun as the player: if the target is
+    // outside the arc it swings the hull round instead of shooting sideways.
+    if (Math.abs(Phaser.Math.Angle.Wrap(want - e.bodyAngle)) > TURRET_LIMIT - 0.12) {
+      const st = steerTo(want, e.bodyAngle);
+      e.turnHull(st.turn * TANK.turnRate * 0.85 * dt);
+    }
+    e.aimAt(want, this.aiCharge > 0 ? 7 : 2.4, dt);
 
     this.updateAiFire(dt, d, target);
   }
@@ -1079,7 +1403,7 @@ export class GameScene extends Phaser.Scene {
         } else if (ev.kind === 'tank') {
           b.dead = true;
           const victim = this.tanks().find((t) => t.id === ev.id);
-          if (victim) this.damage(victim, b.owner);
+          if (victim) this.damage(victim, b.owner, b.dmg);
           break;
         } else {
           b.dead = true;
@@ -1106,16 +1430,19 @@ export class GameScene extends Phaser.Scene {
     this.bullets = this.bullets.filter((b) => !b.dead);
   }
 
-  private damage(victim: Tank, attacker: TankId): void {
+  private damage(victim: Tank, attacker: TankId, amount = 1): void {
     if (!victim.alive || this.phase !== 'playing') return;
-    if (this.time.now < victim.invulnerableUntil) {
-      this.puff(victim.x, victim.y, victim.color, 3);
+    if (victim.shielded()) {
+      // Shield / invulnerability: absorb the hit with a visible, audible block.
+      this.ring(victim.x, victim.y, PICKUPS.shield.color);
+      this.puff(victim.x, victim.y, PICKUPS.shield.color, 5);
+      this.netEvent('hit', victim.x, victim.y, { id: victim.id, color: PICKUPS.shield.color });
       sound.ping();
       return;
     }
 
     const self = attacker === victim.id;
-    victim.lives = Math.max(0, victim.lives - 1);
+    victim.lives = Math.max(0, victim.lives - amount);
     victim.damage += 1;
     victim.redraw();
     this.hudDirty = true;
@@ -1268,22 +1595,36 @@ export class GameScene extends Phaser.Scene {
       crates: this.crates.map((c) => (c.alive ? 1 : 0)),
       tanks: [this.p1, this.p2]
         .filter((t): t is Tank => !!t)
-        .map((t) => ({
-          id: t.id === 'p2' ? 'p2' : ('p1' as const),
-          x: Math.round(t.x * 10) / 10,
-          y: Math.round(t.y * 10) / 10,
-          body: Math.round(t.bodyAngle * 100) / 100,
-          turret: Math.round(t.turretAngle * 100) / 100,
-          lives: t.lives,
-          damage: t.damage,
-          alive: t.alive ? 1 : 0,
-        })),
+        .map((t) => {
+          const left = (until: number): number => Math.max(0, Math.round(until - this.time.now));
+          return {
+            id: t.id === 'p2' ? 'p2' : ('p1' as const),
+            x: Math.round(t.x * 10) / 10,
+            y: Math.round(t.y * 10) / 10,
+            body: Math.round(t.bodyAngle * 100) / 100,
+            turret: Math.round(t.turretAngle * 100) / 100,
+            lives: t.lives,
+            damage: t.damage,
+            alive: t.alive ? 1 : 0,
+            shield: left(t.shieldUntil),
+            speed: left(t.speedUntil),
+            rage: left(t.rageUntil),
+            slow: left(t.slowUntil),
+            rageShots: t.rageShots,
+            skillCd: left(t.skillReadyAt),
+          };
+        }),
       bullets: this.bullets.map((b) => ({
         x: Math.round(b.x * 10) / 10,
         y: Math.round(b.y * 10) / 10,
         vx: Math.round(b.vx),
         vy: Math.round(b.vy),
         owner: b.owner === 'p2' ? 'p2' : 'p1',
+        dmg: b.dmg,
+      })),
+      pickups: this.pickups.map((p) => ({
+        kind: p.kind,
+        respawn: Math.round(p.respawn * 10) / 10,
       })),
       events,
     };
@@ -1302,6 +1643,7 @@ export class GameScene extends Phaser.Scene {
     if (this.netTimer <= 0) {
       this.netTimer = 1 / 30;
       this.lan?.sendInput(this.readGuestInput(dt));
+      this.guestSkillLatch = false;
     }
 
     const snap = this.snap;
@@ -1317,6 +1659,14 @@ export class GameScene extends Phaser.Scene {
       tank.y += (st.y - tank.y) * lerp;
       tank.bodyAngle = angleLerp(tank.bodyAngle, st.body, lerp);
       tank.turretAngle = angleLerp(tank.turretAngle, st.turret, lerp);
+      tank.syncTurret();
+      const now = this.time.now;
+      tank.shieldUntil = now + st.shield;
+      tank.speedUntil = now + st.speed;
+      tank.rageUntil = now + st.rage;
+      tank.slowUntil = now + st.slow;
+      tank.rageShots = st.rageShots;
+      tank.skillReadyAt = now + st.skillCd;
       tank.lives = st.lives;
       if (tank.damage !== st.damage) {
         tank.damage = st.damage;
@@ -1337,6 +1687,7 @@ export class GameScene extends Phaser.Scene {
       maxBounces: BULLET.maxBounces,
       life: BULLET.lifetime,
       dead: false,
+      dmg: b.dmg ?? 1,
       trail: [],
     }));
 
@@ -1368,6 +1719,7 @@ export class GameScene extends Phaser.Scene {
       this.p1.lives = keepLives.p1;
       this.p2.lives = keepLives.p2;
       this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
+      this.resetPickups(snap.level);
       this.particles = [];
       this.bullets = [];
       this.drawTerrain();
@@ -1387,6 +1739,17 @@ export class GameScene extends Phaser.Scene {
       }
     });
     if (cratesChanged) this.drawCrates();
+
+    // Pickups: the host owns their kinds and respawn timers.
+    if (snap.pickups) {
+      snap.pickups.forEach((sp, i) => {
+        const local = this.pickups[i];
+        if (!local) return;
+        if (local.kind !== sp.kind) local.kind = sp.kind;
+        local.respawn = sp.respawn;
+        if (sp.respawn === 0 && local.pop < 1) local.pop = Math.min(1, local.pop + 0.15);
+      });
+    }
 
     // Effects.
     for (const ev of snap.events) {
@@ -1408,6 +1771,15 @@ export class GameScene extends Phaser.Scene {
         this.explode(ev.x, ev.y, ev.color ?? COLORS.enemy);
       } else if (ev.k === 'crate') {
         this.puff(ev.x, ev.y, COLORS.crate, 10);
+      } else if (ev.k === 'pickup') {
+        this.puff(ev.x, ev.y, ev.color ?? COLORS.player, 10);
+        this.ring(ev.x, ev.y, ev.color ?? COLORS.player);
+        sound.pickup();
+      } else if (ev.k === 'skill') {
+        this.ring(ev.x, ev.y, ev.color ?? COLORS.enemy);
+        this.puff(ev.x, ev.y, ev.color ?? COLORS.enemy, 8);
+      } else if (ev.k === 'blink') {
+        this.puff(ev.x, ev.y, ev.color ?? COLORS.player, 10);
       }
     }
   }
@@ -1445,6 +1817,94 @@ export class GameScene extends Phaser.Scene {
       );
     }
 
+    // ---- pickups
+    for (const p of this.pickups) {
+      const def = PICKUPS[p.kind];
+      if (p.respawn > 0) {
+        // Faint outline + countdown ring so you can plan the next grab.
+        g.lineStyle(1.4, COLORS.ink, 0.14);
+        g.strokeCircle(p.x, p.y, PICKUP_RADIUS);
+        const k = 1 - p.respawn / PICKUP_RESPAWN;
+        g.lineStyle(2, def.color, 0.35);
+        g.beginPath();
+        g.arc(p.x, p.y, PICKUP_RADIUS + 4, -Math.PI / 2, -Math.PI / 2 + k * Math.PI * 2);
+        g.strokePath();
+        continue;
+      }
+      const bob = Math.sin(time / 320 + p.x * 0.05) * 2;
+      const scale = 0.7 + 0.3 * p.pop;
+      const r = PICKUP_RADIUS * scale;
+      g.fillStyle(COLORS.white, 0.72);
+      g.fillCircle(p.x, p.y + bob, r);
+      g.lineStyle(2.4, def.color, 0.9);
+      g.strokeCircle(p.x, p.y + bob, r);
+      g.lineStyle(1.4, COLORS.ink, 0.35);
+      g.strokeCircle(p.x, p.y + bob, r + 4);
+      if (p.kind === 'health') {
+        g.lineStyle(3.2, def.color, 0.95);
+        g.beginPath();
+        g.moveTo(p.x - r * 0.45, p.y + bob);
+        g.lineTo(p.x + r * 0.45, p.y + bob);
+        g.moveTo(p.x, p.y + bob - r * 0.45);
+        g.lineTo(p.x, p.y + bob + r * 0.45);
+        g.strokePath();
+      } else if (p.kind === 'speed') {
+        g.lineStyle(2.4, def.color, 0.95);
+        for (const dx of [-4, 3]) {
+          g.beginPath();
+          g.moveTo(p.x + dx, p.y + bob - 5);
+          g.lineTo(p.x + dx + 5, p.y + bob);
+          g.lineTo(p.x + dx, p.y + bob + 5);
+          g.strokePath();
+        }
+      } else {
+        g.lineStyle(2.2, def.color, 0.95);
+        g.beginPath();
+        g.moveTo(p.x, p.y + bob - 6);
+        g.lineTo(p.x + 6, p.y + bob - 2);
+        g.lineTo(p.x + 6, p.y + bob + 2);
+        g.lineTo(p.x, p.y + bob + 7);
+        g.lineTo(p.x - 6, p.y + bob + 2);
+        g.lineTo(p.x - 6, p.y + bob - 2);
+        g.closePath();
+        g.strokePath();
+      }
+    }
+
+    // ---- effect auras around tanks
+    const now = this.time.now;
+    for (const tank of this.tanks()) {
+      if (!tank.alive) continue;
+      const pulse = 1 + Math.sin(time / 180) * 0.04;
+      if (now < tank.shieldUntil) {
+        g.lineStyle(2.6, PICKUPS.shield.color, 0.75);
+        g.strokeCircle(tank.x, tank.y, 31 * pulse);
+        g.lineStyle(1.2, PICKUPS.shield.color, 0.35);
+        g.strokeCircle(tank.x, tank.y, 36 * pulse);
+      } else if (now < tank.invulnerableUntil) {
+        g.lineStyle(2.2, 0xd4a72e, 0.6);
+        g.strokeCircle(tank.x, tank.y, 30 * pulse);
+      }
+      if (now < tank.rageUntil) {
+        g.lineStyle(2.4, COLORS.enemy, 0.55);
+        g.strokeCircle(tank.x, tank.y, 33 * pulse);
+      }
+      if (now < tank.slowUntil) {
+        const r = 40 - (time / 40) % 10;
+        g.lineStyle(1.8, COLORS.player2, 0.5);
+        g.strokeCircle(tank.x, tank.y, r);
+      }
+      if (now < tank.speedUntil) {
+        g.lineStyle(2, COLORS.player, 0.5);
+        for (const s of [-1, 1]) {
+          g.beginPath();
+          g.moveTo(tank.x - 26, tank.y + s * 8);
+          g.lineTo(tank.x - 34, tank.y + s * 8);
+          g.strokePath();
+        }
+      }
+    }
+
     for (const b of this.bullets) {
       for (let i = 0; i < b.trail.length; i++) {
         const t = b.trail[i];
@@ -1453,8 +1913,8 @@ export class GameScene extends Phaser.Scene {
       }
       g.fillStyle(COLORS.ink, 0.85);
       g.fillCircle(b.x, b.y, BULLET.radius + 1.6);
-      g.fillStyle(b.color, 1);
-      g.fillCircle(b.x, b.y, BULLET.radius);
+      g.fillStyle(b.dmg > 1 ? COLORS.enemy : b.color, 1);
+      g.fillCircle(b.x, b.y, BULLET.radius * (b.dmg > 1 ? 1.35 : 1));
       g.fillStyle(COLORS.white, 0.8);
       g.fillCircle(b.x - 1.4, b.y - 1.4, 1.2);
     }
@@ -1568,13 +2028,6 @@ export class GameScene extends Phaser.Scene {
 function angleLerp(current: number, target: number, t: number): number {
   const diff = Phaser.Math.Angle.Wrap(target - current);
   return current + diff * Math.min(1, Math.max(0, t));
-}
-
-function turnToward(current: number, target: number, rate: number, dt: number): number {
-  const diff = Phaser.Math.Angle.Wrap(target - current);
-  const step = rate * dt;
-  if (Math.abs(diff) <= step) return target;
-  return current + Math.sign(diff) * step;
 }
 
 function nearestGap(px: number, py: number, walls: Box[]): number {

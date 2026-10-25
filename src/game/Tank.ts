@@ -4,6 +4,9 @@ import { Sketch } from './Sketch';
 
 export type TankId = 'p1' | 'p2' | 'enemy';
 
+/** The gun is mounted on the hull: it can only swing this far off the nose. */
+export const TURRET_LIMIT = Phaser.Math.DegToRad(72);
+
 const COLORS_BY_ID: Record<TankId, number> = {
   p1: COLORS.player,
   p2: COLORS.player2,
@@ -38,7 +41,10 @@ export class Tank {
   x: number;
   y: number;
   bodyAngle: number;
+  /** World angle of the barrel – always bodyAngle + turretOffset. */
   turretAngle: number;
+  /** How far the barrel is swung off the nose, clamped to ±TURRET_LIMIT. */
+  turretOffset = 0;
 
   /** Hull velocity, px/s – used to lead shots and to dodge. */
   vx = 0;
@@ -48,6 +54,20 @@ export class Tank {
   /** How many hits this tank has taken (drawn as tally marks). */
   damage = 0;
   lives = 3;
+
+  // ---- temporary states, all absolute timestamps (ms on the scene clock)
+  /** Pickup shield: blocks damage. */
+  shieldUntil = 0;
+  /** Pickup: faster hull. */
+  speedUntil = 0;
+  /** Skill "rage": faster hull + double damage shells. */
+  rageUntil = 0;
+  /** Skill "rage": how many shells still carry double damage. */
+  rageShots = 0;
+  /** Skill "weaken" applied by the opponent: slower hull. */
+  slowUntil = 0;
+  /** When the summoner skill becomes available again (scene clock, ms). */
+  skillReadyAt = 0;
 
   private hull: Sketch;
   private turret: Sketch;
@@ -96,6 +116,55 @@ export class Tank {
     this.hull.setAlpha(blink);
     this.turret.setAlpha(blink);
     this.tag.setAlpha(0.85 * blink);
+  }
+
+  /** Speed multiplier from all active effects. */
+  speedMultiplier(now = this.scene.time.now): number {
+    let mul = 1;
+    if (now < this.speedUntil) mul *= 1.4;
+    if (now < this.rageUntil) mul *= 1.3;
+    if (now < this.slowUntil) mul *= 0.6;
+    return mul;
+  }
+
+  shielded(now = this.scene.time.now): boolean {
+    return now < this.shieldUntil || now < this.invulnerableUntil;
+  }
+
+  /**
+   * Rotating the hull carries the gun with it – the turret is mounted on the
+   * hull, not floating above it.
+   */
+  turnHull(delta: number): void {
+    this.bodyAngle += delta;
+    this.turretAngle = this.bodyAngle + this.turretOffset;
+  }
+
+  /** Aims at a world angle; the offset is clamped to the mount's arc. */
+  aimAt(worldAngle: number, rate?: number, dt?: number): void {
+    const wanted = Phaser.Math.Clamp(
+      Phaser.Math.Angle.Wrap(worldAngle - this.bodyAngle),
+      -TURRET_LIMIT,
+      TURRET_LIMIT
+    );
+    if (rate !== undefined && dt !== undefined) {
+      const diff = wanted - this.turretOffset;
+      const step = rate * dt;
+      this.turretOffset = Math.abs(diff) <= step ? wanted : this.turretOffset + Math.sign(diff) * step;
+    } else {
+      this.turretOffset = wanted;
+    }
+    this.turretAngle = this.bodyAngle + this.turretOffset;
+  }
+
+  /** Keeps the barrel where it is in hull space after a snapshot/teleport. */
+  syncTurret(): void {
+    this.turretOffset = Phaser.Math.Clamp(
+      Phaser.Math.Angle.Wrap(this.turretAngle - this.bodyAngle),
+      -TURRET_LIMIT,
+      TURRET_LIMIT
+    );
+    this.turretAngle = this.bodyAngle + this.turretOffset;
   }
 
   sync(now = this.scene.time.now): void {
@@ -202,6 +271,21 @@ export class Tank {
   /** Muzzle position in world space. */
   muzzle(length = 44, angle = this.turretAngle): { x: number; y: number } {
     return { x: this.x + Math.cos(angle) * length, y: this.y + Math.sin(angle) * length };
+  }
+
+  /** Wipes every temporary state (used on respawn / new match). */
+  clearEffects(): void {
+    this.shieldUntil = 0;
+    this.speedUntil = 0;
+    this.rageUntil = 0;
+    this.rageShots = 0;
+    this.slowUntil = 0;
+  }
+
+  /** Remaining cooldown, 0..1 (1 = fully charged). */
+  skillCharge(now: number, cooldown: number): number {
+    if (cooldown <= 0) return 1;
+    return Math.min(1, Math.max(0, 1 - (this.skillReadyAt - now) / (cooldown * 1000)));
   }
 
   setAlive(alive: boolean, now: number): void {

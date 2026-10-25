@@ -6,6 +6,23 @@ import { MenuScene } from './game/MenuScene';
 import { OVERLAY_EVENT, type OverlayState } from './game/events';
 import { DIFFICULTIES, settings, type Difficulty, type GameMode } from './game/settings';
 import { sound } from './game/Sound';
+import { LEVELS, levelById, type Level } from './engine/level';
+import { SKILLS, type SkillId } from './game/skills';
+import {
+  ACTION_LABEL,
+  GLOBAL_LABEL,
+  defaultBindings,
+  eventToKeyCode,
+  getBindings,
+  keyLabel,
+  resetBindings,
+  saveBindings,
+  SEAT_ACTIONS,
+  type BindingsFile,
+  type GlobalAction,
+  type SeatAction,
+} from './game/keybinds';
+import { DEFAULT_LAN_PORT } from './net/protocol';
 
 const overlay = document.getElementById('overlay') as HTMLDivElement;
 const card = document.getElementById('card') as HTMLDivElement;
@@ -53,28 +70,136 @@ const DOODLE = `
   </svg>
 `;
 
-const SOLO_CONTROLS = `
-  <ul class="controls">
-    <li><kbd>WASD</kbd> 驾驶 / 转向</li>
-    <li><kbd>鼠标</kbd> 瞄准炮塔</li>
-    <li><kbd>左键</kbd><kbd>空格</kbd> 开火</li>
-    <li><kbd>Shift</kbd> 慢速微调</li>
-  </ul>
-`;
+// ---------------------------------------------------------------- map picker
 
-const VERSUS_CONTROLS = `
-  <ul class="controls two-col">
-    <li><b class="p1">P1</b> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 驾驶 · <kbd>Q</kbd><kbd>E</kbd> 微调炮口 · <kbd>空格</kbd> 开火</li>
-    <li><b class="p2">P2</b> <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> 驾驶 · <kbd>,</kbd><kbd>.</kbd> 微调炮口 · <kbd>Enter</kbd> 开火</li>
-  </ul>
-`;
+/** Tiny top-down preview drawn from the same data the game uses. */
+function mapPreview(level: Level): string {
+  const rect = (b: { x: number; y: number; w: number; h: number }, cls: string) =>
+    `<rect class="${cls}" x="${(b.x * 100).toFixed(1)}" y="${(b.y * 70).toFixed(1)}" width="${(b.w * 100).toFixed(1)}" height="${(b.h * 70).toFixed(1)}" />`;
+  return `
+    <svg class="map-svg" viewBox="0 0 100 70" aria-hidden="true">
+      <rect class="map-frame" x="0.8" y="0.8" width="98.4" height="68.4" rx="2" />
+      ${level.walls.map((b) => rect(b, 'map-wall')).join('')}
+      ${level.crates.map((b) => rect(b, 'map-crate')).join('')}
+      ${level.pickups.map((p) => `<circle class="map-pickup" cx="${(p.x * 100).toFixed(1)}" cy="${(p.y * 70).toFixed(1)}" r="2.1" />`).join('')}
+      <circle class="map-p1" cx="${(level.player.x * 100).toFixed(1)}" cy="${(level.player.y * 70).toFixed(1)}" r="3.4" />
+      <circle class="map-p2" cx="${(level.enemy.x * 100).toFixed(1)}" cy="${(level.enemy.y * 70).toFixed(1)}" r="3.4" />
+    </svg>`;
+}
+
+function mapPicker(): string {
+  const cards = LEVELS.map(
+    (level) => `
+      <button type="button" class="map-card ${settings.mapId === level.id ? 'on' : ''}" data-map="${level.id}" title="${level.blurb}">
+        ${mapPreview(level)}
+        <span class="map-name">${level.name.replace(/^\d+\s*·\s*/, '')}</span>
+      </button>`
+  ).join('');
+
+  return `
+    <div class="setting-block">
+      <div class="setting-head">
+        <span class="setting-label">地图</span>
+        <span class="setting-hint">${LEVELS.length} 张 · 对战前选，单人从这张开始连着打 5 关</span>
+      </div>
+      <div class="map-grid">
+        <button type="button" class="map-card map-random ${settings.mapId === 'random' ? 'on' : ''}" data-map="random">
+          <span class="map-dice">随机</span>
+          <span class="map-name">每局换一张</span>
+        </button>
+        ${cards}
+      </div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------- skill picker
+
+function skillPicker(): string {
+  const cards = (seat: 1 | 2): string => {
+    const current = seat === 1 ? settings.skillP1 : settings.skillP2;
+    return SKILLS.map(
+      (s) => `
+        <button type="button" class="skill-card ${current === s.id ? 'on' : ''}" data-skill="${s.id}" data-seat="${seat}">
+          <b>${s.name}</b>
+          <em>冷却 ${s.cooldown}s</em>
+          <span>${s.blurb}</span>
+        </button>`
+    ).join('');
+  };
+
+  const twoSeats = settings.mode === 'versus' || settings.mode === 'lan';
+  return `
+    <div class="setting-block">
+      <div class="setting-head">
+        <span class="setting-label">召唤师技能</span>
+        <span class="setting-hint">开局前选一个，对局中按技能键释放</span>
+      </div>
+      ${
+        twoSeats
+          ? `<div class="skill-row"><span class="seat-tag p1">P1 / 房主</span><div class="skill-cards">${cards(1)}</div></div>
+             <div class="skill-row"><span class="seat-tag p2">P2 / 访客</span><div class="skill-cards">${cards(2)}</div></div>`
+          : `<div class="skill-cards">${cards(1)}</div>`
+      }
+    </div>`;
+}
+
+// ---------------------------------------------------------------- LAN panel
+
+type LanWindow = Window & {
+  tankGame?: {
+    isDesktop?: boolean;
+    scanLan?: () => Promise<{ name: string; host: string; port: number }[]>;
+  };
+};
+
+/** Full-width IME punctuation is why "192.168.1.10" used to be untypable. */
+function normalizeAddress(raw: string): string {
+  return raw
+    .replace(/[\uFF10-\uFF19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[。．｡]/g, '.')
+    .replace(/[：]/g, ':')
+    .replace(/[\uFF0E]/g, '.')
+    .replace(/[^\w.:-]/g, '')
+    .slice(0, 48);
+}
 
 function lanPanel(): string {
-  // The desktop app and `npm run lan` serve the page from the LAN server itself,
-  // so "leave blank" means "this machine". Vite's dev/preview ports are not it.
   const devPorts = ['5173', '4173'];
-  const servedByLanServer =
-    location.protocol.startsWith('http') && !devPorts.includes(location.port);
+  const servedByLanServer = location.protocol.startsWith('http') && !devPorts.includes(location.port);
+  const isDesktop = !!((window as LanWindow).tankGame?.isDesktop);
+
+  const host = `
+    <div class="lan-block">
+      <p class="lan-lead">点「开始游戏」就会开好房间。<b>你的房间地址</b>会显示在下面，也会显示在游戏画面顶部。</p>
+      <div class="lan-room" id="lan-room"><span class="lan-loading">正在检测本机局域网地址…</span></div>
+      <p class="lan-hint">把上面的地址发给朋友：他在浏览器里直接打开就能加入，或者在自己客户端的「加入房间」里点「扫描 / 粘贴」。</p>
+    </div>`;
+
+  const guest = `
+    <div class="lan-block">
+      <div class="setting-row lan-address-row">
+        <span class="setting-label">房主地址</span>
+        <input id="lan-address" class="lan-input" type="text" spellcheck="false" autocomplete="off"
+          inputmode="url"
+          placeholder="${servedByLanServer ? location.host : '192.168.1.10'}"
+          value="${settings.lanAddress}" />
+      </div>
+      <div class="lan-quick">
+        ${
+          servedByLanServer
+            ? `<button type="button" class="chip" id="lan-use-here">用当前网页的服务器（留空即可）</button>`
+            : ''
+        }
+        ${isDesktop ? `<button type="button" class="chip" id="lan-scan">扫描局域网房间</button>` : ''}
+        <button type="button" class="chip" id="lan-paste">粘贴剪贴板</button>
+      </div>
+      <div class="lan-scan-list" id="lan-scan-list"></div>
+      <p class="lan-hint">
+        不用记 IP：可以只填 <b>192.168.1.10</b>（端口默认 ${DEFAULT_LAN_PORT}），也可以直接粘贴房主给你的完整网址。
+        中文输入法打出的「。」会自动变成「.」。
+      </p>
+    </div>`;
+
   return `
     <div class="lan-panel">
       <div class="setting-row">
@@ -84,26 +209,281 @@ function lanPanel(): string {
           <button type="button" data-lanrole="guest" class="${settings.lanRole === 'guest' ? 'on' : ''}">加入房间（访客）</button>
         </div>
       </div>
-      <div class="setting-row lan-address-row">
-        <span class="setting-label">房主 IP</span>
-        <input id="lan-address" class="lan-input" type="text" spellcheck="false"
-          placeholder="${servedByLanServer ? location.host : '192.168.1.10:8787'}"
-          value="${settings.lanAddress}" />
-        <span class="lan-hint">留空 = 使用当前网页所在的服务器</span>
-      </div>
-      <div class="setting-note">
-        ${
-          settings.lanRole === 'host'
-            ? '你负责开房间：启动后把界面上的地址发给朋友，他们在浏览器打开就能加入（最多 2 人）。'
-            : '输入房主电脑的 IP（或完整地址）后点“开始游戏”连接。'
-        }
-      </div>
-    </div>
-  `;
+      ${settings.lanRole === 'host' ? host : guest}
+    </div>`;
 }
+
+/** Fills in the host's own addresses, with a one-click copy. */
+async function initHostRoom(): Promise<void> {
+  const box = document.getElementById('lan-room');
+  if (!box) return;
+  try {
+    const res = await fetch('/info', { cache: 'no-store' });
+    if (!res.ok) throw new Error('no info');
+    const info = (await res.json()) as { addresses?: string[]; port?: number };
+    const port = info.port ?? DEFAULT_LAN_PORT;
+    const addresses = (info.addresses ?? []).slice(0, 4);
+    if (!addresses.length) throw new Error('no address');
+    box.innerHTML = addresses
+      .map(
+        (ip) => `
+        <button type="button" class="lan-copy" data-copy="http://${ip}:${port}">
+          <b>http://${ip}:${port}</b><span>点击复制</span>
+        </button>`
+      )
+      .join('');
+    box.querySelectorAll<HTMLButtonElement>('.lan-copy').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const text = btn.dataset.copy ?? '';
+        void navigator.clipboard?.writeText(text);
+        settings.lanAddress = '';
+        btn.classList.add('copied');
+        const label = btn.querySelector('span');
+        if (label) label.textContent = '已复制！';
+        window.setTimeout(() => {
+          btn.classList.remove('copied');
+          if (label) label.textContent = '点击复制';
+        }, 1400);
+      });
+    });
+  } catch {
+    box.innerHTML = `<span class="lan-loading">这个页面不是由局域网服务托管的。<br>
+      用桌面客户端或 <code>npm run lan</code> 启动后，这里会显示你的房间地址。</span>`;
+  }
+}
+
+function initGuestTools(): void {
+  const input = document.getElementById('lan-address') as HTMLInputElement | null;
+  if (input) {
+    input.addEventListener('input', () => {
+      const clean = normalizeAddress(input.value);
+      if (clean !== input.value) input.value = clean;
+      settings.lanAddress = clean;
+    });
+  }
+
+  document.getElementById('lan-use-here')?.addEventListener('click', () => {
+    settings.lanAddress = '';
+    if (input) input.value = '';
+    sound.ui();
+  });
+
+  document.getElementById('lan-paste')?.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      const clean = normalizeAddress(text);
+      if (input) input.value = clean;
+      settings.lanAddress = clean;
+      sound.ui();
+    } catch {
+      input?.focus();
+    }
+  });
+
+  const list = document.getElementById('lan-scan-list');
+  document.getElementById('lan-scan')?.addEventListener('click', async () => {
+    const api = (window as LanWindow).tankGame;
+    if (!api?.scanLan || !list) return;
+    list.innerHTML = '<span class="lan-loading">正在扫描局域网…</span>';
+    try {
+      const hosts = await api.scanLan();
+      if (!hosts.length) {
+        list.innerHTML =
+          '<span class="lan-loading">没扫到房间。让房主先点「开始游戏」，或让他把地址发给你直接粘贴。</span>';
+        return;
+      }
+      list.innerHTML = hosts
+        .map(
+          (h) =>
+            `<button type="button" class="lan-host" data-host="${h.host}:${h.port}">
+               <b>${h.name || 'TankGame 房间'}</b><span>${h.host}:${h.port}</span>
+             </button>`
+        )
+        .join('');
+      list.querySelectorAll<HTMLButtonElement>('.lan-host').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const value = btn.dataset.host ?? '';
+          if (input) input.value = value;
+          settings.lanAddress = value;
+          list.innerHTML = `<span class="lan-loading">已选中 ${value}，点「开始游戏」加入。</span>`;
+          sound.ui();
+        });
+      });
+    } catch {
+      list.innerHTML = '<span class="lan-loading">扫描失败，请手动输入房主地址。</span>';
+    }
+  });
+}
+
+// ---------------------------------------------------------------- bindings UI
+
+type BindingScope = 'solo' | 'versus.p1' | 'versus.p2' | 'lan.host' | 'lan.guest' | 'global';
+
+let keyTab: BindingScope = 'solo';
+
+const KEY_TABS: { id: BindingScope; label: string }[] = [
+  { id: 'solo', label: '单人闯关' },
+  { id: 'versus.p1', label: '双人 P1' },
+  { id: 'versus.p2', label: '双人 P2' },
+  { id: 'lan.host', label: '联机房主' },
+  { id: 'lan.guest', label: '联机访客' },
+  { id: 'global', label: '系统' },
+];
+
+function scopeSeat(scope: BindingScope): { group: Record<SeatAction, number>; prefix: string } | null {
+  const b = getBindings();
+  switch (scope) {
+    case 'solo':
+      return { group: b.solo, prefix: '单人' };
+    case 'versus.p1':
+      return { group: b.versus.p1, prefix: '双人 P1' };
+    case 'versus.p2':
+      return { group: b.versus.p2, prefix: '双人 P2' };
+    case 'lan.host':
+      return { group: b.lan.host, prefix: '联机房主' };
+    case 'lan.guest':
+      return { group: b.lan.guest, prefix: '联机访客' };
+    default:
+      return null;
+  }
+}
+
+function keyRowsHtml(): string {
+  const b = getBindings();
+  const rows: string[] = [];
+  const seat = scopeSeat(keyTab);
+  if (seat) {
+    for (const action of SEAT_ACTIONS) {
+      rows.push(`
+        <div class="key-row">
+          <span>${ACTION_LABEL[action]}</span>
+          <button type="button" class="key-btn" data-bind-scope="${keyTab}" data-bind-action="${action}">
+            ${keyLabel(seat.group[action])}
+          </button>
+        </div>`);
+    }
+  } else {
+    for (const action of ['pause', 'mute', 'autoDodge'] as GlobalAction[]) {
+      rows.push(`
+        <div class="key-row">
+          <span>${GLOBAL_LABEL[action]}</span>
+          <button type="button" class="key-btn" data-bind-scope="global" data-bind-action="${action}">
+            ${keyLabel(b.global[action])}
+          </button>
+        </div>`);
+    }
+  }
+  return rows.join('');
+}
+
+function setBinding(scope: BindingScope, action: string, code: number): void {
+  const b: BindingsFile = getBindings();
+  const clean = Math.max(1, Math.min(255, code));
+  switch (scope) {
+    case 'solo':
+      b.solo[action as SeatAction] = clean;
+      break;
+    case 'versus.p1':
+      b.versus.p1[action as SeatAction] = clean;
+      break;
+    case 'versus.p2':
+      b.versus.p2[action as SeatAction] = clean;
+      break;
+    case 'lan.host':
+      b.lan.host[action as SeatAction] = clean;
+      break;
+    case 'lan.guest':
+      b.lan.guest[action as SeatAction] = clean;
+      break;
+    default:
+      b.global[action as GlobalAction] = clean;
+  }
+  saveBindings(b);
+}
+
+function bindKeyEditor(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>('[data-keytab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      keyTab = (btn.dataset.keytab as BindingScope) ?? 'solo';
+      sound.ui();
+      root.querySelectorAll<HTMLButtonElement>('[data-keytab]').forEach((b) => b.classList.toggle('on', b === btn));
+      const rows = root.querySelector('.key-rows');
+      if (rows) rows.innerHTML = keyRowsHtml();
+      bindKeyRows(root);
+    });
+  });
+
+  bindKeyRows(root);
+
+  root.querySelector<HTMLButtonElement>('[data-keyreset]')?.addEventListener('click', () => {
+    resetBindings();
+    sound.ui();
+    const rows = root.querySelector('.key-rows');
+    if (rows) rows.innerHTML = keyRowsHtml();
+    bindKeyRows(root);
+    render(state);
+  });
+}
+
+/** Click a key, then press the key you want – no text entry anywhere. */
+function bindKeyRows(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>('.key-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.classList.contains('capturing')) return;
+      const scope = btn.dataset.bindScope as BindingScope;
+      const action = btn.dataset.bindAction ?? '';
+      const previous = btn.textContent ?? '';
+      btn.classList.add('capturing');
+      btn.textContent = '请按键…';
+
+      const finish = (code: number | null): void => {
+        window.removeEventListener('keydown', onKey, true);
+        btn.classList.remove('capturing');
+        if (code === null) {
+          btn.textContent = previous;
+          return;
+        }
+        setBinding(scope, action, code);
+        btn.textContent = keyLabel(code);
+        sound.ui();
+        // Re-render the footer + start card hints with the new key.
+        refreshControlHints();
+      };
+
+      const onKey = (event: KeyboardEvent): void => {
+        event.preventDefault();
+        event.stopPropagation();
+        const code = eventToKeyCode(event);
+        finish(code === 27 ? null : code);
+      };
+
+      window.addEventListener('keydown', onKey, true);
+    });
+  });
+}
+
+function keyEditor(): string {
+  return `
+    <details class="keybinds">
+      <summary>按键设置 · 点一下键位，再按你想用的键</summary>
+      <div class="key-tabs">
+        ${KEY_TABS.map(
+          (t) => `<button type="button" data-keytab="${t.id}" class="${keyTab === t.id ? 'on' : ''}">${t.label}</button>`
+        ).join('')}
+      </div>
+      <div class="key-rows">${keyRowsHtml()}</div>
+      <div class="key-foot">
+        <span>每个模式各有一套键位，改了立刻生效（下一局开始）。Esc 取消。</span>
+        <button type="button" data-keyreset>恢复默认</button>
+      </div>
+    </details>`;
+}
+
+// ---------------------------------------------------------------- settings
 
 function settingsPanel(): string {
   const d = DIFFICULTIES[settings.difficulty];
+  const versus = settings.mode === 'versus' || settings.mode === 'lan';
   return `
     <div class="settings">
       <div class="setting-row">
@@ -114,7 +494,7 @@ function settingsPanel(): string {
           <button type="button" data-mode="lan" class="${settings.mode === 'lan' ? 'on' : ''}">局域网联机</button>
         </div>
       </div>
-      <div class="setting-row ${settings.mode === 'versus' ? 'is-muted' : ''}">
+      <div class="setting-row ${versus ? 'is-muted' : ''}">
         <span class="setting-label">难度</span>
         <div class="segmented" role="group" aria-label="难度">
           ${Object.values(DIFFICULTIES)
@@ -125,32 +505,49 @@ function settingsPanel(): string {
             .join('')}
         </div>
       </div>
-      <div class="setting-note">${settings.mode === 'versus' ? '双人模式：每人 3 条命，先被击毁的一方输掉这一局。' : d.blurb}</div>
+      <div class="setting-note">${versus ? '对战模式：每人 3 条命，先被击毁的一方输掉这一局。' : d.blurb}</div>
+      ${mapPicker()}
+      ${skillPicker()}
       ${settings.mode === 'lan' ? lanPanel() : ''}
-      <label class="setting-row toggle ${settings.mode === 'versus' ? 'is-muted' : ''}">
-        <input type="checkbox" id="auto-dodge" ${settings.autoDodge ? 'checked' : ''} ${settings.mode === 'versus' ? 'disabled' : ''} />
+      <label class="setting-row toggle ${versus ? 'is-muted' : ''}">
+        <input type="checkbox" id="auto-dodge" ${settings.autoDodge ? 'checked' : ''} ${versus ? 'disabled' : ''} />
         <span class="switch" aria-hidden="true"></span>
         <span class="toggle-text">
           <b>自动躲弹</b>
-          <em>车身自动躲炮弹、自动贴墙找角度，你只管瞄准和开火（游戏中按 <kbd>G</kbd> 可随时切换）</em>
+          <em>车身自动躲炮弹、自动贴墙找角度，你只管瞄准和开火（游戏中按 <kbd>${keyLabel(getBindings().global.autoDodge)}</kbd> 可随时切换）</em>
         </span>
       </label>
+      ${keyEditor()}
     </div>
   `;
 }
 
 function controlsForMode(): string {
-  return settings.mode === 'versus' ? VERSUS_CONTROLS : SOLO_CONTROLS;
+  const b = getBindings();
+  const k = (code: number): string => `<kbd>${keyLabel(code)}</kbd>`;
+  if (settings.mode === 'versus') {
+    const a = b.versus.p1;
+    const c = b.versus.p2;
+    return `
+      <ul class="controls two-col">
+        <li><b class="p1">P1</b> ${k(a.up)}${k(a.left)}${k(a.down)}${k(a.right)} 驾驶 · ${k(a.aimLeft)}${k(a.aimRight)} 微调炮口 · ${k(a.fire)} 开火 · ${k(a.skill)} 技能</li>
+        <li><b class="p2">P2</b> ${k(c.up)}${k(c.left)}${k(c.down)}${k(c.right)} 驾驶 · ${k(c.aimLeft)}${k(c.aimRight)} 微调炮口 · ${k(c.fire)} 开火 · ${k(c.skill)} 技能</li>
+      </ul>`;
+  }
+  const s = b.solo;
+  return `
+    <ul class="controls">
+      <li>${k(s.up)}${k(s.left)}${k(s.down)}${k(s.right)} 驾驶 / 转向（炮口跟着车体转）</li>
+      <li><kbd>鼠标</kbd> 瞄准 · ${k(s.aimLeft)}${k(s.aimRight)} 微调炮口</li>
+      <li>${k(s.fire)} 或 <kbd>左键</kbd> 开火 · ${k(s.slow)} 慢速微调</li>
+      <li>${k(s.skill)} 召唤师技能 · <kbd>P</kbd> 暂停</li>
+    </ul>`;
 }
 
-const LAN_CONTROLS = `
-  <ul class="controls">
-    <li><kbd>WASD</kbd> 驾驶 / 转向</li>
-    <li><kbd>鼠标</kbd> 瞄准炮塔</li>
-    <li><kbd>左键</kbd><kbd>空格</kbd> 开火</li>
-    <li><kbd>P</kbd> 暂停 · <kbd>M</kbd> 静音</li>
-  </ul>
-`;
+function refreshControlHints(): void {
+  const host = document.getElementById('controls-host');
+  if (host) host.innerHTML = controlsForMode();
+}
 
 function bindSettings(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => {
@@ -168,6 +565,22 @@ function bindSettings(root: HTMLElement): void {
       render({ kind: 'start' });
     });
   });
+  root.querySelectorAll<HTMLButtonElement>('[data-map]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      settings.mapId = btn.dataset.map ?? 'random';
+      sound.ui();
+      render({ kind: 'start' });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-skill]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.skill as SkillId;
+      if (btn.dataset.seat === '2') settings.skillP2 = id;
+      else settings.skillP1 = id;
+      sound.ui();
+      render({ kind: 'start' });
+    });
+  });
   root.querySelectorAll<HTMLButtonElement>('[data-lanrole]').forEach((btn) => {
     btn.addEventListener('click', () => {
       settings.lanRole = btn.dataset.lanrole === 'guest' ? 'guest' : 'host';
@@ -175,14 +588,19 @@ function bindSettings(root: HTMLElement): void {
       render({ kind: 'start' });
     });
   });
-  root.querySelector<HTMLInputElement>('#lan-address')?.addEventListener('input', (event) => {
-    settings.lanAddress = (event.target as HTMLInputElement).value.trim();
-  });
+
   const auto = root.querySelector<HTMLInputElement>('#auto-dodge');
   auto?.addEventListener('change', () => {
     settings.autoDodge = auto.checked;
     sound.ui();
   });
+
+  bindKeyEditor(root);
+
+  if (settings.mode === 'lan') {
+    if (settings.lanRole === 'host') void initHostRoom();
+    else initGuestTools();
+  }
 }
 
 function startMatch(): void {
@@ -212,14 +630,15 @@ function render(next: OverlayState): void {
   card.setAttribute('data-state', next.kind);
 
   if (next.kind === 'start') {
+    const mapName = settings.mapId === 'random' ? '随机地图' : levelById(settings.mapId).name;
     card.innerHTML = `
       <div class="kicker">Sketch Tank · Ricochet</div>
       <h1>坦克大作战<span class="accent">!</span></h1>
       ${DOODLE}
       <div class="rule"></div>
-      <p>子弹碰到任何墙壁都会<strong>反弹</strong>——包括你自己的炮弹。站在自己的弹道上，一样会被自己打到。</p>
+      <p>子弹碰到任何墙壁都会<strong>反弹</strong>——包括你自己的炮弹。地上散落的道具碰到就吃，想不想吃由不得你。</p>
       ${settingsPanel()}
-      ${settings.mode === 'lan' ? LAN_CONTROLS : controlsForMode()}
+      <div id="controls-host">${controlsForMode()}</div>
       <div class="actions">
         <button class="primary" id="btn-start">开始游戏</button>
         <span class="hint">或按 Enter</span>
@@ -227,10 +646,12 @@ function render(next: OverlayState): void {
       </div>
       <div class="tip"><span class="dot"></span> ${
         settings.mode === 'lan'
-          ? '联机：房主开好房间后把局域网地址发给朋友，对方用浏览器打开即可加入 · 1v1，各 3 条命'
+          ? settings.lanRole === 'host'
+            ? '联机：开好后把房间地址发给朋友（浏览器直接打开即可）· 1v1，各 3 条命'
+            : '联机：填房主地址，或点「扫描局域网房间」自动找到 · 1v1，各 3 条命'
           : settings.mode === 'versus'
-            ? '双人：先被打光 3 条命的一方输 · 3 张地图轮换'
-            : `单人：你有 ${DIFFICULTIES[settings.difficulty].lives} 条命，击毁敌方坦克 ${DIFFICULTIES[settings.difficulty].enemyLives} 次即可过关 · 3 关`
+            ? `双人：先被打光 3 条命的一方输 · 当前地图 ${mapName}`
+            : `单人：你有 ${DIFFICULTIES[settings.difficulty].lives} 条命，从「${mapName}」开始连打 5 关`
       }</div>
     `;
     bindSettings(card);
@@ -240,16 +661,15 @@ function render(next: OverlayState): void {
       <h1>暂停中</h1>
       <div class="rule"></div>
       <p>绿色虚线是真实的反弹路径，拐角上的小圈就是反弹点。</p>
-      ${settingsPanel()}
-      ${settings.mode === 'lan' ? LAN_CONTROLS : controlsForMode()}
+      ${keyEditor()}
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
         <button id="btn-restart">重新开始</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
       </div>
-      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 更改模式/难度后点“重新开始”生效</div>
+      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 键位改完从下一局生效</div>
     `;
-    bindSettings(card);
+    bindKeyEditor(card);
   } else if (next.kind === 'gameover') {
     card.innerHTML = `
       <div class="kicker">Game Over</div>
@@ -270,7 +690,7 @@ function render(next: OverlayState): void {
       <div class="kicker">Mission Complete</div>
       <h1>全部击毁<span class="accent">!</span></h1>
       <div class="rule"></div>
-      <p>三关全部清空。想再难一点的话，去菜单换成「困难」试试。</p>
+      <p>五关全部清空。想再难一点的话，去菜单换成「困难」试试。</p>
       <div class="stateline"><span>总得分 <b>${next.score}</b></span></div>
       <div class="actions">
         <button class="primary" id="btn-restart">再来一局</button>
@@ -280,7 +700,7 @@ function render(next: OverlayState): void {
   } else {
     const p1Wins = next.winner === 'p1';
     card.innerHTML = `
-      <div class="kicker">Local Versus</div>
+      <div class="kicker">Versus</div>
       <h1><span class="${p1Wins ? 'p1' : 'p2'}">${p1Wins ? 'P1' : 'P2'}</span> 获胜<span class="accent">!</span></h1>
       <div class="rule"></div>
       <p>${p1Wins ? 'P1' : 'P2'} 打光了对手的 3 条命。</p>
@@ -353,6 +773,7 @@ if (document.fonts?.ready) {
 
 window.addEventListener('keydown', (event) => {
   if (state.kind !== 'start') return;
+  if (document.querySelector('.key-btn.capturing')) return;
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
     document.getElementById('btn-start')?.click();
@@ -363,4 +784,4 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('pointerdown', () => sound.resume(), { once: true });
 window.addEventListener('keydown', () => sound.resume(), { once: true });
 
-export { settings };
+export { settings, defaultBindings };

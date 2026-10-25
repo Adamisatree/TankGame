@@ -7,13 +7,15 @@
  * Kept as CommonJS because Electron loads the main process directly and the
  * rest of the project is ESM.
  */
-const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const path = require('node:path');
 const { startLanServer } = require('./lan-boot.cjs');
+const { startBeacon, scanForHosts } = require('./discovery.cjs');
 
 const DEV_URL = process.env.TANK_DEV_URL; // set to http://localhost:5173 while developing the UI
 let serverHandle = null;
 let win = null;
+let beacon = null;
 
 async function startServer() {
   const appRoot = app.isPackaged ? app.getAppPath() : path.join(__dirname, '..');
@@ -65,6 +67,7 @@ async function createWindow() {
     title: '坦克大作战',
     autoHideMenuBar: false,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -84,6 +87,7 @@ async function createWindow() {
 app.whenReady().then(async () => {
   try {
     serverHandle = await startServer();
+    beacon = startBeacon(serverHandle.port);
     console.log(`[desktop] LAN server on port ${serverHandle.port}`);
   } catch (err) {
     dialog.showErrorBox('无法启动局域网服务', String(err));
@@ -100,6 +104,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// A guest can find rooms without typing an IP address.
+ipcMain.handle('lan:scan', async () => {
+  try {
+    return await scanForHosts(1300);
+  } catch {
+    return [];
+  }
+});
+
 app.on('before-quit', () => {
+  beacon?.close();
   void serverHandle?.close();
 });
