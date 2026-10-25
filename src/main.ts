@@ -3,10 +3,11 @@ import './style.css';
 import { GAME_H, GAME_W } from './game/config';
 import { GameScene } from './game/GameScene';
 import { MenuScene } from './game/MenuScene';
-import { OVERLAY_EVENT, type OverlayState } from './game/events';
+import { MATCH_LEFT_EVENT, OVERLAY_EVENT, type OverlayState } from './game/events';
 import { DIFFICULTIES, settings, type Difficulty, type GameMode } from './game/settings';
 import { sound } from './game/Sound';
-import { LEVELS, levelById, type Level } from './engine/level';
+import { type Level } from './engine/level';
+import { levelById, levels } from './maps/registry';
 import { SKILLS, isSkillId, skillById, type SkillId } from './game/skills';
 import { TEAM_NAMES } from './game/Tank';
 import {
@@ -27,6 +28,10 @@ import { DEFAULT_LAN_PORT } from './net/protocol';
 import { CAPACITY_CHOICES, KILL_TARGET_CHOICES, TIME_LIMIT_CHOICES } from './game/rules';
 import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
 import { bindTuningPanel, tuningPanelHtml } from './ui/tuningPanel';
+import { MapEditor } from './ui/mapEditor';
+import { emptyMap, fromLevel, newMapId, normalizeMapFile, type MapFile } from './maps/format';
+import { deleteMap, exportFileName, exportMapText, getMap, importMapText, listMaps, saveMap } from './maps/store';
+import { refreshLevels } from './maps/registry';
 import { APP_VERSION } from './version';
 import './update/types';
 
@@ -94,7 +99,7 @@ function mapPreview(level: Level): string {
 }
 
 function mapPicker(): string {
-  const cards = LEVELS.map(
+  const cards = levels().map(
     (level) => `
       <button type="button" class="map-card ${settings.mapId === level.id ? 'on' : ''}" data-map="${level.id}" title="${level.blurb}">
         ${mapPreview(level)}
@@ -106,7 +111,7 @@ function mapPicker(): string {
     <div class="setting-block">
       <div class="setting-head">
         <span class="setting-label">地图</span>
-        <span class="setting-hint">${LEVELS.length} 张 · 对战前选，单人从这张开始连着打 5 关</span>
+        <span class="setting-hint">${levels().length} 张（含自定义）· 对战前选，单人从这张开始连着打 5 关</span>
       </div>
       <div class="map-grid">
         <button type="button" class="map-card map-random ${settings.mapId === 'random' ? 'on' : ''}" data-map="random">
@@ -116,6 +121,49 @@ function mapPicker(): string {
         ${cards}
       </div>
     </div>`;
+}
+
+/** Custom map library: create, edit, duplicate, export, delete. */
+function customMapsPanel(): string {
+  const maps = listMaps();
+  const rows = maps
+    .map(
+      (map) => `
+      <li class="custom-map ${settings.mapId === map.id ? 'is-picked' : ''}">
+        <div class="custom-map-main">
+          <b>${escapeHtml(map.name)}</b>
+          <span class="custom-map-meta">
+            ${map.size.w}×${map.size.h} · 墙 ${map.walls.length} · 道具 ${map.pickups.length} ·
+            ${map.source === 'received' ? '来自联机' : '本机'} · rev ${map.rev}
+          </span>
+        </div>
+        <div class="custom-map-actions">
+          <button type="button" class="chip tiny" data-map-play="${map.id}">用这张</button>
+          <button type="button" class="chip tiny" data-map-edit="${map.id}">编辑</button>
+          <button type="button" class="chip tiny ghost" data-map-export="${map.id}">导出</button>
+          <button type="button" class="chip tiny ghost" data-map-delete="${map.id}">删除</button>
+        </div>
+      </li>`
+    )
+    .join('');
+
+  return `
+    <div class="setting-block custom-maps">
+      <div class="setting-head">
+        <span class="setting-label">自定义地图</span>
+        <span class="setting-hint">${maps.length} 张 · 联机收到过的图都会存在这里</span>
+      </div>
+      ${maps.length ? `<ul class="custom-map-list">${rows}</ul>` : '<p class="lan-hint">还没有自定义地图，点下面按钮画一张。</p>'}
+      <div class="custom-map-tools">
+        <button type="button" class="chip" id="map-new">＋ 新建地图</button>
+        <button type="button" class="chip" id="map-copy-builtin">从内置地图复制一张</button>
+        <button type="button" class="chip ghost" id="map-import">导入 .tankmap.json</button>
+      </div>
+    </div>`;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch] ?? ch);
 }
 
 // ---------------------------------------------------------------- skill picker
@@ -630,6 +678,22 @@ function refreshControlHints(): void {
   if (host) host.innerHTML = controlsForMode();
 }
 
+/** Saves a map file to disk as `<name>.tankmap.json`. */
+function downloadMap(map: MapFile): void {
+  const blob = new Blob([exportMapText(map)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = exportFileName(map);
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Opens the editor for a working copy of `map`. */
+function openEditor(map: MapFile): void {
+  render({ kind: 'mapEditor', map: normalizeMapFile({ ...map, minAppVersion: map.minAppVersion || APP_VERSION }) });
+}
+
 function bindSettings(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -697,6 +761,72 @@ function bindSettings(root: HTMLElement): void {
     sound.ui();
   });
 
+  // Custom maps: create / edit / play / export / delete.
+  root.querySelector<HTMLButtonElement>('#map-new')?.addEventListener('click', () => {
+    sound.ui();
+    openEditor(emptyMap({ name: '我的地图', author: '本机', sizeId: 'screen' }));
+  });
+  root.querySelector<HTMLButtonElement>('#map-copy-builtin')?.addEventListener('click', () => {
+    sound.ui();
+    // Copy whatever is picked; random falls back to the first built-in.
+    const picked = levels().find((level) => level.id === settings.mapId);
+    const base = picked ?? levels().find((level) => !level.id.startsWith('custom-')) ?? levels()[0];
+    const label = base.name.split('·').pop()?.trim() || base.name;
+    openEditor(fromLevel(base, { name: `${label} 副本` }));
+  });
+  root.querySelector<HTMLButtonElement>('#map-import')?.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      void file.text().then((text) => {
+        const result = importMapText(text);
+        refreshLevels();
+        if (result.ok) {
+          render({ kind: 'start' });
+        } else {
+          window.alert(`导入失败：${result.error ?? '未知错误'}`);
+        }
+      });
+    });
+    input.click();
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-map-play]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      settings.mapId = btn.dataset.mapPlay ?? 'random';
+      render({ kind: 'start' });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-map-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      const map = getMap(btn.dataset.mapEdit ?? '');
+      if (map) openEditor(map);
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-map-export]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sound.ui();
+      const map = getMap(btn.dataset.mapExport ?? '');
+      if (map) downloadMap(map);
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-map-delete]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const map = getMap(btn.dataset.mapDelete ?? '');
+      if (!map) return;
+      if (!window.confirm(`删除「${map.name}」？这一步不能撤销。`)) return;
+      sound.ui();
+      deleteMap(map.id);
+      refreshLevels();
+      if (settings.mapId === map.id) settings.mapId = 'random';
+      render({ kind: 'start' });
+    });
+  });
+
   bindKeyEditor(root);
   bindUpdaterPanel(root);
 
@@ -704,6 +834,27 @@ function bindSettings(root: HTMLElement): void {
     if (settings.lanRole === 'host') void initHostRoom();
     else initGuestTools();
   }
+}
+
+/**
+ * The single way out of a match: stop the Game scene, bring the menu back and
+ * show the start screen. Called from the pause menu, the result card and the
+ * LAN room's 离开房间 button (through the scene's MATCH_LEFT_EVENT).
+ */
+function leaveMatch(): void {
+  const scene = gameScene();
+  if (scene) {
+    scene.quitMatch();
+    return;
+  }
+  returnToMenu();
+}
+
+/** Scene swap only – safe to call twice. */
+function returnToMenu(): void {
+  if (game.scene.isActive('Game') || game.scene.isPaused('Game')) game.scene.stop('Game');
+  if (!game.scene.isActive('Menu')) game.scene.start('Menu');
+  render({ kind: 'start' });
 }
 
 function startMatch(): void {
@@ -871,6 +1022,7 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
         : '等人齐；选好你的技能（别人看不到）后点「准备」，房主开始对局。'
     }</p>
     ${state.roomUrl ? `<div class="lobby-url">房间地址 <b>${state.roomUrl}</b></div>` : ''}
+    ${lobbyMapBlock(state)}
     <div class="lobby-seats">${seatCards || '<p class="lan-hint">还没有人加入…</p>'}</div>
     <div class="setting-block">
       <div class="setting-head">
@@ -884,7 +1036,9 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
     <div class="actions">
       ${
         state.isHost
-          ? `<button class="primary" id="lobby-start" ${emptyTeams.length ? 'disabled' : ''}>开始对局</button>`
+          ? `<button class="primary" id="lobby-start" ${
+              emptyTeams.length || (state.map?.custom && !state.map.synced) ? 'disabled' : ''
+            }>开始对局</button>`
           : `<button class="primary" id="lobby-ready">${me?.ready ? '取消准备' : '准备'}</button>`
       }
       <button class="ghost" id="lobby-leave">离开房间</button>
@@ -896,6 +1050,54 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
         : ''
     }
   `;
+}
+
+/**
+ * The room's map row. The host picks the arena right here (built-in, custom or
+ * 随机) and everyone sees whether the file has reached every machine yet.
+ */
+function lobbyMapBlock(state: Extract<OverlayState, { kind: 'lobby' }>): string {
+  const map = state.map;
+  if (!map) return '';
+  const needSync = map.custom && map.total > 0;
+  const progress = needSync
+    ? state.isHost
+      ? `地图确认 ${map.ready}/${map.total}`
+      : map.synced
+        ? '地图已同步'
+        : '正在接收地图…'
+    : '';
+  const tone = !needSync || map.synced ? 'map-ok' : 'map-wait';
+  const picker =
+    state.isHost && state.maps?.length
+      ? `<select class="lobby-map-select" id="lobby-map-select" aria-label="房间地图">
+           ${state.maps
+             .map(
+               (choice) =>
+                 `<option value="${choice.id}" ${choice.id === map.id ? 'selected' : ''}>${
+                   choice.custom ? '✎ ' : ''
+                 }${escapeHtml(choice.name)}</option>`
+             )
+             .join('')}
+         </select>`
+      : `<b class="lobby-map-name">${escapeHtml(map.name)}</b>`;
+  return `
+    <div class="lobby-map ${tone}">
+      <span class="lobby-map-label">地图</span>
+      ${picker}
+      <span class="lobby-map-tag">${map.custom ? '房主自建' : map.id === 'random' ? '每局随机' : '内置'}</span>
+      ${progress ? `<span class="lobby-map-sync">${escapeHtml(progress)}</span>` : ''}
+      ${
+        state.isHost && needSync && !map.synced
+          ? '<button type="button" class="chip tiny" id="lobby-map-resend">重发地图</button>'
+          : ''
+      }
+      ${
+        state.isHost
+          ? '<span class="lobby-map-hint">换图会立刻同步给房间</span>'
+          : '<span class="lobby-map-hint">由房主选择</span>'
+      }
+    </div>`;
 }
 
 function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobby' }>): void {
@@ -924,6 +1126,17 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
       state.roster = state.roster.map((seat) => (seat.id === id ? { ...seat, team } : seat));
       repaint();
     });
+  });
+
+  root.querySelector<HTMLSelectElement>('#lobby-map-select')?.addEventListener('change', (event) => {
+    sound.ui();
+    const id = (event.target as HTMLSelectElement).value;
+    scene.setRoomLevel(id);
+  });
+
+  root.querySelector<HTMLButtonElement>('#lobby-map-resend')?.addEventListener('click', () => {
+    sound.ui();
+    scene.resendRoomMap();
   });
 
   root.querySelector<HTMLButtonElement>('#lobby-auto-teams')?.addEventListener('click', () => {
@@ -1052,6 +1265,46 @@ function render(next: OverlayState): void {
   overlay.classList.remove('hidden');
   card.setAttribute('data-state', next.kind);
 
+  // The editor needs the full card width; every other screen stays narrow.
+  card.classList.toggle('wide', next.kind === 'mapEditor');
+
+  if (next.kind === 'mapEditor') {
+    card.innerHTML = '';
+    const host = document.createElement('div');
+    card.appendChild(host);
+    new MapEditor(host, next.map, {
+      onSave: (map) => {
+        // Saving keeps this editing session alive: no re-render, no lost undo.
+        const saved = saveMap(map);
+        if (saved) {
+          refreshLevels();
+          settings.mapId = saved.id;
+        }
+        return saved;
+      },
+      onSaveCopy: (map) => {
+        // A copy gets a fresh id and name, so the original stays intact.
+        const copy = saveMap({ ...map, id: newMapId(), rev: 1, name: `${map.name} 副本` });
+        if (copy) refreshLevels();
+        return copy;
+      },
+      onDelete: (map) => {
+        if (!window.confirm(`删除「${map.name}」？`)) return;
+        deleteMap(map.id);
+        refreshLevels();
+        if (settings.mapId === map.id) settings.mapId = 'random';
+        render({ kind: 'start' });
+      },
+      onPlay: (map) => {
+        settings.mapId = map.id;
+        startMatch();
+      },
+      onExport: (map) => downloadMap(map),
+      onClose: () => render({ kind: 'start' }),
+    });
+    return;
+  }
+
   if (next.kind === 'lobby') {
     card.innerHTML = lobbyHtml(next);
     bindLobby(card, next);
@@ -1067,6 +1320,7 @@ function render(next: OverlayState): void {
       <div class="rule"></div>
       <p>子弹碰到任何墙壁都会<strong>反弹</strong>——包括你自己的炮弹。地上散落的道具碰到就吃，想不想吃由不得你。</p>
       ${settingsPanel()}
+      ${customMapsPanel()}
       <div id="controls-host">${controlsForMode()}</div>
       <div class="actions">
         <button class="primary" id="btn-start">开始游戏</button>
@@ -1096,6 +1350,8 @@ function render(next: OverlayState): void {
       else card.querySelector<HTMLElement>('#tuning-panel')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
   } else if (next.kind === 'paused') {
+    // A LAN guest cannot restart the room by itself – the host owns the match.
+    const lanGuest = settings.mode === 'lan' && settings.lanRole === 'guest';
     card.innerHTML = `
       <div class="kicker">Paused</div>
       <h1>暂停中</h1>
@@ -1104,7 +1360,11 @@ function render(next: OverlayState): void {
       ${keyEditor()}
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
-        <button id="btn-restart">重新开始</button>
+        ${
+          lanGuest
+            ? '<button id="btn-restart" disabled>重新开始（房主决定）</button>'
+            : '<button id="btn-restart">重新开始</button>'
+        }
         <button class="ghost" id="btn-quit">退出对局</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
         <button class="ghost" id="btn-tuning">内测</button>
@@ -1146,35 +1406,61 @@ function render(next: OverlayState): void {
       </div>
     `;
   } else if (next.kind === 'matchOver') {
-    const rows = next.scoreboard
-      .slice()
-      .sort((a, b) => b.kills - a.kills)
-      .map(
-        (line, index) => `
-        <div class="score-row ${next.winners.includes(line.id) ? 'winner' : ''}">
+    // Everyone gets a card that says plainly whether they won: the same match
+    // used to end silently for guests, and the scoreboard rows had no styling.
+    const teamMode = next.mode === 'team';
+    const teamCount = next.teams ?? 2;
+    const nameOf = (id: string): string => next.scoreboard.find((line) => line.id === id)?.name ?? id;
+    const verdict = next.verdict ?? (next.draw ? 'draw' : 'lose');
+    const sorted = next.scoreboard.slice().sort((a, b) => {
+      if (teamMode) {
+        if (a.team !== b.team) return a.team - b.team;
+        return b.kills - a.kills || a.deaths - b.deaths;
+      }
+      return b.kills - a.kills || a.deaths - b.deaths;
+    });
+    const rows = sorted
+      .map((line, index) => {
+        const won = next.winners.includes(line.id);
+        return `
+        <div class="score-row ${won ? 'winner' : ''} ${teamMode ? `team-${Math.min(line.team, teamCount - 1)}` : ''}">
           <span class="rank">${index + 1}</span>
-          <span class="name">${line.name}</span>
+          <span class="name">${escapeHtml(line.name)}${
+            teamMode ? `<em class="score-team">${TEAM_NAMES[line.team] ?? `第${line.team + 1}队`}</em>` : ''
+          }</span>
           <span class="kills">${line.kills} 杀</span>
           <span class="deaths">${line.deaths} 死</span>
-        </div>`
-      )
+        </div>`;
+      })
       .join('');
-    const title = next.draw
-      ? '平局'
-      : next.surrenderBy
-        ? `${next.scoreboard.find((l) => l.id === next.surrenderBy)?.name ?? '对手'} 已经投降`
-        : `${next.winners
-            .map((id) => next.scoreboard.find((l) => l.id === id)?.name ?? id)
-            .join(' / ')} 获胜`;
-    const reason = next.draw ? '时间到，双方人头相同' : next.reason === 'kills' ? '达到人头目标' : next.reason === 'time' ? '时间到，人头领先' : '对手退出对局，本局判为投降';
+    const headline = verdict === 'draw' ? '平局' : verdict === 'win' ? '你赢了' : '你输了';
+    const winNames = next.winners.map(nameOf).join(' / ');
+    const detail =
+      verdict === 'draw'
+        ? '人头一样多，这一局谁也没赢'
+        : next.reason === 'surrender'
+          ? `${nameOf(next.surrenderBy ?? '')} 中途退出，判为投降`
+          : next.reason === 'time'
+            ? `时间到 · ${winNames} 人头最多`
+            : `达到人头目标 · ${winNames} 领先`;
+    const seconds = Math.max(0, Math.round(next.elapsed ?? 0));
+    const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     card.innerHTML = `
-      <div class="kicker">Match Over</div>
-      <h1>${title}<span class="accent">${next.draw ? '' : '!'}</span></h1>
+      <div class="kicker">${teamMode ? `团队赛 · ${teamCount} 队` : '乱斗'} · Match Over</div>
+      <h1 class="verdict ${verdict}">${headline}<span class="accent">${verdict === 'draw' ? '' : '!'}</span></h1>
       <div class="rule"></div>
-      <p>${reason}</p>
+      <p>${detail}</p>
       <div class="scoreboard">${rows}</div>
+      <div class="stateline">
+        <span>用时 <b>${clock}</b></span>
+        ${next.draw ? '' : `<span>获胜 <b>${escapeHtml(winNames)}</b></span>`}
+      </div>
       <div class="actions">
-        <button class="primary" id="btn-restart">再来一局</button>
+        ${
+          next.canRestart === false
+            ? '<button class="primary" id="btn-wait-host" disabled>等房主再来一局</button>'
+            : '<button class="primary" id="btn-restart">再来一局</button>'
+        }
         <button id="btn-menu">返回菜单</button>
       </div>
     `;
@@ -1213,23 +1499,10 @@ function render(next: OverlayState): void {
     render({ kind: 'hidden' });
   });
 
-  document.getElementById('btn-menu')?.addEventListener('click', () => {
-    sound.ui();
-    gameScene()?.quitMatch();
-    game.scene.stop('Game');
-    game.scene.start('Menu');
-    render({ kind: 'start' });
-  });
-
-  // "退出对局" in the pause menu: solo/versus just end, LAN reports a surrender
-  // and the opponent sees it in their own match-over screen.
-  document.getElementById('btn-quit')?.addEventListener('click', () => {
-    sound.ui();
-    gameScene()?.quitMatch();
-    game.scene.stop('Game');
-    game.scene.start('Menu');
-    render({ kind: 'start' });
-  });
+  // Both the result card and the pause menu hand the exit to the scene, which
+  // fires MATCH_LEFT_EVENT once its socket and latches are clean.
+  document.getElementById('btn-menu')?.addEventListener('click', () => leaveMatch());
+  document.getElementById('btn-quit')?.addEventListener('click', () => leaveMatch());
 
   document.getElementById('btn-mute')?.addEventListener('click', () => {
     sound.setMuted(!sound.muted);
@@ -1238,6 +1511,12 @@ function render(next: OverlayState): void {
 }
 
 game.events.on(OVERLAY_EVENT, (next: OverlayState) => render(next));
+// The scene finished tearing a match down; this is the only place that swaps
+// scenes, so a half-stopped match can never come back on top of the menu.
+game.events.on(MATCH_LEFT_EVENT, () => {
+  sound.ui();
+  returnToMenu();
+});
 
 game.events.once(Phaser.Core.Events.READY, () => {
   render({ kind: 'start' });

@@ -9,6 +9,9 @@ import {
 } from './protocol';
 import { APP_VERSION } from '../version';
 import { DEFAULT_MATCH, type MatchConfig } from '../game/rules';
+import { mapHash, normalizeMapFile, type MapFile } from '../maps/format';
+import { archiveReceived } from '../maps/store';
+import { refreshLevels } from '../maps/registry';
 
 export type LanStatus = 'idle' | 'connecting' | 'waiting' | 'playing' | 'closed' | 'error' | 'rejected';
 
@@ -37,10 +40,21 @@ export interface LanHandlers {
       teams: number;
     }
   ) => void;
-  /** The lobby refused to start (e.g. an empty team). */
-  onLobbyError?: (info: { reason: 'empty-team'; teams: number[] }) => void;
+  /** The lobby refused to start (e.g. an empty team, or the map is not synced). */
+  onLobbyError?: (info: {
+    reason: 'empty-team' | 'map-pending' | 'map-failed';
+    teams?: number[];
+    waiting?: string[];
+    detail?: string;
+  }) => void;
   /** The host started the match. */
   onBegin?: (info: { mode: 'ffa' | 'team'; config: Record<string, unknown> | null; teams: number }) => void;
+  /** Guest: the host's map arrived (and whether its hash matched). */
+  onMap?: (map: MapFile, ok: boolean) => void;
+  /** Guest: the room went back to a built-in arena, nothing to store. */
+  onMapCleared?: () => void;
+  /** Host: how many seats have confirmed the room's map. */
+  onMapStatus?: (info: { waiting: string[]; ready: string[] }) => void;
   /** Everyone: the room's shared rules, as set by the host. */
   onConfig?: (config: MatchConfig, tuning?: Record<string, number>) => void;
   /** Our own seat in the room. */
@@ -74,9 +88,13 @@ export class LanClient {
   /** Messages queued while the socket was still connecting (e.g. a restart). */
   private pending: string[] = [];
   /** Match rules this machine wants the room to use (host only). */
-  matchConfig: MatchConfig | null = null;
+  matchConfig: (MatchConfig & { levelId?: string }) | null = null;
   /** Balance knobs this machine wants the room to use (host only). */
   tuning: Record<string, number> | null = null;
+  /** The map this host is putting into the room; sent with `join`. */
+  hostMap: MapFile | null = null;
+  /** Which map the room plays, as announced by the host (guest side). */
+  roomMapId = '';
 
   constructor(role: NetRole, serverAddress: string, handlers: LanHandlers = {}) {
     this.role = role;
@@ -119,6 +137,9 @@ export class LanClient {
           skill: this.skill || undefined,
           version: APP_VERSION,
           protocol: PROTOCOL_VERSION,
+          ...(this.role === 'host' && this.hostMap
+            ? { map: this.hostMap, mapHash: mapHash(this.hostMap) }
+            : {}),
         })
       );
       this.setStatus('waiting');
@@ -213,7 +234,26 @@ export class LanClient {
           });
           break;
         case 'lobby-error':
-          this.handlers.onLobbyError?.({ reason: 'empty-team', teams: msg.teams ?? [] });
+          this.handlers.onLobbyError?.({
+            reason: msg.reason ?? 'empty-team',
+            teams: msg.teams ?? [],
+            waiting: msg.waiting ?? [],
+            detail: msg.detail,
+          });
+          break;
+        case 'map':
+          // Host already owns the map; only a guest has to store it.
+          if (this.role !== 'guest') break;
+          // `map: null` = the room went back to a built-in arena.
+          if (!msg.map) {
+            this.roomMapId = '';
+            this.handlers.onMapCleared?.();
+            break;
+          }
+          this.takeMap(msg.map, msg.hash);
+          break;
+        case 'map-status':
+          this.handlers.onMapStatus?.({ waiting: msg.waiting ?? [], ready: msg.ready ?? [] });
           break;
         case 'begin':
           this.handlers.onBegin?.({
@@ -295,6 +335,58 @@ export class LanClient {
   /** Host only: start the match for everyone. */
   begin(): void {
     this.sendRaw({ t: 'begin' });
+  }
+
+  /**
+   * Host only: put this map into the room. The server caches it, hands it to
+   * every guest and waits for their confirmations before `begin` is accepted.
+   */
+  sendMap(map: MapFile): void {
+    this.hostMap = map;
+    this.send({ t: 'map', map, hash: mapHash(map) });
+  }
+
+  /**
+   * Host: the room switched back to a built-in map. Clearing has to reach the
+   * server (it caches the map and gates `begin` on the acks), otherwise the
+   * room would sit waiting for a file that is never coming.
+   */
+  clearMap(): void {
+    this.hostMap = null;
+    this.send({ t: 'map', map: null, hash: '' });
+  }
+
+  /**
+   * Guest: store the host's map, then answer with its revision + hash so the
+   * host can tell "same map" from "a different map that happens to share an id".
+   */
+  private takeMap(raw: unknown, hash: string): void {
+    let stored: MapFile | null = null;
+    let ok = false;
+    try {
+      stored = archiveReceived(normalizeMapFile(raw));
+      // The library may have kept a newer revision of the same id; the hash has
+      // to match what the host is about to play, or the arena would differ.
+      ok = !!stored && mapHash(stored) === hash;
+    } catch {
+      ok = false;
+    }
+    if (stored) {
+      this.roomMapId = stored.id;
+      refreshLevels();
+      this.handlers.onMap?.(stored, ok);
+      this.sendRaw({
+        t: 'map-ack',
+        id: stored.id,
+        rev: stored.rev,
+        hash,
+        ok,
+        ...(ok ? {} : { reason: '地图校验失败' }),
+      });
+      this.handlers.onLog?.(ok ? `收到房主地图 ${stored.name}` : `地图 ${stored.name} 校验失败`);
+      return;
+    }
+    this.sendRaw({ t: 'map-ack', id: '', rev: 0, hash, ok: false, reason: '地图文件读不出来' });
   }
 
   /** Raw envelope for lobby messages that are not HostMessages. */

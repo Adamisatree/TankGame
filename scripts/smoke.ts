@@ -257,6 +257,11 @@ const settings = (await import('../src/game/settings')).settings;
 check('game scene is active', scene.scene.isActive());
 check('game loop is running', game.loop.running, `frame=${game.loop.frame}`);
 check('solo mode by default', !poke.versus);
+// v1.5: the minimap labels yourself, your team and everyone else.
+const soloMarks = () =>
+  (poke as unknown as { minimapMarks: () => { id: string; kind: string }[] }).minimapMarks();
+check('the solo CPU shows up as an enemy on the minimap', soloMarks().some((m) => m.id === 'enemy' && m.kind === 'foe'), JSON.stringify(soloMarks()));
+check('the minimap never marks a solo run as a team', !soloMarks().some((m) => m.kind === 'mate'), JSON.stringify(soloMarks()));
 check('everyone starts on 100 HP', poke.p1.hp === 100 && poke.p1.maxHp === 100, `hp=${poke.p1.hp}`);
 check('the AI is on the same health pool', poke.enemy?.hp === 100, `hp=${poke.enemy?.hp}`);
 check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.now);
@@ -392,6 +397,59 @@ for (let i = 0; i < 30 && !acquired; i++) {
 }
 check('the AI acquires and fires shots', acquired, `charge=${poke.aiCharge}`);
 
+// --- v1.5: the dashed aiming line follows the (tunable) bounce count.
+{
+  const T = await import('../src/game/tuning');
+  const aim = poke as unknown as {
+    aimPreviewBounces: () => number;
+    aimPreviewLegs: (tank: unknown) => { bounce: boolean }[];
+  };
+  const keep = { x: poke.p1.x, y: poke.p1.y, turret: poke.p1.turretAngle };
+  poke.p1.x = 640;
+  poke.p1.y = 360;
+  // Aim around the compass and keep the longest line this map allows, so the
+  // check is about the bounce count and not about one unlucky wall.
+  const longest = (): { legs: number; reflections: number } => {
+    let best = { legs: 0, reflections: 0 };
+    for (let i = 0; i < 72; i += 1) {
+      poke.p1.turretAngle = (i / 72) * Math.PI * 2;
+      const legs = aim.aimPreviewLegs(poke.p1);
+      const reflections = legs.filter((leg) => leg.bounce).length;
+      if (reflections > best.reflections || (reflections === best.reflections && legs.length > best.legs)) {
+        best = { legs: legs.length, reflections };
+      }
+    }
+    return best;
+  };
+
+  check('the aiming line previews two bounces by default', aim.aimPreviewBounces() === 2, `${aim.aimPreviewBounces()}`);
+  const shipped = longest();
+  check('two bounces means two reflections', shipped.reflections === 2, JSON.stringify(shipped));
+  check('two bounces means three straight legs', shipped.legs === 3, JSON.stringify(shipped));
+
+  T.setTuning({ aimBounces: 4 });
+  const four = longest();
+  check('the line follows a raised bounce count', aim.aimPreviewBounces() === 4 && four.reflections === 4, JSON.stringify(four));
+  check('four bounces means five legs', four.legs === 5, JSON.stringify(four));
+
+  T.setTuning({ aimBounces: 0 });
+  const straight = longest();
+  check('zero bounces is one straight leg', straight.legs === 1 && straight.reflections === 0, JSON.stringify(straight));
+
+  T.setTuning({ aimBounces: 99 });
+  check('the bounce count is clamped', aim.aimPreviewBounces() === 6, `${aim.aimPreviewBounces()}`);
+
+  T.resetTuning();
+  const back = longest();
+  check('resetting restores the two-bounce line', back.legs === 3 && back.reflections === 2, JSON.stringify(back));
+  check('the line never bounces more than it is told to', back.reflections <= aim.aimPreviewBounces());
+  check('the shell bounce limit is a separate knob', T.tuning().maxBounces === 2, `${T.tuning().maxBounces}`);
+
+  poke.p1.x = keep.x;
+  poke.p1.y = keep.y;
+  poke.p1.turretAngle = keep.turret;
+}
+
 // --- pause / resume.
 poke.setPaused(true);
 await wait(150);
@@ -453,6 +511,35 @@ await wait(900);
 clearInterval(inputTimer);
 const p2Moved = Math.hypot(poke.p2!.x - p2Start.x, poke.p2!.y - p2Start.y);
 check('guest input drives the host-side tank', p2Moved > 10, `moved=${p2Moved.toFixed(1)}px`);
+
+// v1.5: the minimap has to say who is friendly and who is not.
+const marks = () =>
+  (poke as unknown as { minimapMarks: () => { id: string; kind: string }[] }).minimapMarks();
+check('the minimap marks yourself', marks().some((m) => m.kind === 'me'), JSON.stringify(marks()));
+check(
+  'the minimap marks the other seat as an enemy in FFA',
+  marks().some((m) => m.id === 'p2' && m.kind === 'foe'),
+  JSON.stringify(marks())
+);
+check('nobody is marked as a team-mate without teams', !marks().some((m) => m.kind === 'mate'), JSON.stringify(marks()));
+// Team mode: put the guest on our side and the mark has to switch.
+const teamScene = poke as unknown as { setTeamOf: (id: string, team: number) => void };
+settings.match.mode = 'team';
+teamScene.setTeamOf('p2', 0);
+await wait(400);
+check(
+  'a team-mate is marked as friendly',
+  marks().some((m) => m.id === 'p2' && m.kind === 'mate'),
+  JSON.stringify(marks())
+);
+teamScene.setTeamOf('p2', 1);
+await wait(350);
+check(
+  'another team is marked as an enemy again',
+  marks().some((m) => m.id === 'p2' && m.kind === 'foe'),
+  JSON.stringify(marks())
+);
+settings.match.mode = 'ffa';
 
 const guestTank = lastSnap()?.tanks?.find((t: { id: string }) => t.id === 'p2');
 check(
@@ -692,6 +779,142 @@ check(
     poke.keys.get('p1.fire')?.keyCode === bindings.solo.fire,
   `${poke.keys.get('p1.up')?.keyCode} vs ${bindings.solo.up}`
 );
+
+// ------------------------------------------- v1.5: LAN fixes end to end
+// A custom map has to reach the room, a death must not freeze the match, and
+// every decided match has to show a 赢/输 card. This block runs its own room.
+{
+  const { OVERLAY_EVENT, MATCH_LEFT_EVENT } = await import('../src/game/events');
+  const overlays: any[] = [];
+  game.events.on(OVERLAY_EVENT, (state: any) => overlays.push(state));
+  let leftEvents = 0;
+  game.events.on(MATCH_LEFT_EVENT, () => {
+    leftEvents += 1;
+  });
+
+  const { createLanServer } = await import('../server/lan-server.mjs');
+  const lanServer2 = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const { emptyMap, mapHash } = await import('../src/maps/format');
+  const { saveMap } = await import('../src/maps/store');
+  const { refreshLevels } = await import('../src/maps/registry');
+  const roomMap = saveMap({ ...emptyMap({ name: '联机冒烟图' }), id: 'custom-smoke', rev: 1 } as any)!;
+  refreshLevels();
+
+  settings.mode = 'lan';
+  settings.lanRole = 'host';
+  settings.lanAddress = `127.0.0.1:${lanServer2.port}`;
+  settings.match = {
+    ...settings.match,
+    mode: 'ffa',
+    winCondition: 'kills',
+    killTarget: 2,
+    timeLimit: 120,
+    capacity: 4,
+  };
+  settings.mapId = roomMap.id;
+  poke.restartGame();
+  await wait(1600);
+  const room = poke as any;
+  check(
+    'the room opens on the map picked in the menu',
+    room.phase === 'lobby' && room.roomLevelId === roomMap.id,
+    `${room.phase} / ${room.roomLevelId}`
+  );
+
+  // Leaving the room in the lobby must not look like a surrender.
+  overlays.length = 0;
+  (room as unknown as { handleSurrender: (by: string) => void }).handleSurrender('p2');
+  await wait(150);
+  check('a lobby exit is not treated as a surrender', !overlays.some((o) => o.kind === 'matchOver'), JSON.stringify(overlays.map((o) => o.kind)));
+
+  const peer = new NodeWebSocket(`ws://127.0.0.1:${lanServer2.port}/ws`);
+  const peerMsgs: any[] = [];
+  peer.on('message', (raw: unknown) => {
+    try {
+      peerMsgs.push(JSON.parse(String(raw)));
+    } catch {
+      /* ignore */
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    peer.once('open', () => resolve());
+    peer.once('error', reject);
+  });
+  peer.send(JSON.stringify({ t: 'join', role: 'guest' }));
+  await wait(700);
+
+  const pushed = [...peerMsgs].reverse().find((m) => m.t === 'map');
+  check('the room map reaches a joining guest', !!pushed?.map && pushed.map.id === roomMap.id, JSON.stringify(pushed?.map?.id));
+  // The server used to read the wrong field here, so the hash arrived empty and
+  // every ack failed: the room could never start on a custom map.
+  check('the map hash survives the trip', pushed?.hash === mapHash(roomMap), `${pushed?.hash}`);
+
+  peer.send(JSON.stringify({ t: 'map-ack', id: roomMap.id, rev: roomMap.rev, hash: pushed?.hash, ok: true }));
+  await wait(250);
+  poke.startRoomMatch();
+  // The room plays a short 准备 countdown before the tanks roll.
+  await wait(1700);
+  check('a confirmed custom map lets the match start', room.phase === 'playing', room.phase);
+
+  // A death is a short timeout now: the phase never freezes and the clock runs.
+  const dead = room.p2 as TankRef;
+  room.matchElapsed = 0;
+  dead.setHp(5);
+  room.damage(dead, 'p1', 0);
+  check('a LAN death keeps the match running', room.phase === 'playing', room.phase);
+  check('the victim is parked for a respawn', !dead.alive && dead.awaitingRespawn, `${dead.alive} / ${dead.awaitingRespawn}`);
+  const clockAtDeath = room.matchElapsed as number;
+  await wait(700);
+  check('the match clock keeps ticking after a death', (room.matchElapsed as number) > clockAtDeath, `${clockAtDeath} -> ${room.matchElapsed}`);
+  await wait(2400);
+  check('the dead tank respawns by itself', dead.alive && !dead.awaitingRespawn, `${dead.alive} / ${dead.awaitingRespawn}`);
+  check('the match is still open after that death', room.phase === 'playing', room.phase);
+
+  // The kill target closes the match, and this seat is told it won.
+  overlays.length = 0;
+  (room.p1 as TankRef).kills = 2;
+  await wait(500);
+  const resultCard = [...overlays].reverse().find((o) => o.kind === 'matchOver');
+  check('reaching the kill target ends the LAN match', !!resultCard, JSON.stringify(overlays.map((o) => o.kind)));
+  check('the result card says whether you won', resultCard?.verdict === 'win', `${resultCard?.verdict}`);
+  check('the result card carries the scoreboard', (resultCard?.scoreboard?.length ?? 0) >= 2, `${resultCard?.scoreboard?.length}`);
+  check('the result card names the ruleset', resultCard?.mode === 'ffa', `${resultCard?.mode}`);
+
+  // A rematch has to be decidable again (the latch used to swallow it).
+  overlays.length = 0;
+  const lanBefore = room.lan;
+  poke.restartGame();
+  await wait(900);
+  check('a rematch keeps the room socket', lanBefore === room.lan, 'socket was redialled');
+  check(
+    'a rematch clears the finished state',
+    room.matchOver === false && room.matchElapsed < 3,
+    `${room.matchOver} / ${Number(room.matchElapsed).toFixed(2)}`
+  );
+  (room.p1 as TankRef).kills = 2;
+  await wait(500);
+  check(
+    'the second match can be decided too',
+    [...overlays].reverse().some((o) => o.kind === 'matchOver'),
+    JSON.stringify(overlays.map((o) => o.kind))
+  );
+
+  peer.close();
+  lanServer2.close();
+  await wait(300);
+
+  // Quit: the scene hands the exit to main.ts and never restarts itself.
+  (poke as unknown as { quitMatch: () => void }).quitMatch();
+  await wait(250);
+  check('quitting asks main.ts to swap scenes', leftEvents === 1, `${leftEvents}`);
+  check('the scene parks itself instead of restarting', room.phase === 'leaving' && room.leaving === true, `${room.phase}`);
+  check('quitting drops the room socket', !room.lan, String(room.lan));
+
+  settings.mode = 'solo';
+  settings.lanAddress = '';
+  settings.mapId = 'random';
+  settings.match = { ...settings.match, winCondition: 'both', killTarget: 15, timeLimit: 480, capacity: 6 };
+}
 
 console.log('');
 const failed = checks.filter((c) => !c.ok);

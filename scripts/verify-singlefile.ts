@@ -28,7 +28,8 @@ virtualConsole.on('warn', (msg) => console.log('[console.warn]', String(msg).sli
 const dom = new JSDOM(html, {
   runScripts: 'dangerously',
   pretendToBeVisual: true,
-  url: 'file:///game.html',
+  // http (not file:) so localStorage exists — the map library needs it.
+  url: 'http://localhost/game.html',
   virtualConsole,
   beforeParse(window) {
     type NativeCanvas = { width: number; height: number; getContext: (id: string) => unknown };
@@ -44,6 +45,23 @@ const dom = new JSDOM(html, {
       }
       return el;
     }) as typeof origCreate;
+
+    // Canvases created by `innerHTML` (the map editor) never pass through
+    // createElement, so give the prototype a real 2D context too.
+    Object.defineProperty(window.HTMLCanvasElement.prototype, 'getContext', {
+      configurable: true,
+      value(this: HTMLCanvasElement, id: string) {
+        if (id !== '2d') return null;
+        const self = this as unknown as { __native?: NativeCanvas };
+        if (!self.__native) {
+          self.__native = createCanvas(
+            Number(this.getAttribute('width')) || 300,
+            Number(this.getAttribute('height')) || 150
+          ) as NativeCanvas;
+        }
+        return self.__native.getContext('2d');
+      },
+    });
 
     for (const dim of ['width', 'height'] as const) {
       Object.defineProperty(window.HTMLCanvasElement.prototype, dim, {
@@ -146,6 +164,44 @@ if (firstKey) {
   rebindLabel = (firstKey.textContent ?? '').trim();
 }
 
+// --- map library + editor (v1.5.0): the whole create → paint → save loop.
+const mapNewButton = doc.getElementById('map-new') as HTMLElement | null;
+mapNewButton?.click();
+await new Promise((r) => setTimeout(r, 200));
+const editor = doc.querySelector('.editor');
+const editorCanvas = doc.getElementById('map-canvas') as HTMLCanvasElement | null;
+const toolCount = doc.querySelectorAll('.tool-chip').length;
+const hasSidePanel = !!doc.querySelector('.editor-side') && !!doc.getElementById('map-issues');
+const actionCount = doc.querySelectorAll('.editor-actions button').length;
+const mirrorCount = doc.querySelectorAll('[data-mirror]').length;
+const sizeOptions = doc.querySelectorAll('#map-size option').length;
+let painted = false;
+if (editorCanvas) {
+  // jsdom reports a zero-size box; give the canvas a pretend layout so the
+  // pointer maths resolves to a real grid cell.
+  editorCanvas.getBoundingClientRect = () =>
+    ({ x: 0, y: 0, top: 0, left: 0, right: 720, bottom: 432, width: 720, height: 432, toJSON: () => ({}) }) as DOMRect;
+  (doc.querySelector('[data-tool="wall"]') as HTMLElement | null)?.click();
+  const send = (type: string, clientX: number, clientY: number): void => {
+    editorCanvas.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY }));
+  };
+  send('pointerdown', 200, 200);
+  send('pointermove', 240, 200);
+  send('pointerup', 240, 200);
+  painted = true;
+}
+// Save it, then go back: the library must list the new map and the picker too.
+(doc.getElementById('editor-save') as HTMLElement | null)?.click();
+await new Promise((r) => setTimeout(r, 150));
+const saveStatus = (doc.getElementById('editor-status')?.textContent ?? '').trim();
+(doc.getElementById('editor-close') as HTMLElement | null)?.click();
+await new Promise((r) => setTimeout(r, 200));
+const libraryRows = doc.querySelectorAll('.custom-map').length;
+const customCards = Array.from(doc.querySelectorAll('[data-map]')).filter((el) =>
+  (el.getAttribute('data-map') ?? '').startsWith('custom-')
+).length;
+const backToMenu = !!doc.getElementById('btn-start');
+
 // --- version + updater panel (v1.2.0)
 const updater = doc.querySelector('.updater');
 const updaterSummary = (updater?.querySelector('summary')?.textContent ?? '').replace(/\s+/g, ' ').trim();
@@ -195,6 +251,7 @@ const checks: [string, boolean, string?][] = [
   ['the internal tuning panel is present', !!doc.querySelector('#tuning-panel')],
   ['the tuning panel is locked until the passphrase is entered', !!doc.querySelector('#tune-pass')],
   ['the tuning panel exposes fire rate', !!doc.querySelector('[data-tune="fireCooldown"]')],
+  ['the tuning panel exposes the aiming-line bounce knob', !!doc.querySelector('[data-tune="aimBounces"]')],
   ['the tuning panel exposes heat and damage knobs',
     !!doc.querySelector('[data-tune="heatPerShot"]') && !!doc.querySelector('[data-tune="dmgBack"]')],
   ['the tuning panel can reset and export', !!doc.querySelector('#tune-reset') && !!doc.querySelector('#tune-export')],
@@ -204,6 +261,31 @@ const checks: [string, boolean, string?][] = [
   ['the room lobby ships with the build', html.includes('lobby-seat') && html.includes('开始对局')],
   ['the lobby can add and remove teams', html.includes('补齐空队') && html.includes('+ 加队')],
   ['other players\' skill picks stay hidden', html.includes('已选择（保密）')],
+  // v1.5 map system: editor, library and the LAN map handshake all ship.
+  ['the map library is in the menu', html.includes('自定义地图') && html.includes('新建地图')],
+  ['the editor markup is in the bundle', html.includes('保存并试玩') && html.includes('map-canvas')],
+  ['the editor is styled (toolbar + side panel)', /\.editor-toolbar\s*\{/.test(html) && /\.editor-body\s*\{/.test(html)],
+  ['the map format marker is compiled in', html.includes('tankmap')],
+  ['the editor exports the map file type', html.includes('tankmap.json')],
+  ['the room shows the map and its sync state', html.includes('lobby-map') && html.includes('地图确认')],
+  ['the host can re-send the map when an ack is lost', html.includes('重发地图')],
+  ['the editor card is not tilted (pointer must line up)', /#card\.wide\s*\{[^}]*transform:\s*none/.test(html)],
+  // v1.5: the minimap labels friend and foe.
+  ['the minimap has a friend/foe legend', html.includes('mm.legend')],
+  ['map acknowledgements are part of the protocol', html.includes('map-ack') && html.includes('map-pending')],
+  // v1.5: the editor actually opens, paints and saves from the menu.
+  ['the menu offers a new-map button', !!mapNewButton],
+  ['the editor opens from the menu', !!editor && !!editorCanvas],
+  ['the editor toolbar has every tool', toolCount === 5, `${toolCount}`],
+  ['the editor offers four mirror modes', mirrorCount === 4, `${mirrorCount}`],
+  ['the editor offers four sizes', sizeOptions === 4, `${sizeOptions}`],
+  ['the side panel is there (stats + checks)', hasSidePanel],
+  ['the action row has save/play/copy/export/delete/import', actionCount === 6, `${actionCount}`],
+  ['the editor can be painted', painted],
+  ['saving a map reports success', saveStatus.includes('已保存'), saveStatus],
+  ['the new map is listed in the library', libraryRows === 1, `${libraryRows}`],
+  ['the new map joins the map picker', customCards === 1, `${customCards}`],
+  ['closing the editor returns to the menu', backToMenu],
 ];
 
 let failed = 0;

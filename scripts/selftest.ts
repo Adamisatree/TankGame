@@ -385,6 +385,15 @@ check('reset restores the defaults', getBindings().solo.fire === defaults.solo.f
   check('friendly fire off by default', !R.canDamage(me, mate, { friendlyFire: false, selfDamage: true }));
   check('friendly fire on when enabled', R.canDamage(me, mate, { friendlyFire: true, selfDamage: false }));
   check('enemies always take damage', R.canDamage(me, foe, { friendlyFire: false, selfDamage: false }));
+  // A free-for-all has no teams: team 0 is not a "mate" there.
+  check(
+    'a free-for-all hurts everyone',
+    R.canDamage(me, mate, { friendlyFire: false, selfDamage: true, mode: 'ffa' })
+  );
+  check(
+    'team mode still blocks team-mates',
+    !R.canDamage(me, mate, { friendlyFire: false, selfDamage: true, mode: 'team' })
+  );
   check('the dead do not take damage', !R.canDamage(me, { ...mate, alive: false }, { friendlyFire: true, selfDamage: true }));
 
   // Match outcomes.

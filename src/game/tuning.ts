@@ -22,6 +22,12 @@ export interface Tuning {
   bulletSpeed: number;
   /** How many times a shell may bounce before it dies. */
   maxBounces: number;
+  /**
+   * How many bounces the dashed aiming line previews. Only cosmetic — it never
+   * changes what a shell does — but it is the whole point of the line, so it is
+   * tunable per build/room like everything else.
+   */
+  aimBounces: number;
 
   /** Heat added per shot (cap is always 100). */
   heatPerShot: number;
@@ -64,6 +70,7 @@ export const TUNING_DEFAULTS: Tuning = {
   fireCooldown: 0.75,
   bulletSpeed: 830,
   maxBounces: 2,
+  aimBounces: 2,
 
   heatPerShot: 17,
   heatDecay: 12,
@@ -105,6 +112,16 @@ export const TUNING_SPEC: TuningSpec[] = [
   { key: 'fireCooldown', label: '射速间隔', group: '开火', min: 0.2, max: 2, step: 0.05, unit: 's', hint: '越小越快' },
   { key: 'bulletSpeed', label: '炮弹速度', group: '开火', min: 300, max: 1500, step: 10, unit: 'px/s' },
   { key: 'maxBounces', label: '反弹次数', group: '开火', min: 0, max: 4, step: 1, unit: '次' },
+  {
+    key: 'aimBounces',
+    label: '瞄准线反弹',
+    group: '开火',
+    min: 0,
+    max: 6,
+    step: 1,
+    unit: '次',
+    hint: '只改那条虚线',
+  },
 
   { key: 'heatPerShot', label: '每发加热', group: '热量', min: 4, max: 50, step: 1, unit: '' },
   { key: 'heatDecay', label: '平时散热', group: '热量', min: 1, max: 40, step: 1, unit: '/s' },
