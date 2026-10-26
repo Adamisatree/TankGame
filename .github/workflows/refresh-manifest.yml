@@ -1,0 +1,54 @@
+name: Refresh updates.json
+
+# Rebuilds `updates.json` from the published releases without rebuilding any
+# installer: useful when a release body is edited, when an asset was re-uploaded,
+# or when the manifest needs to be re-attached to a release by hand.
+#
+# Normally the tag build does this itself (`manifest` job in build-desktop.yml).
+# Run it from the Actions tab and give it the tag to attach the manifest to.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach updates.json to (e.g. v1.5.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  manifest:
+    name: Regenerate and attach updates.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate updates.json from the published releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/gen-update-manifest.mjs
+
+      - name: Commit it back to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- updates.json; then
+            echo "manifest unchanged"
+          else
+            git add updates.json
+            git commit -m "chore: refresh updates.json (${GITHUB_REF_NAME})"
+            git push origin HEAD:main
+          fi
+
+      - name: Attach the manifest to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.tag }}" updates.json --clobber
