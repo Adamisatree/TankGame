@@ -446,11 +446,11 @@ export class GameScene extends Phaser.Scene {
         // nameless "对手离开了" here would just overwrite that message.
         if (state === 'joined') this.showBanner('对手已加入！', 1.4);
         else if (this.phase === 'lobby') this.showBanner('有玩家离开了房间', 1.4);
-        // A dropped seat is not acted on instantly: the server keeps it for two
-        // minutes, so a one-second Wi-Fi hiccup (or an alt-tab on a laptop) must
-        // not cost somebody their match. Every seat watches every other seat —
-        // the host because it referees, a guest because the *host* may be the
-        // one that vanished (its match is void then; see `seatLeft`).
+        // A dropped seat is not acted on instantly: `updateLeftSeats()` waits a
+        // few seconds, so a blink of Wi-Fi (or an alt-tab) must not cost
+        // somebody their match. Every seat watches every other seat — the host
+        // because it referees, a guest because the *host* may be the one that
+        // vanished (that match is void; see `seatLeft`).
         if (state === 'left' && (this.phase === 'playing' || this.phase === 'ready') && id) {
           // A dropped socket is not instantly a departure: the server keeps the
           // seat for two minutes, so a one-second hiccup or an alt-tab must not
@@ -2863,7 +2863,10 @@ export class GameScene extends Phaser.Scene {
     // The angle travels with the event: a guest cannot guess a muzzle direction
     // from a bare (x, y), and drawing every shot pointing right looked broken.
     this.netEvent('fire', m.x, m.y, { id: tank.id, angle: Math.round(dir * 1000) / 1000 });
-    this.cameras.main.shake(60, 0.002);
+    // v1.5.3: only a shot fired from this machine kicks this screen. The host
+    // simulates every seat's trigger, so a ten-player room used to shake the
+    // host's camera ten times a second — the same strobe as a full-screen hit.
+    if (this.versus || tank === this.localTank()) this.cameras.main.shake(60, 0.002);
     if (tank.id === 'enemy') sound.enemyFire();
     else sound.fire();
 
