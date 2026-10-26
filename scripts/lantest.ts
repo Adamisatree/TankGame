@@ -327,12 +327,16 @@ console.log('\nbackpressure');
 {
   // `slowBacklog` is raised so the hard cut cannot interrupt the skip phase; both
   // levels are the same code path, only the number differs.
+  // v1.6 (review finding 3): the stalled client stops reading, so it also stops
+  // answering pings. A long heartbeat keeps the keep-alive cull out of the way on
+  // a slow machine; the backpressure logic is what is under test here.
   const slow = await createLanServer({
     port: 0,
     host: '127.0.0.1',
     quiet: true,
     coalesceBacklog: 64 * 1024,
     slowBacklog: 6 * 1024 * 1024,
+    heartbeatMs: 10 * 60_000,
   });
   const url = `ws://127.0.0.1:${slow.port}/ws`;
   const host = await open(url);
@@ -385,7 +389,11 @@ console.log('\nbackpressure');
 
   const before = Date.now();
   await slow.close();
-  check('closing the server is bounded', Date.now() - before < 3000, `${Date.now() - before}ms`);
+  const closingMs = Date.now() - before;
+  check('closing the server is bounded', closingMs < 3000, `${closingMs}ms`);
+  // v1.6 (review finding 5): the normal path must finish through a real
+  // completion signal, not by burning the 2 s guard.
+  check('closing the server is quick on the normal path', closingMs < 1000, `${closingMs}ms`);
   host.close();
   healthy.close();
   lagging.close();
@@ -395,7 +403,13 @@ console.log('\nbackpressure');
 // and the client's own reconnect (v1.5.4) then rebuilds it from a keyframe.
 console.log('\nbackpressure · hard limit');
 {
-  const cut = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true, slowBacklog: 1024 * 1024 });
+  const cut = await createLanServer({
+    port: 0,
+    host: '127.0.0.1',
+    quiet: true,
+    slowBacklog: 1024 * 1024,
+    heartbeatMs: 10 * 60_000,
+  });
   const url = `ws://127.0.0.1:${cut.port}/ws`;
   const host = await open(url);
   host.send({ t: 'join', role: 'host' });

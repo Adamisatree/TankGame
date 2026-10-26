@@ -1,7 +1,7 @@
 {
   "name": "tank-duel",
   "private": true,
-  "version": "1.5.4",
+  "version": "1.6.0",
   "type": "module",
   "description": "手绘风反弹坦克对战游戏：单人、本地双人、局域网联机",
   "scripts": {

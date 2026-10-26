@@ -22,6 +22,12 @@ export function createLanServer(options?: {
    */
   coalesceBacklog?: number;
   slowBacklog?: number;
+  /**
+   * v1.6: how often (ms) sockets that stopped answering pings are culled.
+   * Default 15 s. The backpressure tests raise it, because they stall a client
+   * on purpose (which also stops its pong replies).
+   */
+  heartbeatMs?: number;
 }): Promise<LanServerHandle>;
 
 export function lanAddresses(): string[];
