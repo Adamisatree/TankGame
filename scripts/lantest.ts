@@ -447,6 +447,112 @@ console.log('\nbackpressure · hard limit');
   watcher.close();
 }
 
+// --- v1.6.1: seat numbering and room state across sessions -------------------
+// A seat id used to come from a counter that only ever climbed, and an emptied
+// room kept the previous session's team count. Both surfaced in the *second*
+// match of a server process: the first guest walked in as p4 (so the host's
+// first remote tank was a seat the input router did not expect), and a leftover
+// 4-team setting made `begin` refuse a three-player room for its empty fourth
+// team — "team mode will not start", with the button greyed out to match.
+console.log('\nroom state across sessions');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+
+  const round1Host = await open(url);
+  round1Host.send({ t: 'join', role: 'host' });
+  await waitFor(() => round1Host.messages.some((m) => m.t === 'joined'));
+  const a = await open(url);
+  a.send({ t: 'join', role: 'guest', session: 'round1-a' });
+  const b = await open(url);
+  b.send({ t: 'join', role: 'guest', session: 'round1-b' });
+  await waitFor(() => a.messages.some((m) => m.t === 'joined') && b.messages.some((m) => m.t === 'joined'));
+  check(
+    'the first session hands out p2 and p3',
+    a.messages.find((m) => m.t === 'joined')?.id === 'p2' && b.messages.find((m) => m.t === 'joined')?.id === 'p3',
+    `${a.messages.find((m) => m.t === 'joined')?.id},${b.messages.find((m) => m.t === 'joined')?.id}`
+  );
+
+  // The host picks four teams, then everybody leaves.
+  round1Host.send({ t: 'teams', count: 4 });
+  await sleep(150);
+  check('the host can raise the team count', round1Host.messages.filter((m) => m.t === 'roster').pop()?.teams === 4);
+  a.close();
+  b.close();
+  round1Host.close();
+  await waitFor(() => true, 50);
+  await sleep(400);
+
+  // A brand-new session in the same process.
+  const round2Host = await open(url);
+  round2Host.send({ t: 'join', role: 'host' });
+  await waitFor(() => round2Host.messages.some((m) => m.t === 'joined'));
+  const c = await open(url);
+  c.send({ t: 'join', role: 'guest', session: 'round2-c' });
+  const d = await open(url);
+  d.send({ t: 'join', role: 'guest', session: 'round2-d' });
+  await waitFor(() => c.messages.some((m) => m.t === 'joined') && d.messages.some((m) => m.t === 'joined'));
+
+  check(
+    'a new session starts its seats at p2 again',
+    c.messages.find((m) => m.t === 'joined')?.id === 'p2' && d.messages.find((m) => m.t === 'joined')?.id === 'p3',
+    `${c.messages.find((m) => m.t === 'joined')?.id},${d.messages.find((m) => m.t === 'joined')?.id}`
+  );
+  const round2Roster = round2Host.messages.filter((m) => m.t === 'roster').pop();
+  check('an emptied room forgets the last team count', round2Roster?.teams === 2, `teams=${round2Roster?.teams}`);
+  check('an emptied room forgets the last capacity', round2Roster?.capacity === 6, `capacity=${round2Roster?.capacity}`);
+
+  // ...and team mode actually starts on the fresh room state.
+  round2Host.send({ t: 'config', mode: 'team', capacity: 6 });
+  await sleep(200);
+  round2Host.send({ t: 'begin' });
+  const started = await waitFor(() => round2Host.messages.some((m) => m.t === 'begin'), 1500);
+  const refused = round2Host.messages.some((m) => m.t === 'lobby-error');
+  check('a three-player team room starts in the second session', started && !refused, refused ? 'refused' : 'not started');
+
+  c.close();
+  d.close();
+  round2Host.close();
+  await sleep(200);
+  await fresh.close();
+}
+
+// A dropped seat's number is still reserved for its owner, so a newcomer can
+// never be handed an id that is about to resume into it.
+console.log('\nseat reservation');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host' });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+
+  const leaver = await open(url);
+  leaver.send({ t: 'join', role: 'guest', session: 'keep-me' });
+  await waitFor(() => leaver.messages.some((m) => m.t === 'joined'));
+  check('the leaver takes p2', leaver.messages.find((m) => m.t === 'joined')?.id === 'p2');
+
+  leaver.close();
+  await sleep(300);
+
+  const newcomer = await open(url);
+  newcomer.send({ t: 'join', role: 'guest', session: 'someone-else' });
+  await waitFor(() => newcomer.messages.some((m) => m.t === 'joined'));
+  const taken = newcomer.messages.find((m) => m.t === 'joined')?.id;
+  check('a newcomer cannot take a reserved seat', taken !== 'p2', `got ${taken}`);
+
+  const back = await open(url);
+  back.send({ t: 'join', role: 'guest', session: 'keep-me' });
+  await waitFor(() => back.messages.some((m) => m.t === 'joined'));
+  check('the dropped guest still resumes into p2', back.messages.find((m) => m.t === 'joined')?.id === 'p2');
+
+  back.close();
+  newcomer.close();
+  host.close();
+  await sleep(200);
+  await fresh.close();
+}
+
 const failed = checks.filter((c) => !c.ok);
 console.log('');
 console.log(`${checks.length - failed.length}/${checks.length} LAN checks passed`);

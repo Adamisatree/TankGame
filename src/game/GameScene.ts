@@ -200,7 +200,6 @@ export class GameScene extends Phaser.Scene {
   private lanRole: 'host' | 'guest' | null = null;
   /** Set on shutdown so late socket callbacks never touch a dead scene. */
   private lanClosed = false;
-  private remoteInput: TankInput = { turn: 0, drive: 0, aim: 0, fire: false };
   private netEvents: NetEvent[] = [];
   private netTimer = 0;
   private netSeq = 0;
@@ -480,11 +479,16 @@ export class GameScene extends Phaser.Scene {
       },
       onInput: (input, from) => {
         // The host answers with snapshots, so it stores one input line per seat.
-        if (from === 'p2' || !this.byId(from)) {
-          this.remoteInput = input;
-          if (from !== 'p2') this.remoteInputs.set(from, input);
-          return;
-        }
+        //
+        // v1.6.1: keyed by the seat id and nothing else. There used to be a
+        // special case that put p2's input in a single `remoteInput` field,
+        // which the `p2` *slot* (whoever happens to be the first remote tank)
+        // read. The slot outlives its occupant — `removeRemoteTank()` promotes
+        // the next extra into it, and a rejoining guest lands next to it — so
+        // the moment a seat changed the two disagreed: the promoted tank drove
+        // itself with the previous occupant's last input (ghost), real players
+        // lost their controls ("only two people can move"), and a reconnecting
+        // p2 steered somebody else's tank (顶号).
         this.remoteInputs.set(from, input);
       },
       onSeat: (id) => {
@@ -1175,6 +1179,24 @@ export class GameScene extends Phaser.Scene {
    * Creates the tank for a remote seat. p2 is kept as "the first remote" for
    * all the versus/1v1 code paths; every further seat goes into `extras`.
    */
+  /**
+   * v1.6.1: host side — drive a remote seat with **its own** input line.
+   *
+   * Every remote tank is looked up by `tank.id`, so where the tank happens to
+   * live (the `p2` slot or `extras`) has no effect on who controls it. A seat
+   * that has not spoken yet coasts on `IDLE_INPUT`, so a laggy player can never
+   * stall the match.
+   */
+  private applyRemoteInput(tank: Tank, dt: number): void {
+    const input = this.remoteInputs.get(tank.id) ?? IDLE_INPUT;
+    this.applyInput(tank, input, dt, { aimRate: 22 });
+    // A skill press is a one-shot latch: consume it so it fires exactly once.
+    if (input.skill) {
+      input.skill = false;
+      this.useSkill(tank);
+    }
+  }
+
   private addRemoteTank(id: string, team = 0): Tank {
     const spawn = this.pickSpawnFor(team);
     const spot = this.placeSpawn(spawn.x, spawn.y, TANK.radius);
@@ -1186,6 +1208,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private removeRemoteTank(id: string): void {
+    // v1.6.1: an id can be reused by a later guest, so its stale input line must
+    // not survive the seat — otherwise the newcomer would be driven by the last
+    // thing the previous owner pressed.
+    this.remoteInputs.delete(id);
     if (this.p2 && this.p2.id === id) {
       this.p2.destroy();
       this.p2 = undefined;
@@ -2019,11 +2045,8 @@ export class GameScene extends Phaser.Scene {
       this.applyInput(this.p1, this.readLocalInput(1, this.p1, dt, mouseAim), dt, { slow });
       if (this.p2) {
         if (this.lanMode) {
-          this.applyInput(this.p2, this.remoteInput, dt, { aimRate: 22 });
-          if (this.remoteInput.skill) {
-            this.remoteInput.skill = false;
-            this.useSkill(this.p2);
-          }
+          // v1.6.1: by the tank's own id, never by which slot it sits in.
+          this.applyRemoteInput(this.p2, dt);
         } else {
           this.applyInput(this.p2, this.readLocalInput(2, this.p2, dt, false), dt);
         }
@@ -2031,14 +2054,7 @@ export class GameScene extends Phaser.Scene {
       if (this.lanMode && this.lanRole === 'host') {
         // Seats p3…p10 each keep their own input line; a seat that has not
         // spoken yet just coasts, so a laggy player cannot stall the match.
-        for (const tank of this.extras) {
-          const input = this.remoteInputs.get(tank.id) ?? IDLE_INPUT;
-          this.applyInput(tank, input, dt, { aimRate: 22 });
-          if (input.skill) {
-            input.skill = false;
-            this.useSkill(tank);
-          }
-        }
+        for (const tank of this.extras) this.applyRemoteInput(tank, dt);
       }
       if (this.enemy) this.updateAi(dt);
       this.updatePickups(dt);

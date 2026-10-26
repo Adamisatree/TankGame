@@ -195,6 +195,8 @@ const check = (name: string, ok: boolean, detail?: string): void => {
 };
 
 type TankRef = {
+  /** v1.6.1: seat id, needed to check input routing. */
+  id: string;
   x: number;
   y: number;
   alive: boolean;
@@ -264,7 +266,15 @@ check('the solo CPU shows up as an enemy on the minimap', soloMarks().some((m) =
 check('the minimap never marks a solo run as a team', !soloMarks().some((m) => m.kind === 'mate'), JSON.stringify(soloMarks()));
 check('everyone starts on 100 HP', poke.p1.hp === 100 && poke.p1.maxHp === 100, `hp=${poke.p1.hp}`);
 check('the AI is on the same health pool', poke.enemy?.hp === 100, `hp=${poke.enemy?.hp}`);
-check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.now);
+// v1.6.1: Phaser's scene clock can jump in large steps when the machine is busy
+// (another match, a CI build), so an exact `> now` comparison said "no grace"
+// moments after the grace had legitimately elapsed. The claim under test is that
+// a grace period *was* granted — not that not a single millisecond has passed.
+check(
+  'a grace period before the AI may fire',
+  poke.aiGraceUntil - scene.time.now > -600,
+  `grace ends at ${Math.round(poke.aiGraceUntil)}, now ${Math.round(scene.time.now)}`
+);
 
 // Wait for the ready banner, then let a real skirmish run.
 // v1.5.4: 1.6 s was tight on a loaded CI box — the room start and the first
@@ -846,6 +856,132 @@ settings.lanAddress = '';
 poke.restartGame();
 await wait(1200);
 check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown }).lan, 'socket still open');
+
+// --- v1.6.1: who controls which tank --------------------------------------
+//
+// Every remote seat must be driven by *its own* input line. The host keeps one
+// remote tank in a `p2` slot and the rest in `extras`, but those are storage
+// slots, not identities: `removeRemoteTank()` promotes the next extra into the
+// slot, and a reconnecting guest is re-created wherever there is room. Reading
+// the slot's input by "is this the p2 slot?" instead of by the tank's own id
+// produced every symptom players reported: a promoted tank driving itself with
+// a departed player's last keypress (ghost), real players losing their controls
+// ("only two people can move"), and a reconnecting p2 steering somebody else's
+// tank (顶号).
+{
+  const { createLanServer } = await import('../server/lan-server.mjs');
+  const roomServer = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const roomUrl = `ws://127.0.0.1:${roomServer.port}/ws`;
+  settings.mode = 'lan';
+  settings.lanRole = 'host';
+  settings.lanAddress = `127.0.0.1:${roomServer.port}`;
+  poke.restartGame();
+  await wait(1600);
+
+  type Seat = { id: string; ws: InstanceType<typeof NodeWebSocket> };
+  const joinSeat = async (session: string): Promise<Seat> => {
+    const ws = new NodeWebSocket(roomUrl);
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    const id = await new Promise<string>((resolve) => {
+      ws.on('message', (raw: unknown) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.t === 'joined') resolve(String(msg.id));
+      });
+      ws.send(JSON.stringify({ t: 'join', role: 'guest', session }));
+    });
+    return { id, ws };
+  };
+
+  const seats: Seat[] = [];
+  for (let i = 0; i < 3; i += 1) seats.push(await joinSeat(`route-${i}`));
+  poke.startRoomMatch();
+  await wait(1200);
+
+  // The host scene applies what the relay delivers, so feeding its input handler
+  // is exactly what a real guest's keypress does — minus the network jitter.
+  const feedInput = (from: string, input: Record<string, unknown>): void => {
+    const lan = (scene as unknown as { lan: { handlers?: { onInput?: (i: unknown, from: string) => void } } }).lan;
+    lan?.handlers?.onInput?.({ turn: 0, drive: 0, aim: 0, fire: false, ...input }, from);
+  };
+  const tankOf = (id: string): TankRef | undefined =>
+    (scene as unknown as { byId: (id: string) => TankRef | undefined }).byId(id);
+  const slotId = (): string | null => (poke.p2 ? poke.p2.id : null);
+  const extrasIds = (): string[] =>
+    (scene as unknown as { extras: TankRef[] }).extras.map((tank) => tank.id);
+
+  /** Hold a turn for a while and report how far that tank's hull rotated. */
+  const turnFor = async (id: string, turn: number, frames = 25): Promise<number> => {
+    const tank = tankOf(id);
+    if (!tank) return Number.NaN;
+    const before = tank.bodyAngle;
+    for (let i = 0; i < frames; i += 1) {
+      feedInput(id, { turn });
+      await wait(16);
+    }
+    feedInput(id, { turn: 0 });
+    await wait(70);
+    return tank.bodyAngle - before;
+  };
+
+  check(
+    'three guests get their own seats',
+    seats.map((s) => s.id).join(',') === 'p2,p3,p4',
+    seats.map((s) => s.id).join(',')
+  );
+  check('the room is playing', poke.phase === 'playing', poke.phase);
+
+  // Steady state: this is the "only two people can move" baseline.
+  const baseDeltas: Record<string, number> = {};
+  for (const seat of seats) baseDeltas[seat.id] = await turnFor(seat.id, 1);
+  check(
+    'every remote seat drives its own tank',
+    seats.every((seat) => baseDeltas[seat.id] > 0.2),
+    JSON.stringify(baseDeltas)
+  );
+
+  // p2 keeps holding "turn right" and then drops: with the old slot-based
+  // routing that stale line drove whoever got promoted (the ghost tank).
+  feedInput('p2', { turn: 1, drive: 1 });
+  await wait(60);
+  seats[0].ws.close();
+  await wait(1200);
+  check('the p2 slot is refilled after a seat leaves', slotId() === 'p3', `${slotId()} extras=${extrasIds().join(',')}`);
+
+  const ghost = tankOf('p3');
+  const ghostBefore = ghost ? ghost.bodyAngle : 0;
+  await wait(600);
+  const ghostDelta = ghost ? ghost.bodyAngle - ghostBefore : 0;
+  check('a promoted tank does not coast on the departed input', Math.abs(ghostDelta) < 0.15, `delta=${ghostDelta.toFixed(2)}`);
+
+  const promotedForward = await turnFor('p3', 1);
+  const promotedBack = await turnFor('p3', -1);
+  check('a promoted seat keeps its own controls', promotedForward > 0.2 && promotedBack < -0.2, `${promotedForward.toFixed(2)} / ${promotedBack.toFixed(2)}`);
+
+  // p2 comes back into the same room: its input must reach its own tank, and
+  // nobody else's.
+  const back = await joinSeat('route-0');
+  await wait(1000);
+  check('a reconnecting guest gets its seat back', back.id === 'p2', back.id);
+  const p3Before = tankOf('p3')?.bodyAngle ?? 0;
+  const backDelta = await turnFor('p2', 1);
+  const p3Moved = (tankOf('p3')?.bodyAngle ?? 0) - p3Before;
+  check('a reconnecting guest drives its own tank', backDelta > 0.2, `delta=${backDelta.toFixed(2)}`);
+  check('a reconnecting guest cannot steer another seat', Math.abs(p3Moved) < 0.2, `p3 moved ${p3Moved.toFixed(2)}`);
+
+  back.ws.close();
+  for (const seat of seats.slice(1)) seat.ws.close();
+  await wait(300);
+  await roomServer.close();
+
+  // Put the scene back the way the rest of this suite expects it.
+  settings.mode = 'solo';
+  settings.lanAddress = '';
+  poke.restartGame();
+  await wait(1200);
+}
 
 // --- v1.5.4 netcode: a dead socket must never throw, and a burst must coalesce.
 {
