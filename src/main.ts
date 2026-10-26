@@ -33,6 +33,7 @@ import {
   TIME_LIMIT_CHOICES,
   ensureMatchEnder,
   matchHasEnder,
+  roomStartBlockers,
 } from './game/rules';
 import { bindUpdaterPanel, initUpdater, updaterPanelHtml } from './update/UpdaterPanel';
 import { bindTuningPanel, tuningPanelHtml } from './ui/tuningPanel';
@@ -947,13 +948,16 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
   const readyCount = state.roster.filter((seat) => seat.ready).length;
   const teamCount = state.teams ?? 2;
 
-  // Team sizes drive the "no empty team" warning right in the lobby.
-  const sizes = new Array(teamCount).fill(0);
-  for (const seat of state.roster) {
-    const team = Math.max(0, Math.min(teamCount - 1, seat.team));
-    sizes[team] += 1;
-  }
-  const emptyTeams = sizes.map((size, index) => (size === 0 ? index : -1)).filter((index) => index >= 0);
+  // Team sizes drive the "no empty team" warning right in the lobby. In FFA
+  // everybody is on team 0 on purpose, so an "empty team" is meaningless there
+  // — counting it anyway disabled 开始对局 and made 乱斗 impossible to start
+  // (v1.5.2 fix; the rule lives in rules.ts so it can be tested).
+  const { emptyTeams, mapPending } = roomStartBlockers({
+    mode: state.mode,
+    roster: state.roster,
+    teams: teamCount,
+    mapNeedsSync: !!state.map?.custom && !state.map.synced,
+  });
 
   const seatCards = state.roster
     .map((seat) => {
@@ -1109,7 +1113,7 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
       ${
         state.isHost
           ? `<button class="primary" id="lobby-start" ${
-              emptyTeams.length || (state.map?.custom && !state.map.synced) ? 'disabled' : ''
+              emptyTeams.length || mapPending ? 'disabled' : ''
             }>开始对局</button>`
           : `<button class="primary" id="lobby-ready">${me?.ready ? '取消准备' : '准备'}</button>`
       }
@@ -1514,27 +1518,35 @@ function render(next: OverlayState): void {
         </div>`;
       })
       .join('');
-    const headline = verdict === 'draw' ? '平局' : verdict === 'win' ? '你赢了' : '你输了';
+    // v1.5.2: the host leaving voids the match (nobody left to referee it),
+    // which is not a win or a loss for anyone still in the room.
+    const aborted = next.reason === 'host-left';
+    const headline = aborted ? '本局作废' : verdict === 'draw' ? '平局' : verdict === 'win' ? '你赢了' : '你输了';
     const winNames = next.winners.map(nameOf).join(' / ');
-    const detail =
-      verdict === 'draw'
-        ? '人头一样多，这一局谁也没赢'
-        : next.reason === 'surrender'
-          ? `${nameOf(next.surrenderBy ?? '')} 中途退出，判为投降`
-          : next.reason === 'time'
-            ? `时间到 · ${winNames} 人头最多`
-            : `达到人头目标 · ${winNames} 领先`;
+    const detail = aborted
+      ? '房主离开了房间，这一局没法继续'
+      : next.reason === 'left'
+        ? teamMode
+          ? `场上只剩 ${winNames} 一队，其余玩家都退出了`
+          : `其余玩家都退出了，${winNames} 留到了最后`
+        : verdict === 'draw'
+          ? '人头一样多，这一局谁也没赢'
+          : next.reason === 'surrender'
+            ? `${nameOf(next.surrenderBy ?? '')} 中途退出，判为投降`
+            : next.reason === 'time'
+              ? `时间到 · ${winNames} 人头最多`
+              : `达到人头目标 · ${winNames} 领先`;
     const seconds = Math.max(0, Math.round(next.elapsed ?? 0));
     const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     card.innerHTML = `
       <div class="kicker">${teamMode ? `团队赛 · ${teamCount} 队` : '乱斗'} · Match Over</div>
-      <h1 class="verdict ${verdict}">${headline}<span class="accent">${verdict === 'draw' ? '' : '!'}</span></h1>
+      <h1 class="verdict ${aborted ? 'draw' : verdict}">${headline}<span class="accent">${verdict === 'draw' || aborted ? '' : '!'}</span></h1>
       <div class="rule"></div>
       <p>${detail}</p>
       <div class="scoreboard">${rows}</div>
       <div class="stateline">
         <span>用时 <b>${clock}</b></span>
-        ${next.draw ? '' : `<span>获胜 <b>${escapeHtml(winNames)}</b></span>`}
+        ${next.draw || aborted ? '' : `<span>获胜 <b>${escapeHtml(winNames)}</b></span>`}
       </div>
       <div class="actions">
         ${

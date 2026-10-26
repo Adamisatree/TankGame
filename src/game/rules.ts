@@ -233,6 +233,29 @@ export interface RespawnCandidate extends SpawnPoint {
 const dist2 = (ax: number, ay: number, bx: number, by: number): number => (ax - bx) ** 2 + (ay - by) ** 2;
 
 /**
+ * Gate for the lobby's 开始对局 button. Team mode needs every side filled; a
+ * custom map still travelling to a guest blocks the start until it lands.
+ * FFA deliberately reports no empty teams — everybody sits on team 0 there,
+ * and counting that as "empty" made 乱斗 impossible to start (v1.5.2 fix).
+ */
+export function roomStartBlockers(input: {
+  mode: 'ffa' | 'team';
+  roster: { team: number }[];
+  teams: number;
+  mapNeedsSync?: boolean;
+}): { emptyTeams: number[]; mapPending: boolean } {
+  const count = input.mode === 'team' ? Math.max(2, Math.min(6, Math.round(input.teams) || 2)) : 0;
+  const sizes = new Array(Math.max(0, count)).fill(0) as number[];
+  for (const seat of input.roster) {
+    if (!count) break;
+    const team = Math.max(0, Math.min(count - 1, Math.round(seat.team) || 0));
+    sizes[team] += 1;
+  }
+  const emptyTeams = sizes.map((size, index) => (size === 0 ? index : -1)).filter((index) => index >= 0);
+  return { emptyTeams, mapPending: !!input.mapNeedsSync };
+}
+
+/**
  * Picks where a dead player comes back.
  *
  * - team mode: right next to a living team-mate (they asked for this), unless
@@ -246,11 +269,22 @@ export function chooseRespawn(options: {
   team?: number;
   mode: MatchMode;
   random?: () => number;
+  /**
+   * Optional test for "nobody is standing here". Spawn points are authored for
+   * 2–4 seats; when a ten-seat room shares them the occupied ones must be
+   * skipped instead of stacking tanks (v1.5.2).
+   */
+  isFree?: (x: number, y: number, spawn: RespawnCandidate) => boolean;
 }): RespawnCandidate | null {
   const { spawns, players, team, mode } = options;
   if (!spawns.length) return null;
   const random = options.random ?? Math.random;
   const living = players.filter((p) => p.alive);
+  const free = options.isFree;
+  // Prefer points nobody stands on; fall back to the whole list when the arena
+  // is genuinely packed, so this can never return null on a full map.
+  const open = free ? spawns.filter((spawn) => free(spawn.x, spawn.y, spawn)) : spawns;
+  const pool = open.length ? open : spawns;
 
   if (mode === 'team' && team !== undefined) {
     const mates = living.filter((p) => p.team === team);
@@ -258,7 +292,7 @@ export function chooseRespawn(options: {
       // A ring of points around the mate, as close as the map allows.
       const mate = mates[Math.floor(random() * mates.length)];
       let best: { spawn: RespawnCandidate; d: number } | null = null;
-      for (const spawn of spawns) {
+      for (const spawn of pool) {
         const d = dist2(spawn.x, spawn.y, mate.x, mate.y);
         if (!best || d < best.d) best = { spawn, d };
       }
@@ -267,13 +301,13 @@ export function chooseRespawn(options: {
     // Whole team is dead – same rule as FFA.
   }
 
-  const scored = spawns.map((spawn) => {
+  const scored = pool.map((spawn) => {
     let nearest = Infinity;
     for (const p of living) nearest = Math.min(nearest, dist2(spawn.x, spawn.y, p.x, p.y));
     return { spawn, nearest };
   });
   const sorted = scored.sort((a, b) => b.nearest - a.nearest);
   // Best few, so repeated deaths don't all land on the same corner.
-  const pool = sorted.slice(0, Math.max(1, Math.min(3, sorted.length)));
-  return pool[Math.floor(random() * pool.length)].spawn;
+  const top = sorted.slice(0, Math.max(1, Math.min(3, sorted.length)));
+  return top[Math.floor(random() * top.length)].spawn;
 }

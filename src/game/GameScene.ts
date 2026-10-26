@@ -211,6 +211,8 @@ export class GameScene extends Phaser.Scene {
    * server keeps its seat for two minutes) before calling it a surrender.
    */
   private leftSeat: { id: string; at: number } | null = null;
+  /** Seats that really left this match (so a second notice is not repeated). */
+  private goneSeats = new Set<string>();
   /** Host: a start was requested while guests were still confirming the map. */
   private startPending = false;
   /** Host: hash of the map currently cached in the room (avoids re-pushing). */
@@ -359,7 +361,10 @@ export class GameScene extends Phaser.Scene {
         // The socket can report after the scene is torn down (mode change, quit).
         if (this.lanClosed) return;
         if (status === 'waiting' || status === 'playing') this.announceRoom();
-        if (status === 'waiting') this.netBanner = '等待对手加入…';
+        // Mid-match a single seat leaving flips the socket back to 'waiting':
+        // that must not replace the "<name> 退出了游戏" banner or the HUD text.
+        const midMatch = this.phase === 'playing' || this.phase === 'ready';
+        if (status === 'waiting') this.netBanner = midMatch ? '' : '等待对手加入…';
         else if (status === 'playing') this.netBanner = '';
         else if (status === 'error') this.netBanner = detail ?? '连接失败';
         else if (status === 'rejected') this.netBanner = detail ?? '版本不一致，无法联机';
@@ -368,15 +373,23 @@ export class GameScene extends Phaser.Scene {
         if (this.netBanner) this.showBanner(this.netBanner, 1.6);
         this.modeText.setText(this.modeLabel());
       },
-      onSurrender: (by) => this.handleSurrender(by),
+      onSurrender: (by) => this.seatLeft(by),
       onPeer: (state, id) => {
-        this.showBanner(state === 'joined' ? '对手已加入！' : '对手离开了', 1.4);
-        // A dropped opponent still ends the match, but not instantly: the server
-        // keeps the seat for two minutes, so a one-second Wi-Fi hiccup (or an
-        // alt-tab on a laptop) must not throw the match away. The host referees
-        // a guest's drop; a guest only has to act when it was the host's socket.
-        if (state === 'left' && this.phase === 'playing' && id && (this.lanRole === 'host' || id === 'p1')) {
-          this.leftSeat = { id, at: this.time.now + 4000 };
+        // A departure is announced by `seatLeft()` with the seat's name; a
+        // nameless "对手离开了" here would just overwrite that message.
+        if (state === 'joined') this.showBanner('对手已加入！', 1.4);
+        else if (this.phase === 'lobby') this.showBanner('有玩家离开了房间', 1.4);
+        // A dropped seat is not acted on instantly: the server keeps it for two
+        // minutes, so a one-second Wi-Fi hiccup (or an alt-tab on a laptop) must
+        // not cost somebody their match. Every seat watches every other seat —
+        // the host because it referees, a guest because the *host* may be the
+        // one that vanished (its match is void then; see `seatLeft`).
+        if (state === 'left' && (this.phase === 'playing' || this.phase === 'ready') && id) {
+          // A dropped socket is not instantly a departure: the server keeps the
+          // seat for two minutes, so a one-second hiccup or an alt-tab must not
+          // remove somebody. After the grace period the seat really is gone —
+          // and the match now continues without it (v1.5.2).
+          if (!this.goneSeats.has(id)) this.leftSeat = { id, at: this.time.now + 4000 };
         }
         if (state === 'joined') {
           this.leftSeat = null;
@@ -661,6 +674,9 @@ export class GameScene extends Phaser.Scene {
 
   /** Teams that currently have nobody on them (team-mode only). */
   emptyTeams(): number[] {
+    // FFA puts everyone on team 0 on purpose: "empty teams" is meaningless there
+    // and used to block 乱斗 from starting at all (v1.5.2 fix).
+    if (settings.match.mode !== 'team') return [];
     const sizes = new Array(this.teamCount).fill(0);
     for (const entry of this.roster) {
       const team = Math.max(0, Math.min(this.teamCount - 1, entry.team));
@@ -962,6 +978,9 @@ export class GameScene extends Phaser.Scene {
     this.bullets = [];
     this.particles = [];
     this.levelsCleared = 0;
+    // A rematch starts with the room as it is now: nobody is "gone" any more.
+    this.goneSeats.clear();
+    this.leftSeat = null;
     // A rematch is a fresh match: without this the clock stayed maxed out and
     // the `matchOver` latch swallowed the second result card entirely.
     this.matchElapsed = 0;
@@ -1014,18 +1033,77 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
+   * Where a joining seat should come in.
+   *
+   * Team mode drops you next to a living team-mate (that is the mode's promise);
+   * every other mode picks the spawn farthest from everybody, so a newcomer is
+   * never an instant free kill.
+   */
+  private pickSpawnFor(team: number): { x: number; y: number; angle: number } {
+    const spawns = this.layout.spawns?.length ? this.layout.spawns : [this.layout.enemy];
+    const others = this.tanks()
+      .filter((t) => t.alive)
+      .map((t) => ({ x: t.x, y: t.y, team: t.team, alive: t.alive }));
+    const candidates: RespawnCandidate[] = spawns.map((spawn, index) => ({ ...spawn, id: index }));
+    // v1.5.2: a map with two spawn points and six players put four tanks exactly
+    // on top of each other, which looked like a frozen match. Score every spawn
+    // point and take the best *free* one.
+    const best = chooseRespawn({
+      spawns: candidates,
+      players: others,
+      team,
+      mode: settings.match.mode,
+      // Free pockets are preferred; a fully occupied arena falls back to the
+      // open-map rule instead of stacking.
+      isFree: (x, y) => this.spotFree(x, y, TANK.radius),
+    });
+    return spawns[best?.id ?? 0] ?? this.layout.enemy;
+  }
+
+  /**
+   * The nearest point to (x, y) that a tank fits in **and** that no other tank is
+   * standing on. Spawn points are authored for 2–4 players; a ten-seat room has
+   * to share them, so the overflow walks outward in rings.
+   */
+  private placeSpawn(x: number, y: number, radius: number, ignore?: Tank): { x: number; y: number } {
+    const gap = TANK.radius * 2 + 6;
+    const free = (px: number, py: number): boolean =>
+      this.spawnClear(px, py, radius) &&
+      this.tanks()
+        .filter((t) => t !== ignore && t.alive)
+        .every((t) => Math.hypot(t.x - px, t.y - py) >= gap);
+    if (free(x, y)) return { x, y };
+    const base = this.nudgeSpawn(x, y, radius);
+    if (free(base.x, base.y)) return base;
+    for (let ring = 1; ring <= 16; ring += 1) {
+      const distance = ring * (gap * 0.8);
+      for (let i = 0; i < 16; i += 1) {
+        const angle = (i / 16) * Math.PI * 2 + ring * 0.37;
+        const px = x + Math.cos(angle) * distance;
+        const py = y + Math.sin(angle) * distance;
+        if (free(px, py)) return { x: px, y: py };
+      }
+    }
+    // Nowhere free at all (a tiny, packed map): the old behaviour, but at least
+    // out of the walls.
+    return base;
+  }
+
+  /** True when no tank is standing within one hull of (x, y). */
+  private spotFree(x: number, y: number, radius: number): boolean {
+    const gap = radius * 2 + 6;
+    return this.tanks()
+      .filter((t) => t.alive)
+      .every((t) => Math.hypot(t.x - x, t.y - y) >= gap);
+  }
+
+  /**
    * Creates the tank for a remote seat. p2 is kept as "the first remote" for
    * all the versus/1v1 code paths; every further seat goes into `extras`.
    */
   private addRemoteTank(id: string, team = 0): Tank {
-    const spawns = this.layout.spawns?.length ? this.layout.spawns : [this.layout.enemy];
-    // Drop a new player at the spawn furthest from everyone already in play,
-    // so joining a running match is never an instant free kill.
-    const others = this.tanks().map((t) => ({ x: t.x, y: t.y, team: t.team, alive: t.alive }));
-    const candidates: RespawnCandidate[] = spawns.map((spawn, index) => ({ ...spawn, id: index }));
-    const pick = chooseRespawn({ spawns: candidates, players: others, team, mode: 'ffa' });
-    const spawn = (pick && spawns[pick.id]) || spawns[this.tanks().length % spawns.length];
-    const spot = this.nudgeSpawn(spawn.x, spawn.y, TANK.radius);
+    const spawn = this.pickSpawnFor(team);
+    const spot = this.placeSpawn(spawn.x, spawn.y, TANK.radius);
     const tank = new Tank(this, spot.x, spot.y, spawn.angle, id, 22, this.colorForSeat(id, team));
     tank.team = team;
     if (!this.p2) this.p2 = tank;
@@ -1061,8 +1139,10 @@ export class GameScene extends Phaser.Scene {
     this.roster = players;
     if (!this.lanMode) return;
     const wanted = new Set(players.map((p) => p.id));
-    // A seat that is back in the roster is not a surrender any more.
+    // A seat that is back in the roster is not a departure any more: it may have
+    // reconnected after the grace period, so it rejoins the running match.
     if (this.leftSeat && wanted.has(this.leftSeat.id)) this.leftSeat = null;
+    for (const id of [...this.goneSeats]) if (wanted.has(id)) this.goneSeats.delete(id);
     for (const tank of [...this.extras, this.p2].filter((t): t is Tank => !!t)) {
       if (!wanted.has(tank.id)) this.removeRemoteTank(tank.id);
     }
@@ -1148,6 +1228,10 @@ export class GameScene extends Phaser.Scene {
 
   private loadLevel(index: number): void {
     this.levelIndex = index;
+    // Every fresh arena starts with the full room: a seat that left the last
+    // match may well be back in this one.
+    this.goneSeats.clear();
+    this.leftSeat = null;
     this.refreshHeaderText();
     const level = levels()[index];
     // v1.3: multiplayer maps are bigger than the screen, so the layout uses the
@@ -1872,43 +1956,104 @@ export class GameScene extends Phaser.Scene {
     };
   }
 
-  /** Someone walked away from a LAN match – show it as a surrender. */
-  private handleSurrender(by: string): void {
+  /**
+   * Someone left the room in the middle of a match.
+   *
+   * v1.5.2: a departing player used to end the whole match ("everyone else
+   * wins"), which meant one person closing their laptop killed a ten-player
+   * game. Now their tank simply leaves the arena, everyone still playing is
+   * told who walked out, and the match goes on. It only ends when it is really
+   * decided: one player (or one team) is left standing, or the *host* left —
+   * in that case nobody is refereeing any more and there is nothing to play.
+   */
+  private seatLeft(by: string): void {
     if (this.matchOver) return;
-    // Walking out of the room before the start is not a surrender; the roster
-    // broadcast already updates the seat list.
+    // Before the first shot the roster broadcast already updates the seat list;
+    // there is no match to keep alive yet.
     if (this.phase === 'lobby') return;
     this.leftSeat = null;
-    const scores = this.resultLines();
-    const quitter = scores.find((line) => line.id === by);
+    const name = this.nameOf(by);
+    const first = !this.goneSeats.has(by);
+    this.goneSeats.add(by);
+
+    // The host runs the simulation and owns the verdict: for everyone else its
+    // exit is the end of this match, not a player walking off the field.
+    if (by === 'p1' && this.lanMode) {
+      if (this.lanRole === 'guest') {
+        this.showBanner('房主离开了房间，这一局作废', 2.6);
+        this.finishMatch({
+          winners: [],
+          draw: false,
+          reason: 'host-left',
+          scoreboard: this.resultLines(),
+          elapsed: this.matchElapsed,
+          mode: settings.match.mode,
+          teams: this.teamCount,
+          surrenderBy: by,
+        });
+      }
+      return;
+    }
+
+    // Drop everything that belonged to that seat.
+    if (this.byId(by)) this.removeRemoteTank(by);
+    this.respawnQueue.delete(by);
+    this.remoteInputs.delete(by);
+    this.fireCd.delete(by);
+    if (first) this.showBanner(`${name} 退出了游戏`, 2.4);
+    this.hudDirty = true;
+    // Only the host decides whether that was the end of the match.
+    if (this.lanMode && this.lanRole === 'host') this.checkLastStanding();
+  }
+
+  /**
+   * Host: is the match over because everybody else left?
+   *
+   * FFA: one player left → that player wins. Team mode: one whole team left →
+   * that team wins. Zero players left → nobody to tell, nothing to send.
+   */
+  private checkLastStanding(): void {
+    if (!this.lanMode || this.lanRole !== 'host') return;
+    if (this.matchOver) return;
+    if (this.phase !== 'playing' && this.phase !== 'ready') return;
+    const lines = this.resultLines();
+    if (!lines.length) return;
     const teamMode = settings.match.mode === 'team';
-    // Everyone except the quitter wins – and in team mode, everyone not on the
-    // quitter's side (a ten-seat room is not "p1 vs p2" any more).
-    const winners = scores
-      .filter((line) => line.id !== by && (!teamMode || !quitter || line.team !== quitter.team))
-      .map((line) => line.id);
+    let winners: string[] = [];
+    if (teamMode) {
+      const teams = new Set(lines.map((line) => line.team));
+      if (teams.size > 1) return;
+      winners = lines.map((line) => line.id);
+    } else {
+      if (lines.length > 1) return;
+      winners = [lines[0].id];
+    }
     const payload = {
       winners,
       draw: false,
-      reason: 'surrender' as const,
-      scoreboard: scores,
+      reason: 'left' as const,
+      scoreboard: lines,
       elapsed: this.matchElapsed,
       mode: settings.match.mode,
       teams: this.teamCount,
-      surrenderBy: by,
+      surrenderBy: this.goneSeats.values().next().value as string | undefined,
     };
-    if (this.lanMode && this.lanRole === 'host') this.lan?.send({ t: 'result', ...payload });
-    this.paused = false;
+    this.lan?.send({ t: 'result', ...payload });
     this.finishMatch(payload);
-    this.showBanner(`${this.nameOf(by)} 已经投降`, 2.4);
+    this.showBanner(
+      teamMode
+        ? `只剩一队了：${winners.map((id) => this.nameOf(id)).join('、')} 获胜`
+        : `只剩 ${this.nameOf(winners[0])} 一个人，这一局归你`,
+      2.6
+    );
   }
 
-  /** A seat vanished mid-match: wait for a reconnect, then call it a surrender. */
+  /** A seat vanished mid-match: wait for a reconnect, then act on it. */
   private checkLeftSeat(): void {
     if (!this.leftSeat || this.time.now < this.leftSeat.at) return;
     const id = this.leftSeat.id;
     this.leftSeat = null;
-    this.handleSurrender(id);
+    this.seatLeft(id);
   }
 
   private nameOf(id: string): string {
@@ -1934,7 +2079,7 @@ export class GameScene extends Phaser.Scene {
     const payload = {
       winners,
       draw,
-      reason: (draw ? 'time' : result.reason) as 'kills' | 'time' | 'surrender',
+      reason: (draw ? 'time' : result.reason) as 'kills' | 'time',
       scoreboard,
       elapsed: this.matchElapsed,
       mode: settings.match.mode,
@@ -1949,7 +2094,7 @@ export class GameScene extends Phaser.Scene {
   private finishMatch(payload: {
     winners: string[];
     draw: boolean;
-    reason: 'kills' | 'time' | 'surrender';
+    reason: 'kills' | 'time' | 'surrender' | 'left' | 'host-left';
     scoreboard: { id: string; name: string; team: number; kills: number; deaths: number; hp: number }[];
     elapsed: number;
     mode?: 'ffa' | 'team';
@@ -1980,8 +2125,10 @@ export class GameScene extends Phaser.Scene {
   /** Runs the LAN clock and the win check; a no-op outside LAN matches. */
   private updateMatch(dt: number): void {
     if (!this.lanMode || this.matchOver) return;
-    if (this.phase !== 'playing') return;
-    if (this.lanRole === 'host') {
+    const playing = this.phase === 'playing';
+    // A seat can also walk out during the 1s countdown, so 'ready' counts too.
+    if (!playing && this.phase !== 'ready') return;
+    if (playing && this.lanRole === 'host') {
       this.matchElapsed += dt;
       this.checkMatchEnd();
     }
@@ -2423,7 +2570,20 @@ export class GameScene extends Phaser.Scene {
         const dy = b.y - a.y;
         const d = Math.hypot(dx, dy);
         const min = a.radius + b.radius + 2;
-        if (d > 1e-4 && d < min) {
+        if (d < 1e-3) {
+          // Two tanks sitting on the exact same pixel (a spawn point shared by
+          // more seats than the map has): there is no direction to push along,
+          // so pick one that is stable for this pair. Without this they could
+          // never come apart and the match looked frozen.
+          const seed = ((a.id.charCodeAt(1) || 1) * 31 + (b.id.charCodeAt(1) || 1) * 17) % 360;
+          const angle = (seed * Math.PI) / 180;
+          a.x -= Math.cos(angle) * 0.8;
+          a.y -= Math.sin(angle) * 0.8;
+          b.x += Math.cos(angle) * 0.8;
+          b.y += Math.sin(angle) * 0.8;
+          this.resolveTankWalls(a);
+          this.resolveTankWalls(b);
+        } else if (d < min) {
           const push = (min - d) / 2;
           a.x -= (dx / d) * push;
           a.y -= (dy / d) * push;
@@ -3054,21 +3214,27 @@ export class GameScene extends Phaser.Scene {
       { x: this.layout.enemy.x, y: this.layout.enemy.y, angle: this.layout.enemy.angle, id: 1 },
     ]).map((spawn, index) => ({ ...spawn, id: index }));
 
+    const others = this.tanks()
+      .filter((t) => t !== tank)
+      .map((t) => ({ x: t.x, y: t.y, team: t.team, alive: t.alive && !t.awaitingRespawn }));
     const chosen = chooseRespawn({
       spawns,
-      players: this.tanks()
-        .filter((t) => t !== tank)
-        .map((t) => ({ x: t.x, y: t.y, team: t.team, alive: t.alive && !t.awaitingRespawn })),
+      players: others,
       team: tank.team,
       mode: settings.match.mode,
+      // Same rule as the first spawn: never come back inside a team-mate.
+      isFree: (x, y) =>
+        this.spawnClear(x, y, tank.radius) &&
+        others.every((o) => !o.alive || Math.hypot(o.x - x, o.y - y) >= TANK.radius * 2 + 6),
     });
 
     if (!chosen) {
       this.respawn(tank);
       return;
     }
-    // Never materialise inside a wall: the authored points get nudged out.
-    const spot = this.nudgeSpawn(chosen.x, chosen.y, tank.radius);
+    // Never materialise inside a wall or into another hull: nudge, then walk
+    // outward if the point is taken (a ten-seat room shares six spawn points).
+    const spot = this.placeSpawn(chosen.x, chosen.y, tank.radius, tank);
     tank.x = spot.x;
     tank.y = spot.y;
     tank.bodyAngle = chosen.angle;
