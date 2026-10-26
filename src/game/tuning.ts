@@ -148,17 +148,9 @@ export const TUNING_SPEC: TuningSpec[] = [
 
 export const TUNING_GROUPS: TuningGroup[] = ['开火', '热量', '伤害', '车身', '复活', '道具'];
 
-/**
- * The passphrase for the internal panel. It is not a security boundary – LAN
- * play is trusted and the values ship with the game – it just keeps the panel
- * out of the way of players who open the game to play it.
- */
-export const TUNING_PASSWORD = 'tank2026';
-
 export const TUNING_VERSION = 1;
 
 const STORAGE_KEY = 'tankduel.tuning';
-const UNLOCK_KEY = 'tankduel.tuningUnlocked';
 
 function storage(): Storage | null {
   try {
@@ -242,40 +234,6 @@ export function tuningDiff(): { key: keyof Tuning; label: string; from: number; 
     from: TUNING_DEFAULTS[spec.key],
     to: active[spec.key],
   }));
-}
-
-// ------------------------------------------------------------------ password gate
-
-/** Works even without localStorage (Node tests, locked-down browsers). */
-let unlockedInMemory = false;
-
-export function isTuningUnlocked(): boolean {
-  if (unlockedInMemory) return true;
-  try {
-    return storage()?.getItem(UNLOCK_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-export function unlockTuning(passphrase: string): boolean {
-  if (passphrase.trim() !== TUNING_PASSWORD) return false;
-  unlockedInMemory = true;
-  try {
-    storage()?.setItem(UNLOCK_KEY, '1');
-  } catch {
-    /* ignore */
-  }
-  return true;
-}
-
-export function lockTuning(): void {
-  unlockedInMemory = false;
-  try {
-    storage()?.removeItem(UNLOCK_KEY);
-  } catch {
-    /* ignore */
-  }
 }
 
 // ------------------------------------------------------------------ export / import

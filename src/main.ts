@@ -699,6 +699,28 @@ function settingsPanel(): string {
       ${mapPicker()}
       ${skillPicker()}
       ${settings.mode === 'lan' ? lanPanel() : ''}
+      ${gameplayToggles(versus)}
+      ${keyEditor()}
+      ${updaterPanelHtml()}
+    </div>
+  `;
+}
+
+/**
+ * The handful of switches that are safe to flip mid-match, so the pause menu
+ * can carry them too (v1.5.3). Mode / difficulty / map are deliberately absent:
+ * changing those under a running LAN match would desync the room.
+ */
+function gameplayToggles(versus: boolean): string {
+  return `
+      <label class="setting-row toggle">
+        <input type="checkbox" id="hit-effects" ${settings.hitEffects ? 'checked' : ''} />
+        <span class="switch" aria-hidden="true"></span>
+        <span class="toggle-text">
+          <b>受击特效</b>
+          <em>自己被击中时的画面震动 / 闪白。关掉之后整块屏幕都不会抖；别人掉血本来就不会晃</em>
+        </span>
+      </label>
       <label class="setting-row toggle ${versus ? 'is-muted' : ''}">
         <input type="checkbox" id="auto-dodge" ${settings.autoDodge ? 'checked' : ''} ${versus ? 'disabled' : ''} />
         <span class="switch" aria-hidden="true"></span>
@@ -706,11 +728,7 @@ function settingsPanel(): string {
           <b>自动躲弹</b>
           <em>车身自动躲炮弹、自动贴墙找角度，你只管瞄准和开火（游戏中按 <kbd>${keyLabel(getBindings().global.autoDodge)}</kbd> 可随时切换）</em>
         </span>
-      </label>
-      ${keyEditor()}
-      ${updaterPanelHtml()}
-    </div>
-  `;
+      </label>`;
 }
 
 function controlsForMode(): string {
@@ -820,10 +838,22 @@ function bindSettings(root: HTMLElement): void {
     });
   });
 
+  // These toggles show up in the pause menu too (v1.5.3), so a change while a
+  // match is running has to reach the live scene instead of the next boot.
+  const liveScene = (): GameScene | null => (game.scene.isActive('Game') ? gameScene() : null);
+
   const auto = root.querySelector<HTMLInputElement>('#auto-dodge');
   auto?.addEventListener('change', () => {
     settings.autoDodge = auto.checked;
     sound.ui();
+    liveScene()?.setAutoDodge(auto.checked);
+  });
+
+  const hit = root.querySelector<HTMLInputElement>('#hit-effects');
+  hit?.addEventListener('change', () => {
+    settings.hitEffects = hit.checked;
+    sound.ui();
+    liveScene()?.setHitEffects(hit.checked);
   });
 
   // Custom maps: create / edit / play / export / delete.
@@ -1411,7 +1441,7 @@ function render(next: OverlayState): void {
         <button class="primary" id="btn-start">开始游戏</button>
         <span class="hint">或按 Enter</span>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
-        <button class="ghost" id="btn-tuning" title="内测参数（需要密码）">内测</button>
+        <button class="ghost" id="btn-tuning" title="内测参数（F9 也能打开）">内测</button>
       </div>
       ${tuningPanelHtml(settings.mode === 'lan' && settings.lanRole === 'guest')}
       <div class="tip"><span class="dot"></span> ${
@@ -1437,31 +1467,42 @@ function render(next: OverlayState): void {
   } else if (next.kind === 'paused') {
     // A LAN guest cannot restart the room by itself – the host owns the match.
     const lanGuest = settings.mode === 'lan' && settings.lanRole === 'guest';
+    // v1.5.3: the pause menu carries the settings that are safe to change
+    // mid-match, so nobody has to quit a match to turn the shake off.
+    const versus = settings.mode === 'versus' || settings.mode === 'lan';
     card.innerHTML = `
       <div class="kicker">Paused</div>
       <h1>暂停中</h1>
       <div class="rule"></div>
       <p>绿色虚线是真实的反弹路径，拐角上的小圈就是反弹点。</p>
+      <div class="setting-block">
+        <div class="setting-head">
+          <span class="setting-label">设置</span>
+          <span class="setting-hint">改完立刻生效</span>
+        </div>
+        ${gameplayToggles(versus)}
+      </div>
       ${keyEditor()}
       <div class="actions">
         <button class="primary" id="btn-resume">继续</button>
-        ${
-          lanGuest
-            ? '<button id="btn-restart" disabled>重新开始（房主决定）</button>'
-            : '<button id="btn-restart">重新开始</button>'
-        }
+        ${lanGuest ? '' : '<button id="btn-restart">重新开始</button>'}
         <button class="ghost" id="btn-quit">退出对局</button>
         <button class="ghost" id="btn-mute">${sound.muted ? '取消静音' : '静音'}</button>
         <button class="ghost" id="btn-tuning">内测</button>
       </div>
       ${tuningPanelHtml(settings.mode === 'lan' && settings.lanRole === 'guest')}
-      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 退出对局会直接结束这一局${settings.mode === 'lan' ? '，对手会看到「你已经投降」' : ''}</div>
+      <div class="tip"><span class="dot"></span> 按 P 或 Esc 继续 · 退出对局会直接结束这一局${
+        settings.mode === 'lan' ? '，对手会看到「你已经投降」' : ''
+      }${lanGuest ? ' · 重新开始由房主决定' : ''}</div>
     `;
-    bindKeyEditor(card);
+    // bindSettings also wires the key editor and the gameplay toggles.
+    bindSettings(card);
     bindTuningPanel(card, () => window.dispatchEvent(new Event('tankgame:rerender')));
     card.querySelector<HTMLButtonElement>('#btn-tuning')?.addEventListener('click', () => {
       const body = card.querySelector<HTMLElement>('#tuning-body');
-      if (body) body.hidden = !body.hidden;
+      if (!body) return;
+      body.hidden = !body.hidden;
+      if (!body.hidden) body.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
   } else if (next.kind === 'gameover') {
     card.innerHTML = `
@@ -1551,7 +1592,7 @@ function render(next: OverlayState): void {
       <div class="actions">
         ${
           next.canRestart === false
-            ? '<button class="primary" id="btn-wait-host" disabled>等房主再来一局</button>'
+            ? '<span class="wait-host"><span class="dot"></span> 等房主点「再来一局」…</span>'
             : '<button class="primary" id="btn-restart">再来一局</button>'
         }
         <button id="btn-menu">返回菜单</button>
@@ -1651,7 +1692,10 @@ window.addEventListener('keydown', (event) => {
   }
   if (state.kind !== 'start') return;
   if (document.querySelector('.key-btn.capturing')) return;
-  if (event.key === 'Enter' || event.key === ' ') {
+  // v1.5.3: Enter in a text field (a room address, a map name) is not "start".
+  const active = document.activeElement as HTMLElement | null;
+  const editing = !!active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable);
+  if (!editing && (event.key === 'Enter' || event.key === ' ')) {
     event.preventDefault();
     document.getElementById('btn-start')?.click();
   }

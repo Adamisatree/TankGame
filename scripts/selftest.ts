@@ -16,15 +16,12 @@ import {
   TUNING_SPEC,
   exportTuning,
   importTuning,
-  isTuningUnlocked,
-  lockTuning,
   normalizeTuning,
   resetTuning,
   setTuning,
   tuning,
   tuningDiff,
   tuningIsCustom,
-  unlockTuning,
 } from '../src/game/tuning';
 import {
   ACTION_LABEL,
@@ -602,11 +599,21 @@ console.log('internal tuning');
   resetTuning();
   check('reset restores the shipped balance', !tuningIsCustom() && tuning().dmgBack === 12);
 
-  lockTuning();
-  check('the panel starts locked', !isTuningUnlocked());
-  check('a wrong passphrase does not unlock', !unlockTuning('nope'));
-  check('the right passphrase unlocks', unlockTuning('tank2026') && isTuningUnlocked());
-  lockTuning();
+  // v1.5.3: no passphrase. The panel is open to whoever opens it, so the only
+  // thing worth locking down is that nothing out there still exports a gate.
+  const tuningModule = (await import('../src/game/tuning')) as unknown as Record<string, unknown>;
+  check(
+    'the tuning module has no passphrase gate left',
+    !('TUNING_PASSWORD' in tuningModule) && !('unlockTuning' in tuningModule) && !('isTuningUnlocked' in tuningModule),
+    Object.keys(tuningModule).join(',')
+  );
+  check('any value can be changed without a password', (() => {
+    resetTuning();
+    setTuning({ dmgBack: 11 });
+    const ok = tuning().dmgBack === 11;
+    resetTuning();
+    return ok;
+  })());
 }
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);

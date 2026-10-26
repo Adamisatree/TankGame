@@ -1,10 +1,13 @@
 /**
  * In-app 内测面板 (internal test panel).
  *
- * Hidden behind a passphrase so ordinary players never trip over it, but it
- * edits every number in `tuning.ts` live: fire rate, heat, damage, hull speed,
- * respawn timers and pickup cooldowns. Non-default values are labelled in the
- * HUD and travel with the room config, so LAN matches stay fair.
+ * v1.5.3: no passphrase any more. Keeping one meant the key was written in the
+ * README and in the bundle, so it protected nothing – the panel now simply
+ * starts collapsed (F9 or the 内测 button opens it) and every number in
+ * `tuning.ts` is editable: fire rate, heat, damage, hull speed, respawn timers
+ * and pickup cooldowns. Non-default values are labelled in the HUD and travel
+ * with the room config, so LAN matches stay fair. A LAN guest still sees the
+ * panel read-only, because the host owns the balance.
  *
  * The panel is plain DOM: it lives inside the menu card and repaints itself,
  * never the whole screen.
@@ -16,14 +19,11 @@ import {
   TUNING_SPEC,
   exportTuning,
   importTuning,
-  isTuningUnlocked,
-  lockTuning,
   resetTuning,
   setTuningValue,
   tuning,
   tuningDiff,
   tuningIsCustom,
-  unlockTuning,
   type Tuning,
   type TuningGroup,
 } from '../game/tuning';
@@ -73,27 +73,22 @@ function controlsHtml(): string {
 
 /** The whole panel. `readOnly` is used for LAN guests (the host owns balance). */
 export function tuningPanelHtml(readOnly = false): string {
-  const unlocked = isTuningUnlocked();
   const custom = tuningIsCustom();
   return `
-    <div class="tuning-panel${unlocked ? ' unlocked' : ''}" id="tuning-panel">
+    <div class="tuning-panel unlocked" id="tuning-panel">
       <div class="tuning-head">
         <span class="tuning-title">内测参数</span>
         <span class="tuning-badge ${custom ? 'on' : ''}" id="tuning-badge">
           ${custom ? `已改动 ${tuningDiff().length} 项` : '官方数值'}
         </span>
-        <button type="button" class="chip ghost" id="tuning-toggle">${unlocked ? '收起' : '展开'}</button>
+        <button type="button" class="chip ghost" id="tuning-toggle">展开</button>
       </div>
-      <div class="tuning-body" id="tuning-body" ${unlocked ? '' : 'hidden'}>
+      <div class="tuning-body" id="tuning-body" hidden>
         <p class="tune-summary" id="tune-summary">${balanceSummary()}</p>
         ${
           readOnly
             ? `<p class="tune-hint">联机时数值由房主决定，你这边只读。</p>`
-            : `<div class="tune-lock" id="tune-lock">
-                 <input type="password" id="tune-pass" placeholder="内测密码" autocomplete="off" />
-                 <button type="button" class="chip" id="tune-unlock">解锁</button>
-                 <span class="tune-error" id="tune-error"></span>
-               </div>`
+            : ''
         }
         <div class="tune-controls" id="tune-controls" ${readOnly ? 'data-readonly="1"' : ''}>
           ${controlsHtml()}
@@ -102,7 +97,6 @@ export function tuningPanelHtml(readOnly = false): string {
           <button type="button" class="chip" id="tune-reset">恢复默认</button>
           <button type="button" class="chip" id="tune-export">导出参数</button>
           <button type="button" class="chip" id="tune-import">导入参数</button>
-          <button type="button" class="chip ghost" id="tune-lock-again">重新锁定</button>
         </div>
         <p class="tune-hint">
           改动立刻生效（下一局开始套用）。非官方数值会显示在 HUD 上，联机时会随房间同步给所有人。
@@ -132,12 +126,10 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     if (summary) summary.textContent = balanceSummary();
   };
 
-  // Opening the panel: locked panels show the passphrase box, unlocked show knobs.
   const open = (): void => {
     if (!body) return;
     body.hidden = false;
     if (toggle) toggle.textContent = '收起';
-    if (!body.querySelector('#tune-pass')) panel.classList.add('unlocked');
   };
 
   toggle?.addEventListener('click', () => {
@@ -149,7 +141,7 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     }
   });
 
-  // If it arrives already unlocked (remembered on this machine) show it open.
+  // F9 / #btn-tuning opened it before this repaint: keep it open.
   if (body && !body.hidden) open();
 
   const applyValue = (key: keyof Tuning, value: number): void => {
@@ -161,8 +153,17 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     refreshMeta();
   };
 
+  // v1.5.3: typing a value must never also drive the tank. The scene already
+  // skips its keys while an input has focus, and we stop the events here too so
+  // a slider or the import button can't leak a W/shortcut into the match.
+  const swallow = (event: Event): void => {
+    event.stopPropagation();
+  };
   controls?.querySelectorAll<HTMLInputElement>('input[data-tune]').forEach((input) => {
     const key = input.dataset.tune as keyof Tuning;
+    for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+      input.addEventListener(type, swallow);
+    }
     if (readOnly) {
       input.disabled = true;
       return;
@@ -179,38 +180,12 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     });
   });
 
-  root.querySelector<HTMLButtonElement>('#tune-unlock')?.addEventListener('click', () => {
-    const pass = root.querySelector<HTMLInputElement>('#tune-pass');
-    const error = root.querySelector<HTMLElement>('#tune-error');
-    const ok = unlockTuning(pass?.value ?? '');
-    if (!ok) {
-      if (error) error.textContent = '密码不对';
-      return;
-    }
-    if (error) error.textContent = '';
-    open();
-  });
-
-  root.querySelector<HTMLInputElement>('#tune-pass')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      root.querySelector<HTMLButtonElement>('#tune-unlock')?.click();
-    }
-  });
-
   root.querySelector<HTMLButtonElement>('#tune-reset')?.addEventListener('click', () => {
     resetTuning();
     // Repaint the panel in place with the defaults.
     if (controls) controls.innerHTML = controlsHtml();
     bindTuningPanel(root, onChange);
     refreshMeta();
-    onChange();
-  });
-
-  root.querySelector<HTMLButtonElement>('#tune-lock-again')?.addEventListener('click', () => {
-    lockTuning();
-    if (body) body.hidden = true;
-    if (toggle) toggle.textContent = '展开';
     onChange();
   });
 
@@ -228,6 +203,9 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'application/json,.json';
+    for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+      input.addEventListener(type, swallow);
+    }
     input.addEventListener('change', () => {
       const file = input.files?.[0];
       if (!file) return;
