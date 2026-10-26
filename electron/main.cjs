@@ -74,6 +74,10 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // v1.5.4: the host window is the referee — Chromium throttles a hidden
+      // window to ~1 fps, which used to freeze the whole room the moment the
+      // host alt-tabbed. A desktop host must keep simulating while backgrounded.
+      backgroundThrottling: false,
     },
   });
 
@@ -82,7 +86,10 @@ async function createWindow() {
     return { action: 'deny' };
   });
 
-  const url = DEV_URL ?? `http://127.0.0.1:${serverHandle.port}/`;
+  // `startServer()` may have failed (port taken, permissions); reading
+  // `serverHandle.port` then threw a null dereference on top of the dialog that
+  // had already explained the real problem.
+  const url = DEV_URL ?? (serverHandle ? `http://127.0.0.1:${serverHandle.port}/` : 'about:blank');
   await win.loadURL(url);
   win.once('ready-to-show', () => win.show());
 }

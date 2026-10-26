@@ -253,3 +253,6 @@ for (const c of checks) {
 }
 console.log(failed ? `\n${failed}/${checks.length} multi-player checks FAILED` : `\n${checks.length}/${checks.length} multi-player checks passed`);
 if (failed) process.exit(1);
+// v1.5.4: a wedged socket or server handle must not keep this process alive
+// after the summary — CI would sit there until the job times out.
+setTimeout(() => process.exit(0), 250).unref();

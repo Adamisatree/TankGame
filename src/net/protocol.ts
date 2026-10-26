@@ -4,7 +4,7 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * Hard cap on a transferred map blob. A 40×24 grid map is a few kilobytes, so
@@ -156,7 +156,23 @@ export interface Snapshot {
   seq: number;
   /** Present on a keyframe and whenever they changed (v1.5.3 deltas). */
   level?: number;
+  /**
+   * v1.5.4: the room's map *id*, next to the index.
+   *
+   * Two machines can order their custom-map libraries differently (a map
+   * imported on one side, a deleted map on the other), so an index alone can
+   * point at a different arena — both sides then play "their own" map, which
+   * looks exactly like the game being stuck. The id is resolved first; the
+   * index stays as a fallback for a library that does not have the id yet.
+   */
+  levelId?: string;
   phase?: string;
+  /**
+   * v1.5.4: the host is paused. Pausing stops the host's update loop, so this
+   * is only ever sent in the frame the pause happens — a guest that keeps
+   * receiving nothing otherwise cannot tell "host paused" from "host died".
+   */
+  paused?: 1;
   /** Host's match clock in seconds, so a guest's top bar shows the same time. */
   elapsed?: number;
   score?: number;

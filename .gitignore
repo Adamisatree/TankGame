@@ -28,3 +28,9 @@ release/desktop/
 
 # generated portable build (attached to releases by CI)
 release/*.html
+
+# local test scaffolding (v1.5.4: never commit build caches or ad-hoc runners)
+.testbuild/
+.tools/
+.npm-cache/
+.pnpm-store/

@@ -215,15 +215,91 @@ function countPlayers() {
   return room.players.size;
 }
 
-function send(ws, msg) {
-  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+/**
+ * v1.5.4: per-connection backpressure watermarks.
+ *
+ * A relay that only calls `ws.send()` will happily queue minutes of snapshots
+ * for a client whose socket (or machine) has stopped draining. That client then
+ * replays the backlog in order — every old sound and every old position — and
+ * can never catch up, while the process grows. Two levels:
+ *
+ *   coalesce — stop forwarding *plain deltas* to this connection only. It is at
+ *              most one second from the next keyframe, which re-syncs it fully;
+ *              every other player is untouched.
+ *   slow     — the queue is hopeless (1 MB), so terminate it; the client's own
+ *              reconnect puts it back in its old seat and a keyframe rebuilds it.
+ */
+const DEFAULT_LIMITS = { coalesceBacklog: 64 * 1024, slowBacklog: 1024 * 1024 };
+let limits = { ...DEFAULT_LIMITS };
+
+/** Bytes currently queued on this socket (ws exposes `bufferedAmount`). */
+function backlogOf(ws) {
+  const amount = ws?.bufferedAmount;
+  return typeof amount === 'number' && Number.isFinite(amount) ? amount : 0;
 }
 
-function broadcast(msg, exceptWs = null) {
+/**
+ * One serialisation per message, then a cheap write per receiver.
+ * `budget` = the largest backlog a receiver may have before it is skipped,
+ * or Infinity for traffic that must always be delivered.
+ */
+function writeAll(msg, { exceptWs = null, skipBacklogged = false } = {}) {
+  let payload;
+  try {
+    payload = JSON.stringify(msg);
+  } catch {
+    return;
+  }
   for (const ws of room.players.values()) {
     if (ws === exceptWs) continue;
-    send(ws, msg);
+    if (ws.readyState !== ws.OPEN) continue;
+    const backlog = backlogOf(ws);
+    // The hard level is checked first: a connection that is already hopeless
+    // must be cut, not merely skipped (`skipBacklogged` only saves bandwidth).
+    if (backlog > limits.slowBacklog) {
+      console.log(`[lan] dropping ${ws.playerId ?? '?'}: ${Math.round(backlog / 1024)} KB backlog`);
+      try {
+        ws.terminate();
+      } catch {
+        /* already gone */
+      }
+      continue;
+    }
+    if (skipBacklogged && backlog > limits.coalesceBacklog) continue;
+    try {
+      ws.send(payload);
+    } catch {
+      /* a socket that died mid-broadcast must not stop the others */
+    }
   }
+}
+
+/** Control traffic: always delivered, still bounded by the hard watermark. */
+function send(ws, msg) {
+  if (!ws || ws.readyState !== ws.OPEN) return;
+  if (backlogOf(ws) > limits.slowBacklog) {
+    try {
+      ws.terminate();
+    } catch {
+      /* already gone */
+    }
+    return;
+  }
+  try {
+    ws.send(JSON.stringify(msg));
+  } catch {
+    /* socket died between the check and the write */
+  }
+}
+
+/**
+ * Snapshots are the only high-rate traffic, so they are the only thing that is
+ * coalesced: a guest that is behind simply skips the deltas and picks the next
+ * keyframe up. A keyframe (`kf`) is never skipped — it is the repair.
+ */
+function broadcast(msg, exceptWs = null) {
+  const isDelta = msg?.t === 'state' && msg.kf !== 1;
+  writeAll(msg, { exceptWs, skipBacklogged: isDelta });
 }
 
 /**
@@ -362,7 +438,19 @@ function rememberSession(ws, id) {
 
 function unlink(ws) {
   const id = ws.playerId;
-  if (!id || !room.players.has(id)) return;
+  if (!id) return;
+  // v1.5.4: the seat must still belong to *this* socket.
+  //
+  // A reconnecting client replaces `room.players[id]` with its new socket, and
+  // the old socket's `close` arrives afterwards. Checking only "is the seat
+  // taken?" therefore deleted the *new* occupant: a host that refreshed its
+  // page had the fresh host socket removed, `room.host` cleared, and the whole
+  // room was torn down under everyone. Whoever owns the socket, owns the seat.
+  if (room.players.get(id) !== ws) {
+    ws.playerId = null;
+    ws.role = null;
+    return;
+  }
   const wasHost = id === 'p1';
   if (!wasHost) rememberSession(ws, id);
   room.players.delete(id);
@@ -385,7 +473,19 @@ function unlink(ws) {
   announceRoster();
 }
 
-export function createLanServer({ port = Number(process.env.PORT) || 8787, host = '0.0.0.0', quiet = false } = {}) {
+export function createLanServer({
+  port = Number(process.env.PORT) || 8787,
+  host = '0.0.0.0',
+  quiet = false,
+  coalesceBacklog,
+  slowBacklog,
+} = {}) {
+  // Tests inject tiny watermarks to trigger both levels deterministically.
+  limits = {
+    coalesceBacklog:
+      Number.isFinite(coalesceBacklog) && coalesceBacklog > 0 ? coalesceBacklog : DEFAULT_LIMITS.coalesceBacklog,
+    slowBacklog: Number.isFinite(slowBacklog) && slowBacklog > 0 ? slowBacklog : DEFAULT_LIMITS.slowBacklog,
+  };
   const server = createServer((req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405).end('method not allowed');
@@ -705,11 +805,12 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
     });
 
     ws.on('close', () => {
-      if (ws.playerId) {
-        unlink(ws);
-        console.log(`[lan] ${ws.playerId} disconnected (${room.players.size}/${room.capacity})`);
-      }
+      // Capture the seat before `unlink()` clears it: the log used to print a
+      // literal `null` for every departure.
+      const seat = ws.playerId ?? null;
+      if (seat) unlink(ws);
       ws.role = null;
+      if (seat) console.log(`[lan] ${seat} disconnected (${room.players.size}/${room.capacity})`);
     });
   });
 
@@ -762,8 +863,32 @@ export function createLanServer({ port = Number(process.env.PORT) || 8787, host 
         close: () =>
           new Promise((done) => {
             clearInterval(heartbeat);
-            for (const client of wss.clients) client.terminate();
-            wss.close(() => server.close(() => done()));
+            for (const client of wss.clients) {
+              try {
+                client.terminate();
+              } catch {
+                /* already gone */
+              }
+            }
+            // v1.5.4: an HTTP keep-alive connection (the game page itself) can
+            // hold `server.close()` open forever, which used to hang Electron's
+            // `before-quit` and the test process. Cut the idle sockets, and keep
+            // a hard 2 s ceiling in case a handshake is wedged.
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              done();
+            };
+            const guard = setTimeout(finish, 2000);
+            guard.unref?.();
+            server.closeAllConnections?.();
+            wss.close(() => {
+              server.close(() => {
+                clearTimeout(guard);
+                finish();
+              });
+            });
           }),
         stats: () => ({ players: countPlayers(), totalPlayers }),
       });

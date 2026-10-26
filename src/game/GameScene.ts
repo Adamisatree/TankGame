@@ -210,6 +210,8 @@ export class GameScene extends Phaser.Scene {
   private tankWire = new Map<string, Record<string, number>>();
   private netLast = {
     level: -1,
+    levelId: '',
+    paused: -1,
     phase: '',
     elapsed: -1,
     score: -1,
@@ -220,6 +222,11 @@ export class GameScene extends Phaser.Scene {
   private snap: Snapshot | null = null;
   private snapAt = 0;
   private netBanner = '';
+  /** v1.5.4 guest watchdog: what we last told the player, and when we last checked. */
+  private staleNote = '';
+  private staleCheckedAt = 0;
+  /** The host announced a pause in its last frame; cleared by the next snapshot. */
+  private hostPaused = false;
   /** Address the host should hand to the guest, discovered from the server. */
   private roomUrl = '';
   /** Latched so a skill press is never lost between 30 Hz packets. */
@@ -1428,7 +1435,15 @@ export class GameScene extends Phaser.Scene {
 
   /** Called by the DOM overlay. */
   setPaused(paused: boolean): void {
+    const changed = this.paused !== paused;
     this.paused = paused;
+    // v1.5.4: pausing freezes this window's update loop, and with it every
+    // snapshot. Push one frame now saying so, otherwise the guests are left
+    // staring at a dead arena with no way to tell "paused" from "host gone".
+    if (changed && paused && this.lanMode && this.lanRole === 'host' && this.lan) {
+      this.netKeyframe = true;
+      this.lan.sendSnapshot(this.buildSnapshot());
+    }
   }
 
   /** Called by the DOM overlay to restart with the current settings. */
@@ -3563,6 +3578,20 @@ export class GameScene extends Phaser.Scene {
       snap.level = this.levelIndex;
       this.netLast.level = this.levelIndex;
     }
+    // v1.5.4: the id travels too. Two machines can order their custom libraries
+    // differently, and an index alone then loads a different arena on the guest.
+    const levelId = levels()[this.levelIndex]?.id ?? '';
+    if (keyframe || levelId !== this.netLast.levelId) {
+      snap.levelId = levelId;
+      this.netLast.levelId = levelId;
+    }
+    // Paused stops the update loop, so this only ever leaves in the pause frame
+    // itself (see setPaused); it tells a guest *why* nothing is arriving.
+    const pausedFlag = this.paused ? 1 : 0;
+    if (pausedFlag !== this.netLast.paused) {
+      this.netLast.paused = pausedFlag;
+      if (pausedFlag === 1) snap.paused = 1;
+    }
     if (keyframe || this.phase !== this.netLast.phase) {
       snap.phase = this.phase;
       this.netLast.phase = this.phase;
@@ -3676,6 +3705,7 @@ export class GameScene extends Phaser.Scene {
 
     const snap = this.snap;
     if (!snap) return;
+    this.guestWatchdog();
     // The host owns the clock: both machines must agree on the time limit.
     if (typeof snap.elapsed === 'number') this.matchElapsed = snap.elapsed;
     const age = Math.min(0.12, (this.time.now - this.snapAt) / 1000);
@@ -3777,19 +3807,71 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * v1.5.4: a guest that stops receiving has to be told *why*.
+   *
+   * The host is the only referee, so when its window is throttled (minimised,
+   * in the background, laptop lid) the simulation stops while the WebSocket —
+   * whose heartbeats are answered by the network layer — still looks healthy.
+   * Before this the guest simply froze with no explanation.
+   */
+  private guestWatchdog(): void {
+    if (!this.lanMode || this.lanRole !== 'guest') return;
+    const now = this.time.now;
+    // Refresh on a timer instead of every frame: a banner every frame would be
+    // a permanent flicker on screen.
+    if (now - this.staleCheckedAt < 1000) return;
+    this.staleCheckedAt = now;
+    const silentFor = now - this.snapAt;
+    let note = '';
+    if (this.hostPaused) note = '房主已暂停，等待继续…';
+    else if (silentFor > 10000) note = '收不到房主数据：房主可能已切到后台或离线';
+    else if (silentFor > 2500) note = '网络不稳，等待房主数据…';
+    if (note === this.staleNote) return;
+    this.staleNote = note;
+    if (note) this.showBanner(note, 3);
+  }
+
   /** Guest: adopt a snapshot, replaying effects and syncing the level. */
   private applySnapshot(snap: Snapshot): void {
     this.snap = snap;
     this.snapAt = this.time.now;
+    // Any live frame means the host is running again. Say so once if the
+    // watchdog had already warned about silence, then go quiet.
+    const wasStale = this.staleNote;
+    this.hostPaused = snap.paused === 1;
+    if (this.hostPaused) {
+      this.staleNote = '';
+      this.showBanner('房主已暂停', 2);
+    } else if (wasStale) {
+      this.staleNote = '';
+      this.showBanner(wasStale.startsWith('房主已暂停') ? '房主继续了' : '已重新连上房主', 1.4);
+    }
 
-    if (typeof snap.level === 'number' && snap.level !== this.levelIndex) {
+    // v1.5.4: resolve the map by *id* first, index second.
+    //
+    // The host announces an index into its own library, but a custom map that
+    // only one side has (imported here, deleted there) shifts every index after
+    // it: the guest then loads the wrong arena and both sides look "stuck" on
+    // different maps. The id is unambiguous; the index stays as a fallback for
+    // a library that does not know the id yet, with an in-range guard.
+    let nextLevel: number | null = null;
+    if (typeof snap.levelId === 'string' && snap.levelId) {
+      const byId = levels().findIndex((entry) => entry.id === snap.levelId);
+      if (byId >= 0) nextLevel = byId;
+    }
+    if (nextLevel === null && typeof snap.level === 'number') {
+      const count = levels().length;
+      if (snap.level >= 0 && snap.level < count) nextLevel = snap.level;
+    }
+    if (nextLevel !== null && nextLevel !== this.levelIndex) {
       // Level changed on the host – rebuild the arena locally. Every remote
       // tank is re-created from the snapshot that follows, so ten-player
       // rooms survive a map change too.
       const keepHp = new Map<string, number>();
       for (const tank of this.tanks()) keepHp.set(tank.id, tank.hp);
-      const level = levels()[snap.level];
-      this.levelIndex = snap.level;
+      const level = levels()[nextLevel];
+      this.levelIndex = nextLevel;
       this.tankWire.clear();
       this.worldMode = !!level.world;
       this.worldRect = level.world ? { x: 0, y: 0, w: level.world.w, h: level.world.h } : null;
@@ -3803,7 +3885,7 @@ export class GameScene extends Phaser.Scene {
       this.p1.setHp(keepHp.get('p1') ?? VERSUS_HP);
       this.enemy = undefined;
       this.crates = this.layout.crates.map((box) => ({ box, alive: true }));
-      this.resetPickups(snap.level);
+      this.resetPickups(this.levelIndex);
       this.particles = [];
       this.bullets = [];
       this.drawTerrain();
