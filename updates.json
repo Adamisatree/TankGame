@@ -1,8 +1,90 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-26T09:58:46.849Z",
+  "generatedAt": "2026-10-26T12:29:40.780Z",
   "releases": [
+    {
+      "tag": "v1.6.1",
+      "version": "1.6.1",
+      "name": "v1.6.1",
+      "notes": "## 坦克大作战 1.6.1 —— 多人联机：谁控制哪台坦克\n\n1.6.0 发布后又做了一轮联机审查。玩家报的四个症状——\n\n- 人多起来就有人**卡死动不了**；\n- 像**顶号**：自己按的键在开别人的坦克；\n- **基本只有 2 个人能同时动**；\n- **团队开不了局**（按钮还是灰的）。\n\n——其实是**一个根因 + 两个放大器**。这一版三个都修了，并且把「座位变动之后再发输入」\n这条从来没被测过的链路补进了自动化套件（smoke **+9**、lantest **+9**，两条都做了反向验证）。\n**没有新玩法，只有正确性和稳定性。**\n细节见 [`docs/v1.6.1-fixes.md`](https://github.com/Adamisatree/TankGame/blob/main/docs/v1.6.1-fixes.md)。\n\n### 1. 根因：输入按「槽位」路由，而不是按座位 id（🔴）\n\n房主的第 1 台远程坦克住在 `p2` 槽位、其余在 `extras`，而**槽位会换人**：有人退出时，\n`extras` 的第一台会被「晋升」进 `p2` 槽位；重连的访客也会被重新建到有空位的地方。\n\n旧代码里 `p2` 槽位只吃一个 `remoteInput` 字段，而这个字段只有 `from === 'p2'` 才写。于是槽位里\n一旦不是 p2 的坦克：\n\n| 现象 | 原因 |\n| --- | --- |\n| 晋升后的坦克**无人操作也会转**（幽灵） | 它在读 p2 离开时的**残留按键** |\n| 晋升那位**按什么都没反应**（卡死） | 他真按的键进了 `remoteInputs`，**没有任何代码读它** |\n| 重连的 p2 **在开别人的坦克**（顶号） | 他的输入写进 `remoteInput`，而槽位里坐着 p3 的坦克 |\n| **只有 2 个人能同时动** | 只有 p1 与「恰好坐在 p2 槽位的那一位」能动 |\n\n现在每台坦克永远读**自己 id** 的输入（槽位与 `extras` 共用同一个 `applyRemoteInput`），\n放哪个槽位都一样；座位离开时它的输入行一起清掉——座位号现在会被复用，残留按键不能跟过去。\n\n### 2. 放大器 1：座位号只增不减（🟠）\n\n座位号来自一个只增不减的计数器，房间清空时**没有复位**。所以同一个服务器进程里：\n第一局访客拿 p2 / p3 → 人走光 → 第二局新访客直接拿 **p4 / p5**，第一个远程座位开局第一帧就\n是冻结的（**不需要任何人掉线**）。号码还会一路漂到 p13/p14，连座位颜色都退化成同一个。\n\n现在总是分配**最小空闲座位号**（p2–p10）；掉线者的号码在 TTL 内**仍为他保留**，新玩家抢不走，\n本人重连一定回到原座。\n\n### 3. 放大器 2：空房间记着上一局的队伍数（🟡）\n\n上一局设过 4 队，下一局只有 3 个人 → 第 4 队永远是空的 → 服务端 `begin` 拒绝，\n客户端「开始对局」按钮同时置灰——**换人也没用，只能重启服务**。现在房间清空即复位\n队伍数 / 容量 / 模式 / 规则。单人和乱斗不受影响；`begin` 的「每队至少 1 人」校验**没有动**。\n\n### 验证\n\n`tsc` 0 错误；selftest 192、lantest **80**（+9）、multitest 40、maptest 103、updatetest 82、\nsmoke **156**（+9，运行时错误 0）；`build` / `build:single` / `verify:single` / 桌面端全部通过。\n\n新增断言在旧代码上**实测会红**：放回旧的路由逻辑，smoke 挂 4 条（晋升后残留按键 delta 2.05、\n晋升者左右都只往右 1.74/1.68、重连者自己 0.00、却把别人的坦克转了 1.48）；放回旧的服务端，\nlantest 挂 6 条（第二局座位 p13/p14、`teams=4`、团队局 refused）。换回新代码即全绿。\n\n顺带修掉一条与本版无关的假红：smoke 的「AI 开局保护期」原来用 `aiGraceUntil > now` 精确比较，\n机器忙时 Phaser 场景时钟大步跳跃，刚授予的保护期一眨眼就被判成「没有保护期」——已改为容差断言。\n\n### 下载\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.6.1-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.6.1-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.6.1-portable.exe` | Windows 免安装 |\n| `TankGame-1.6.1-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.6.1-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n> 局域网联机需要一端的桌面客户端当服务器；只想单机，双击 `portable.html` 即可。\n\n### 重要\n网络协议格式没有变化（仍是 v11），但应用版本变了，服务器的版本锁按版本号比对：\n**1.6.0 与 1.6.1 不能联机**，请和朋友一起更新。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.6.0...v1.6.1\n",
+      "publishedAt": "2026-10-26T12:27:34Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.6.1-arm64-setup.exe",
+          "size": 82787223,
+          "sha256": "de0f67f73bc5b10c1f90ec607ded9f8fd4ab2bd7ae119017c92342a5b6040b34",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.1-arm64.dmg",
+          "size": 96140471,
+          "sha256": "f0f04bcdf255d9ee7d68978cdb0d5d7dbc746520fb6b309a7b1ad84a2d127843",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.1-arm64.zip",
+          "size": 92612106,
+          "sha256": "5d65ce70b76b7b18bf4b1647112b243337dd4c9ee5ebdfd3f5ebd41ad95dd30a",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.1-portable.exe",
+          "size": 78591912,
+          "sha256": "464687b296f1929cd042e174936d834e690a77bf0058bd5622cebc73b71cc152",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.1-portable.html",
+          "size": 1711040,
+          "sha256": "0901f2742a4f5bc72f8012be53962a375a2ae2da2b9ad3457fd8cc49e3f4c05b",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.1-setup.exe",
+          "size": 161014219,
+          "sha256": "615cbdcdf7a627308b270de34210f2597ad1bbd04b19045dc9bf43e53fd18a69",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.1-x64-setup.exe",
+          "size": 78824447,
+          "sha256": "724059bafe0ac88b6a6d1d1aa38fb33d3f3034a244dfe54066047bd93564f362",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.6.1-x64.dmg",
+          "size": 102159733,
+          "sha256": "c08bbf672826fa61c43df8f680dc0da72ef8dbc5a0135ff40983de82d7f4346c",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.6.0",
       "version": "1.6.0",
