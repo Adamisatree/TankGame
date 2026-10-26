@@ -33,7 +33,7 @@ import {
 } from './rules';
 import { fetchLanInfo, LanClient } from '../net/LanClient';
 import { DEFAULT_LAN_PORT } from '../net/protocol';
-import type { NetEvent, Snapshot, TankInput } from '../net/protocol';
+import type { NetEvent, Snapshot, TankInput, TankSnapshot } from '../net/protocol';
 
 /** Drawing area, leaving room for the sketch HUD at the top and hints below. */
 /** Arenas per solo run. */
@@ -42,6 +42,15 @@ const SOLO_CAMPAIGN_LENGTH = 5;
 const IDLE_INPUT: TankInput = { turn: 0, drive: 0, aim: 0, fire: false };
 
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
+
+/**
+ * Every field a tank snapshot may carry, in one place so the diff cannot forget
+ * one. `id` is always sent; the rest are optional (v1.5.3 deltas).
+ */
+const TANK_WIRE_KEYS = [
+  'x', 'y', 'body', 'turret', 'hp', 'kills', 'deaths', 'team', 'damage', 'alive',
+  'shield', 'speed', 'rage', 'slow', 'rageShots', 'skillCd', 'heat', 'heatLocked',
+] as const;
 
 type Phase = 'lobby' | 'ready' | 'playing' | 'dying' | 'cleared' | 'over' | 'victory' | 'versusOver' | 'matchOver' | 'leaving';
 
@@ -161,11 +170,20 @@ export class GameScene extends Phaser.Scene {
   /** How many health rows were drawn last frame, so extras can be cleared. */
   private hpRowCount = 0;
   private heatSig = '';
-  private skillLabel1?: Phaser.GameObjects.Text;
-  private skillLabel2?: Phaser.GameObjects.Text;
+  /** Corner chip: your own skill name, its cooldown and a fill bar. */
+  private skillChip?: Phaser.GameObjects.Graphics;
+  private skillChipTexts: Phaser.GameObjects.Text[] = [];
+
 
   // Input: one Phaser Key per bound action, keyed by "<prefix>.<action>".
   private keys = new Map<string, Phaser.Input.Keyboard.Key>();
+  /**
+   * v1.5.3: the key codes this scene asked the browser to swallow. While a text
+   * field / slider / select has focus they are handed back, otherwise typing a
+   * password or a map name into the pause menu ate every W, A, S and D.
+   */
+  private capturedCodes: number[] = [];
+  private captureReleased = false;
 
   /**
    * Trigger cooldown, per tank.
@@ -186,6 +204,19 @@ export class GameScene extends Phaser.Scene {
   private netEvents: NetEvent[] = [];
   private netTimer = 0;
   private netSeq = 0;
+  /** v1.5.3 delta snapshots: force a full one, and what was last sent. */
+  private netKeyframe = true;
+  /** Guest side: the merged per-seat state the last snapshot described. */
+  private tankWire = new Map<string, Record<string, number>>();
+  private netLast = {
+    level: -1,
+    phase: '',
+    elapsed: -1,
+    score: -1,
+    crates: '',
+    pickups: '',
+    tanks: new Map<string, Record<string, number>>(),
+  };
   private snap: Snapshot | null = null;
   private snapAt = 0;
   private netBanner = '';
@@ -262,13 +293,49 @@ export class GameScene extends Phaser.Scene {
     this.keys.set('global.autoDodge', kb.addKey(b.global.autoDodge));
     // Escape always pauses, whatever the bindings say.
     this.keys.set('global.esc', kb.addKey('ESC'));
+
+    // Capture is what stops the page from scrolling on arrows / space, but it
+    // also means `preventDefault` on WASD — so it has to follow the focus.
+    this.capturedCodes = [...new Set([...this.keys.values()].map((key) => key.keyCode))];
+    this.captureReleased = false;
+    this.syncKeyCapture();
+  }
+
+  /** True while the player is typing into a DOM field instead of driving. */
+  private static typingInDom(): boolean {
+    const active = globalThis.document?.activeElement as HTMLElement | null;
+    if (!active) return false;
+    const tag = active.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || active.isContentEditable;
+  }
+
+  /**
+   * Hands the keyboard back to the DOM while a field has focus, and takes it
+   * again afterwards. Called every frame: `document.activeElement` is cheap and
+   * covers clicks, Tab and programmatic focus without extra listeners.
+   */
+  private syncKeyCapture(): void {
+    const keyboard = this.input?.keyboard;
+    if (!keyboard) return;
+    const typing = GameScene.typingInDom();
+    if (typing === this.captureReleased) return;
+    this.captureReleased = typing;
+    if (typing) keyboard.removeCapture(this.capturedCodes);
+    else {
+      keyboard.addCapture(this.capturedCodes);
+      // A key held down when the field lost focus must not stay "pressed".
+      for (const key of this.keys.values()) key.reset();
+    }
   }
 
   private keyDown(prefix: string, action: SeatAction): boolean {
+    // Typing in a DOM field is not driving: WASD belongs to the field.
+    if (this.captureReleased) return false;
     return this.keys.get(`${prefix}.${action}`)?.isDown ?? false;
   }
 
   private keyJustDown(prefix: string, action: SeatAction): boolean {
+    if (this.captureReleased) return false;
     const key = this.keys.get(`${prefix}.${action}`);
     return key ? Phaser.Input.Keyboard.JustDown(key) : false;
   }
@@ -303,10 +370,10 @@ export class GameScene extends Phaser.Scene {
     this.modeText.setAlpha(0.55);
     this.hintText = this.hud.text(GAME_W / 2, GAME_H - 18, '', 13, COLORS.ink);
     this.hintText.setAlpha(0.45);
-    this.skillLabel1 = this.hud.text(PLAY_RECT.x + 10, 64, '', 13, COLORS.ink, 'left');
-    this.skillLabel1.setAlpha(0.75);
-    this.skillLabel2 = this.hud.text(PLAY_RECT.x + PLAY_RECT.w - 10, 64, '', 13, COLORS.ink, 'right');
-    this.skillLabel2.setAlpha(0.75);
+    // The skill chip is its own layer: the HUD redraws only when something
+    // changed, but a cooldown counts down every frame.
+    this.skillChip = this.add.graphics().setDepth(42).setScrollFactor(0);
+    this.skillChipTexts = [];
     this.input.mouse?.disableContextMenu();
 
     this.score = 0;
@@ -930,8 +997,8 @@ export class GameScene extends Phaser.Scene {
       this.scoreText,
       this.modeText,
       this.hintText,
-      this.skillLabel1,
-      this.skillLabel2,
+      this.skillChip,
+      ...this.skillChipTexts,
       ...this.toastTexts,
       this.heatText,
       ...this.noticeLabels,
@@ -1138,6 +1205,9 @@ export class GameScene extends Phaser.Scene {
   ): void {
     this.roster = players;
     if (!this.lanMode) return;
+    // A seat joining or leaving changes what everyone has to be told, so the
+    // next snapshot is a full keyframe (v1.5.3 deltas).
+    this.requestKeyframe();
     const wanted = new Set(players.map((p) => p.id));
     // A seat that is back in the roster is not a departure any more: it may have
     // reconnected after the grace period, so it rejoins the running match.
@@ -1190,29 +1260,84 @@ export class GameScene extends Phaser.Scene {
     this.modeText.setText(this.modeLabel());
   }
 
-  /** Skill chip under each side's hearts: name + cooldown. */
-  private refreshSkillLabels(): void {
-    const now = this.time.now;
-    const paint = (label: Phaser.GameObjects.Text | undefined, tank: Tank | undefined, skill: SkillId): void => {
-      if (!label) return;
-      if (!tank) {
-        if (label.text !== '') label.setText('');
-        return;
-      }
-      const def = skillById(skill);
-      const left = Math.max(0, tank.skillReadyAt - now);
-      const text = left <= 0 ? `${def.name} · 就绪` : `${def.name} · ${(left / 1000).toFixed(1)}s`;
-      if (label.text !== text) label.setText(text);
-      label.setAlpha(left <= 0 ? 0.9 : 0.4);
-    };
+  /**
+   * v1.5.3: a summoner-skill chip in the top-right corner.
+   *
+   * Only the seats this machine actually drives are shown: your own seat in
+   * solo / LAN (a ten-player room must not print nine other people's cooldowns),
+   * and both pads in local versus, because both players sit at this screen.
+   */
+  private refreshSkillChip(): void {
+    const layer = this.skillChip;
+    if (!layer) return;
+    layer.clear();
 
-    if (this.lanMode && this.lanRole === 'guest') {
-      paint(this.skillLabel1, undefined, this.skillP2);
-      paint(this.skillLabel2, this.p2, this.skillP2);
+    const rows: { tank: Tank; label: string }[] = [];
+    if (settings.mode === 'versus') {
+      if (this.p1) rows.push({ tank: this.p1, label: 'P1' });
+      if (this.p2) rows.push({ tank: this.p2, label: 'P2' });
     } else {
-      paint(this.skillLabel1, this.p1, this.skillP1);
-      paint(this.skillLabel2, this.p2, this.skillP2);
+      const mine = this.localTank();
+      if (mine) rows.push({ tank: mine, label: '' });
     }
+
+    const now = this.time.now;
+    const w = 166;
+    const h = 26;
+    const right = PLAY_RECT.x + PLAY_RECT.w;
+    let used = 0;
+
+    rows.forEach((row, index) => {
+      const def = skillById(this.skillFor(row.tank));
+      const total = Math.max(1, def.cooldown * 1000);
+      const left = Math.max(0, row.tank.skillReadyAt - now);
+      const ready = left <= 0;
+      const frac = ready ? 1 : 1 - left / total;
+      const x = right - w;
+      const y = 16 + index * (h + 6);
+      const color = this.colorForSeat(row.tank.id, row.tank.team);
+
+      layer.fillStyle(COLORS.paper, 0.86);
+      layer.fillRect(x, y, w, h);
+      layer.lineStyle(1.4, COLORS.ink, ready ? 0.6 : 0.35);
+      layer.strokeRect(x, y, w, h);
+      // Readiness bar along the bottom edge of the chip.
+      layer.fillStyle(color, ready ? 0.55 : 0.28);
+      layer.fillRect(x + 1, y + h - 3, Math.max(0, (w - 2) * frac), 2);
+      // Skill-colour pip, so the three skills differ at a glance.
+      layer.fillStyle(color, ready ? 0.9 : 0.45);
+      layer.fillRect(x + 6, y + 7, 4, h - 16);
+
+      const nameText = this.skillChipTexts[index * 2] ?? this.makeChipText(x + 16, y + h / 2, 'left');
+      const timeText = this.skillChipTexts[index * 2 + 1] ?? this.makeChipText(x + w - 8, y + h / 2, 'right');
+      this.skillChipTexts[index * 2] = nameText;
+      this.skillChipTexts[index * 2 + 1] = timeText;
+      nameText.setPosition(x + 16, y + h / 2);
+      timeText.setPosition(x + w - 8, y + h / 2);
+
+      const name = `${row.label ? `${row.label} ` : ''}${def.name}`;
+      if (nameText.text !== name) nameText.setText(name);
+      const time = ready ? '就绪' : `${(left / 1000).toFixed(1)}s`;
+      if (timeText.text !== time) timeText.setText(time);
+      nameText.setAlpha(ready ? 0.92 : 0.55);
+      timeText.setAlpha(ready ? 0.92 : 0.55);
+      timeText.setColor(ready ? '#26221d' : '#8a8377');
+      used = index + 1;
+    });
+
+    // Freeze the unused slots from a previous mode instead of leaving them behind.
+    for (let i = used * 2; i < this.skillChipTexts.length; i += 1) {
+      const spare = this.skillChipTexts[i];
+      if (spare.text !== '') spare.setText('');
+    }
+  }
+
+  /** One lazily created, screen-pinned text for the skill chip. */
+  private makeChipText(x: number, y: number, align: 'left' | 'right'): Phaser.GameObjects.Text {
+    const text = this.hud.text(x, y, '', 13, COLORS.ink, align);
+    // Above the chip's own card (depth 42), below nothing else.
+    text.setDepth(43);
+    return text;
   }
 
   /** Picks the map chosen in the menu ('random' rolls a fresh one) and starts. */
@@ -1228,6 +1353,8 @@ export class GameScene extends Phaser.Scene {
 
   private loadLevel(index: number): void {
     this.levelIndex = index;
+    // New arena → the next snapshot must describe everything (v1.5.3 deltas).
+    this.requestKeyframe();
     // Every fresh arena starts with the full room: a seat that left the last
     // match may well be back in this one.
     this.goneSeats.clear();
@@ -1306,6 +1433,9 @@ export class GameScene extends Phaser.Scene {
 
   /** Called by the DOM overlay to restart with the current settings. */
   restartGame(): void {
+    // v1.5.3: 暂停 → 重新开始 used to leave `paused` set, so the overlay slid
+    // away and the arena stayed frozen — the classic "button does nothing".
+    this.paused = false;
     // Leaving LAN mode must actually drop the socket, not leave it half-open.
     if (!this.lanMode && this.lan) {
       this.lan.close();
@@ -1359,6 +1489,16 @@ export class GameScene extends Phaser.Scene {
     this.hudDirty = true;
     this.refreshHeaderText();
     this.showBanner(on ? '自动躲弹：开' : '自动躲弹：关', 0.9);
+  }
+
+  /** v1.5.3: pause-menu switch for the hit shake/flash (read live while on). */
+  setHitEffects(on: boolean): void {
+    settings.hitEffects = on;
+    if (!on) {
+      // Stop a shake/flash that is already running instead of letting it finish.
+      this.cameras.main.resetFX();
+    }
+    this.showBanner(on ? '受击特效：开' : '受击特效：关', 0.9);
   }
 
   /**
@@ -1796,16 +1936,22 @@ export class GameScene extends Phaser.Scene {
     if (this.leaving) return;
     const dt = Math.min(delta, 50) / 1000;
 
+    // Keyboard ownership follows the focused DOM element (text fields, sliders,
+    // selects). Without this, every key the game binds was swallowed by Phaser
+    // and could not be typed anywhere on the pause screen.
+    this.syncKeyCapture();
+
     const pauseKey = this.keys.get('global.pause')!;
-    if (Phaser.Input.Keyboard.JustDown(pauseKey) || Phaser.Input.Keyboard.JustDown(this.keys.get('global.esc')!)) {
+    const typing = this.captureReleased;
+    if (!typing && (Phaser.Input.Keyboard.JustDown(pauseKey) || Phaser.Input.Keyboard.JustDown(this.keys.get('global.esc')!))) {
       this.togglePause();
     }
     const muteKey = this.keys.get('global.mute')!;
-    if (muteKey && Phaser.Input.Keyboard.JustDown(muteKey)) {
+    if (!typing && muteKey && Phaser.Input.Keyboard.JustDown(muteKey)) {
       sound.setMuted(!sound.muted);
       this.showBanner(sound.muted ? '静音' : '开启声音', 0.8);
     }
-    if (!this.versus) {
+    if (!typing && !this.versus) {
       const autoKey = this.keys.get('global.autoDodge');
       if (autoKey && Phaser.Input.Keyboard.JustDown(autoKey)) this.setAutoDodge(!this.autoDodge);
     }
@@ -1897,7 +2043,7 @@ export class GameScene extends Phaser.Scene {
     this.followCamera(dt);
     this.refreshToasts(dt);
     this.drawFrame(time);
-    this.refreshSkillLabels();
+    this.refreshSkillChip();
     this.refreshNotice();
     for (const tank of this.tanks()) tank.sync(time);
   }
@@ -1910,7 +2056,9 @@ export class GameScene extends Phaser.Scene {
     if (this.leaving) return;
     this.leaving = true;
     if (this.lanMode) {
-      this.lan?.send({ t: 'surrender', by: this.lanRole === 'host' ? 'p1' : 'p2' });
+      // v1.5.3: name the seat that actually walked out (a guest used to always
+      // report itself as p2, so the result card blamed the wrong player).
+      this.lan?.send({ t: 'surrender', by: this.localSeatId() });
       this.lan?.close();
       this.lan = null;
     }
@@ -3109,8 +3257,14 @@ export class GameScene extends Phaser.Scene {
 
     if (!this.versus && victim.id !== 'p1') this.score += 150;
 
-    this.cameras.main.shake(self ? 150 : 120, self ? 0.006 : 0.004);
-    this.cameras.main.flash(90, 220, 200, 170);
+    // v1.5.3: only *your own* hull shakes the screen. A hit on somebody else
+    // used to flash the whole arena white, which read like you had been hit —
+    // and in a ten-player room that is a strobe light. The setting turns even
+    // your own shake/flash off.
+    if (victim === this.localTank() && settings.hitEffects) {
+      this.cameras.main.shake(self ? 150 : 120, self ? 0.006 : 0.004);
+      this.cameras.main.flash(90, 220, 200, 170);
+    }
     this.puff(victim.x, victim.y, victim.color, 10);
     this.ring(victim.x, victim.y, victim.color);
     this.netEvent('hit', victim.x, victim.y, { id: victim.id, color: victim.color });
@@ -3372,60 +3526,133 @@ export class GameScene extends Phaser.Scene {
     this.lan.sendSnapshot(this.buildSnapshot());
   }
 
+  /**
+   * One snapshot for the room.
+   *
+   * v1.5.3: a *delta* snapshot — only fields that changed since the last one are
+   * sent, except for a full keyframe every second (and right after anything
+   * structural: a new level, a seat joining, a rematch). Before this, ten tanks
+   * × eighteen fields went out thirty times a second, mostly repeating
+   * `"hp":100,"kills":0,"shield":0,…` at 60 kB/s per guest.
+   *
+   * Safety: WebSocket is ordered and reliable, so a delta can never arrive out
+   * of order or be lost; the keyframe means a guest that joined mid-match is at
+   * most one second away from the full truth.
+   */
   private buildSnapshot(): Snapshot {
     this.netSeq += 1;
     const events = this.netEvents;
     this.netEvents = [];
-    return {
+    const keyframe = this.netKeyframe || this.netSeq % 30 === 1;
+    this.netKeyframe = false;
+
+    const snap: Snapshot = {
       t: 'state',
       seq: this.netSeq,
-      level: this.levelIndex,
-      phase: this.phase,
-      // The host owns the clock; guests use this instead of counting their own,
-      // so both machines agree on when the time limit runs out.
-      elapsed: Math.round(this.matchElapsed * 100) / 100,
-      score: this.score,
-      crates: this.crates.map((c) => (c.alive ? 1 : 0)),
-      tanks: this.tanks()
-        .filter((t) => t.id !== 'enemy')
-        .map((t) => {
-          const left = (until: number): number => Math.max(0, Math.round(until - this.time.now));
-          return {
-            id: t.id,
-            x: Math.round(t.x * 10) / 10,
-            y: Math.round(t.y * 10) / 10,
-            body: Math.round(t.bodyAngle * 100) / 100,
-            turret: Math.round(t.turretAngle * 100) / 100,
-            hp: Math.round(t.hp),
-            kills: t.kills,
-            deaths: t.deaths,
-            team: t.team,
-            damage: t.damage,
-            alive: t.alive ? 1 : 0,
-            shield: left(t.shieldUntil),
-            speed: left(t.speedUntil),
-            rage: left(t.rageUntil),
-            slow: left(t.slowUntil),
-            rageShots: t.rageShots,
-            skillCd: left(t.skillReadyAt),
-            heat: Math.round(t.heat.heat),
-            heatLocked: t.heat.locked ? 1 : 0,
-          };
-        }),
-      bullets: this.bullets.map((b) => ({
-        x: Math.round(b.x * 10) / 10,
-        y: Math.round(b.y * 10) / 10,
-        vx: Math.round(b.vx),
-        vy: Math.round(b.vy),
-        owner: b.owner,
-        dmg: b.dmg,
-      })),
-      pickups: this.pickups.map((p) => ({
-        kind: p.kind,
-        respawn: Math.round(p.respawn * 10) / 10,
-      })),
+      tanks: [],
+      bullets: [],
       events,
     };
+    if (keyframe) snap.kf = 1;
+
+    // ---- match-wide scalars: only when they differ from what the room has.
+    if (keyframe || this.levelIndex !== this.netLast.level) {
+      snap.level = this.levelIndex;
+      this.netLast.level = this.levelIndex;
+    }
+    if (keyframe || this.phase !== this.netLast.phase) {
+      snap.phase = this.phase;
+      this.netLast.phase = this.phase;
+    }
+    const elapsed = Math.round(this.matchElapsed * 10) / 10;
+    if (keyframe || elapsed !== this.netLast.elapsed) {
+      snap.elapsed = elapsed;
+      this.netLast.elapsed = elapsed;
+    }
+    if (keyframe || this.score !== this.netLast.score) {
+      snap.score = this.score;
+      this.netLast.score = this.score;
+    }
+
+    // ---- crates: a 0/1 per crate is only worth its bytes when one broke.
+    const crates = this.crates.map((c) => (c.alive ? 1 : 0));
+    const crateSig = crates.join('');
+    if (keyframe || crateSig !== this.netLast.crates) {
+      snap.crates = crates;
+      this.netLast.crates = crateSig;
+    }
+
+    // ---- tanks: per-field diff against the last thing we sent for that seat.
+    const now = this.time.now;
+    for (const tank of this.tanks()) {
+      if (tank.id === 'enemy') continue;
+      const left = (until: number): number => Math.max(0, Math.round((until - now) / 100) * 100);
+      const full: Required<Omit<TankSnapshot, 'id'>> = {
+        x: Math.round(tank.x * 10) / 10,
+        y: Math.round(tank.y * 10) / 10,
+        body: Math.round(tank.bodyAngle * 100) / 100,
+        turret: Math.round(tank.turretAngle * 100) / 100,
+        hp: Math.round(tank.hp),
+        kills: tank.kills,
+        deaths: tank.deaths,
+        team: tank.team,
+        damage: tank.damage,
+        alive: tank.alive ? 1 : 0,
+        shield: left(tank.shieldUntil),
+        speed: left(tank.speedUntil),
+        rage: left(tank.rageUntil),
+        slow: left(tank.slowUntil),
+        rageShots: tank.rageShots,
+        skillCd: left(tank.skillReadyAt),
+        heat: Math.round(tank.heat.heat),
+        heatLocked: tank.heat.locked ? 1 : 0,
+      };
+      const previous = this.netLast.tanks.get(tank.id);
+      const row: Record<string, string | number> = { id: tank.id };
+      let sent = 0;
+      for (const key of TANK_WIRE_KEYS) {
+        const value = full[key];
+        if (keyframe || !previous || previous[key] !== value) {
+          row[key] = value;
+          sent += 1;
+        }
+      }
+      this.netLast.tanks.set(tank.id, full as unknown as Record<string, number>);
+      // A seat that has not moved a millimetre still has to be named, otherwise
+      // the guest cannot tell "unchanged" from "gone".
+      if (sent || keyframe) snap.tanks.push(row as unknown as TankSnapshot);
+    }
+    // Seats that left are simply absent; the roster message owns removals.
+
+    // ---- shells are all new every tick: no diff to make, just fewer digits.
+    snap.bullets = this.bullets.map((b) => ({
+      x: Math.round(b.x * 10) / 10,
+      y: Math.round(b.y * 10) / 10,
+      vx: Math.round(b.vx),
+      vy: Math.round(b.vy),
+      owner: b.owner,
+      // 1 is the default; only an empowered shell needs the field.
+      ...(b.dmg && b.dmg !== 1 ? { dmg: b.dmg } : {}),
+    }));
+
+    // ---- pickups: quantised to a tenth of a second, and only when they moved.
+    const pickups = this.pickups.map((p) => ({
+      kind: p.kind,
+      respawn: Math.round(p.respawn * 10) / 10,
+    }));
+    const pickupSig = pickups.map((p) => `${p.kind}${p.respawn}`).join('|');
+    if (keyframe || pickupSig !== this.netLast.pickups) {
+      snap.pickups = pickups;
+      this.netLast.pickups = pickupSig;
+    }
+
+    return snap;
+  }
+
+  /** Next snapshot is a full keyframe (level change, new seat, rematch). */
+  private requestKeyframe(): void {
+    this.netKeyframe = true;
+    this.netLast.tanks.clear();
   }
 
   /** Records an effect that the guest should also see/hear. */
@@ -3451,38 +3678,58 @@ export class GameScene extends Phaser.Scene {
     const age = Math.min(0.12, (this.time.now - this.snapAt) / 1000);
 
     // Tanks: smooth towards the authoritative transform.
+    //
+    // v1.5.3: the host sends deltas, so each row is merged into what this seat
+    // last received. A field that is missing simply keeps its previous value —
+    // the host re-sends everything once a second (and right after a level
+    // change or a new seat), so nothing can drift for long.
     const lerp = Math.min(1, dt * 18);
     for (const st of snap.tanks) {
       // v1.3: any seat, not just p1/p2 – the host tells us who is in the room.
-      const tank = this.byId(st.id) ?? (st.id === 'p1' ? this.p1 : this.addRemoteTank(st.id, st.team));
+      const tank = this.byId(st.id) ?? (st.id === 'p1' ? this.p1 : this.addRemoteTank(st.id, st.team ?? 0));
       if (!tank) continue;
-      tank.team = st.team;
-      tank.x += (st.x - tank.x) * lerp;
-      tank.y += (st.y - tank.y) * lerp;
-      tank.bodyAngle = angleLerp(tank.bodyAngle, st.body, lerp);
-      tank.turretAngle = angleLerp(tank.turretAngle, st.turret, lerp);
+      const cached = this.tankWire.get(st.id);
+      const state: Record<string, number> = cached
+        ? { ...cached }
+        : {
+            x: tank.x, y: tank.y, body: tank.bodyAngle, turret: tank.turretAngle,
+            hp: tank.hp, kills: tank.kills, deaths: tank.deaths, team: tank.team,
+            damage: tank.damage, alive: tank.alive ? 1 : 0,
+            shield: 0, speed: 0, rage: 0, slow: 0, rageShots: 0, skillCd: 0,
+            heat: tank.heat.heat, heatLocked: tank.heat.locked ? 1 : 0,
+          };
+      for (const [key, value] of Object.entries(st)) {
+        if (key !== 'id' && typeof value === 'number') state[key] = value;
+      }
+      this.tankWire.set(st.id, state);
+
+      tank.team = state.team;
+      tank.x += (state.x - tank.x) * lerp;
+      tank.y += (state.y - tank.y) * lerp;
+      tank.bodyAngle = angleLerp(tank.bodyAngle, state.body, lerp);
+      tank.turretAngle = angleLerp(tank.turretAngle, state.turret, lerp);
       tank.syncTurret();
       const now = this.time.now;
-      tank.shieldUntil = now + st.shield;
-      tank.speedUntil = now + st.speed;
-      tank.rageUntil = now + st.rage;
-      tank.slowUntil = now + st.slow;
-      tank.rageShots = st.rageShots;
-      tank.skillReadyAt = now + st.skillCd;
-      tank.setHp(st.hp);
-      if (tank.kills !== st.kills || tank.deaths !== st.deaths) {
+      tank.shieldUntil = now + state.shield;
+      tank.speedUntil = now + state.speed;
+      tank.rageUntil = now + state.rage;
+      tank.slowUntil = now + state.slow;
+      tank.rageShots = state.rageShots;
+      tank.skillReadyAt = now + state.skillCd;
+      if (tank.hp !== state.hp) tank.setHp(state.hp);
+      if (tank.kills !== state.kills || tank.deaths !== state.deaths) {
         // The scoreboard used to stay at 0 on every guest: the host sends these
         // numbers, nobody ever wrote them back.
-        tank.kills = st.kills;
-        tank.deaths = st.deaths;
+        tank.kills = state.kills;
+        tank.deaths = state.deaths;
         this.hudDirty = true;
       }
-      tank.heat = { heat: st.heat ?? 0, locked: st.heatLocked === 1 };
-      if (tank.damage !== st.damage) {
-        tank.damage = st.damage;
+      tank.heat = { heat: state.heat, locked: state.heatLocked === 1 };
+      if (tank.damage !== state.damage) {
+        tank.damage = state.damage;
         tank.redraw();
       }
-      if ((st.alive === 1) !== tank.alive) tank.setAlive(st.alive === 1, this.time.now);
+      if (state.alive === 1 !== tank.alive) tank.setAlive(state.alive === 1, this.time.now);
     }
 
     // Shells: draw from the snapshot, extrapolated by its age.
@@ -3501,11 +3748,11 @@ export class GameScene extends Phaser.Scene {
       trail: [],
     }));
 
-    if (this.score !== snap.score) {
+    if (typeof snap.score === 'number' && this.score !== snap.score) {
       this.score = snap.score;
       this.hudDirty = true;
     }
-    if (snap.phase !== this.phase && (snap.phase === 'versusOver' || snap.phase === 'playing')) {
+    if (typeof snap.phase === 'string' && snap.phase !== this.phase && (snap.phase === 'versusOver' || snap.phase === 'playing')) {
       this.phase = snap.phase as Phase;
       this.hudDirty = true;
     }
@@ -3532,7 +3779,7 @@ export class GameScene extends Phaser.Scene {
     this.snap = snap;
     this.snapAt = this.time.now;
 
-    if (snap.level !== this.levelIndex) {
+    if (typeof snap.level === 'number' && snap.level !== this.levelIndex) {
       // Level changed on the host – rebuild the arena locally. Every remote
       // tank is re-created from the snapshot that follows, so ten-player
       // rooms survive a map change too.
@@ -3540,6 +3787,7 @@ export class GameScene extends Phaser.Scene {
       for (const tank of this.tanks()) keepHp.set(tank.id, tank.hp);
       const level = levels()[snap.level];
       this.levelIndex = snap.level;
+      this.tankWire.clear();
       this.worldMode = !!level.world;
       this.worldRect = level.world ? { x: 0, y: 0, w: level.world.w, h: level.world.h } : null;
       this.layout = buildLayout(level, this.worldRect ?? PLAY_RECT);
@@ -3562,25 +3810,29 @@ export class GameScene extends Phaser.Scene {
       this.showBanner(level.name, 1.2);
     }
 
-    // Crates.
-    let cratesChanged = false;
-    snap.crates.forEach((alive, i) => {
-      const crate = this.crates[i];
-      if (crate && crate.alive !== (alive === 1)) {
-        crate.alive = alive === 1;
-        cratesChanged = true;
-      }
-    });
-    if (cratesChanged) this.drawCrates();
+    // Crates (v1.5.3: only sent when one changed).
+    if (snap.crates) {
+      let cratesChanged = false;
+      snap.crates.forEach((alive, i) => {
+        const crate = this.crates[i];
+        if (crate && crate.alive !== (alive === 1)) {
+          crate.alive = alive === 1;
+          cratesChanged = true;
+        }
+      });
+      if (cratesChanged) this.drawCrates();
+    }
 
     // Pickups: the host owns their kinds and respawn timers.
     if (snap.pickups) {
       snap.pickups.forEach((sp, i) => {
         const local = this.pickups[i];
         if (!local) return;
-        if (local.kind !== sp.kind) local.kind = sp.kind;
-        local.respawn = sp.respawn;
-        if (sp.respawn === 0 && local.pop < 1) local.pop = Math.min(1, local.pop + 0.15);
+        if (sp.kind && local.kind !== sp.kind) local.kind = sp.kind;
+        if (typeof sp.respawn === 'number') {
+          local.respawn = sp.respawn;
+          if (sp.respawn === 0 && local.pop < 1) local.pop = Math.min(1, local.pop + 0.15);
+        }
       });
     }
 
@@ -3592,7 +3844,10 @@ export class GameScene extends Phaser.Scene {
       } else if (ev.k === 'hit') {
         this.puff(ev.x, ev.y, ev.color ?? COLORS.danger, 8);
         this.ring(ev.x, ev.y, ev.color ?? COLORS.danger);
-        this.cameras.main.shake(100, 0.004);
+        // Same rule as the host: only a hit on your own seat moves the camera.
+        if (settings.hitEffects && ev.id && ev.id === this.localTank()?.id) {
+          this.cameras.main.shake(100, 0.004);
+        }
         sound.hit();
       } else if (ev.k === 'bounce') {
         this.impactSpark(ev.x, ev.y, 1, 0, ev.color ?? COLORS.player);

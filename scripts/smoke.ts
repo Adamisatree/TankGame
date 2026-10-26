@@ -495,12 +495,32 @@ await wait(700);
 check('the guest starts receiving snapshots', snapSeen().length > 0, `got ${snapSeen().length}`);
 
 const lastSnap = () => snapSeen()[snapSeen().length - 1];
-check('snapshots describe both tanks', (lastSnap()?.tanks?.length ?? 0) === 2, JSON.stringify(lastSnap()?.tanks?.length));
+// v1.5.3: snapshots are deltas, so a single message may name one seat; a
+// keyframe (every second) must still describe everybody in the room.
+const allSnapTanks = () => snapSeen().flatMap((m) => (m.tanks ?? []).map((t: { id: string }) => t.id));
+check('snapshots describe both tanks', new Set(allSnapTanks()).size === 2, JSON.stringify([...new Set(allSnapTanks())]));
+// v1.5.3: snapshots are deltas — a keyframe within the first second carries the
+// match-wide scalars, so look for them anywhere in the stream.
+const anySnap = (key: string): unknown => snapSeen().map((m) => m[key]).find((v) => v !== undefined);
 check(
   'snapshots carry health, phase and level',
-  typeof lastSnap()?.phase === 'string' && typeof lastSnap()?.level === 'number' && Array.isArray(lastSnap()?.crates),
-  JSON.stringify({ phase: lastSnap()?.phase, level: lastSnap()?.level })
+  typeof anySnap('phase') === 'string' && typeof anySnap('level') === 'number' && Array.isArray(anySnap('crates')),
+  JSON.stringify({ phase: anySnap('phase'), level: anySnap('level') })
 );
+// v1.5.3 delta snapshots: match-wide scalars ride on the keyframes only, which
+// is what makes the payload small — but a keyframe must always carry them.
+{
+  const msgs = snapSeen();
+  const keyframes = msgs.filter((m) => m.kf === 1);
+  const withPhase = msgs.filter((m) => m.phase !== undefined);
+  check('most snapshots are deltas', msgs.length > keyframes.length, `${withPhase.length}/${msgs.length} carried phase`);
+  check(
+    'every keyframe carries the match-wide fields',
+    keyframes.length > 0 &&
+      keyframes.every((m) => typeof m.phase === 'string' && typeof m.level === 'number' && Array.isArray(m.crates)),
+    `keyframes=${keyframes.length}`
+  );
+}
 
 // --- v1.5.1 netcode/rules regressions -------------------------------------
 const shadow = scene as unknown as Record<string, any>;
@@ -751,12 +771,16 @@ await wait(700);
 check('the host renders a tank per seat', heatProbe.tanks().length >= 3, `tanks=${heatProbe.tanks().length}`);
 check(
   'a third seat is named p3',
-  (lastSnap()?.tanks ?? []).some((t: { id: string }) => t.id === 'p3'),
-  JSON.stringify((lastSnap()?.tanks ?? []).map((t: { id: string }) => t.id))
+  allSnapTanks().includes('p3'),
+  JSON.stringify([...new Set(allSnapTanks())])
 );
+// Heat is private and always sent while it moves; on a keyframe nobody may be
+// missing it either.
+const keyframe = snapSeen().find((m) => m.kf === 1 && (m.tanks ?? []).length >= 2);
 check(
   'snapshots carry private heat and its lock',
-  (lastSnap()?.tanks ?? []).every((t: { heat?: number; heatLocked?: number }) => typeof t.heat === 'number' && typeof t.heatLocked === 'number')
+  !!keyframe && keyframe.tanks.every((t: { heat?: number; heatLocked?: number }) => typeof t.heat === 'number' && typeof t.heatLocked === 'number'),
+  JSON.stringify(keyframe?.tanks?.map((t: { heat?: number }) => t.heat))
 );
 guest2Msgs.length = 0;
 guest2.close();

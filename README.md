@@ -20,7 +20,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.5.2-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.5.3-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -33,12 +33,12 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.5.2-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.5.2-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.5.2-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.5.2-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.5.2-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.5.2-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.5.3-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.5.3-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.5.3-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.5.3-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.5.3-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.5.3-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.3/TankGame-1.5.3-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
@@ -68,7 +68,7 @@ npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
 
 ## 自动更新、换版本、镜像下载
 
-菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.5.2`）：
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.5.3`）：
 
 - **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
 - **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
@@ -199,12 +199,12 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 
 连续开火会攒**热量**：每发 +17、平时每秒散 12，打满 100 才锁炮（连续按住约 **12 发 / 8 秒**），过热后每秒散 70，**1.15 秒**就能解锁、再 1.6 秒完全冷却。**没打满之前开火完全不受限**，点射永远打得出去；这条热量条和倒计时只画在**你自己**的屏幕上，对手看不到——他们只会看到你突然哑火。
 
-## 内测调参（需要密码）
+## 内测调参
 
 所有手感数值都不再写死在代码里，而是集中在 `src/game/tuning.ts`，可以在游戏里直接改：
 
-- **入口**：菜单右下角的「内测」按钮，或随时按 **F9**（暂停中也能开）；
-- **密码**：默认 `tank2026`（`TUNING_PASSWORD`，改一行就能换），解锁状态记在本机；
+- **入口**：菜单右下角的「内测」按钮，或随时按 **F9**（暂停中也能开，暂停界面里也有设置）；
+- **没有密码**：1.5.3 起去掉了密码门，点开就能改，改完即时生效；
 - **能改**：射速、炮弹速度、**炮弹反弹次数**、**瞄准线显示几次反弹**、热量（每发/散热/解锁阈值）、正面·侧面·车尾伤害、狂暴倍率、车身速度与转向、复活等待与保护、闪现无敌、道具刷新与**开局冷却**；
 - **管理**：恢复默认 / 导出 `tankgame-tuning.json` / 导入 / 重新锁定；改动即时生效，非官方数值会在 HUD 上标注「内测参数 N 项」；
 - **联机**：房主的数值随房间配置一起广播，访客只读，两边物理完全一致。
@@ -218,7 +218,7 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
    访客点「准备」；
 3. 房主分配队伍：**队伍数可以在 2–6 之间增减**（`+ 加队` / `− 减队`），逐个把人放进红队/蓝队/青队…，
    或一键「自动分队」「补齐空队」；**开始前每支队伍至少要有 1 人**，否则开不了局；
-4. 房主在这里还能直接调**内测参数**（射速、热量、伤害、复活、道具…，需要密码），改完整间房同步；
+4. 房主在这里还能直接调**内测参数**（射速、热量、伤害、复活、道具…），改完整间房同步；
 5. 人齐且都准备后，房主点「开始对局」。
 
 对局中：**左侧一列是所有人的血条**（自己在最上面，右端是人头数，队伍模式标「N队」），
@@ -255,6 +255,22 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 - **随机地图先摇再广播**：以前房主和访客各摇各的，可能进不同的地图；
 - **再来一局不再重连**：房主重开时保留这条 socket（以前会重新建房，把全房间踢回房间界面）；
 - **访客的结算卡**上是「等房主再来一局」（重开由房主决定）。
+
+### 1.5.3 改了什么
+
+细节在 [`docs/v1.5.3-fixes.md`](docs/v1.5.3-fixes.md)：
+
+- **敌人掉血不再晃你的屏幕**：受击震屏 / 闪白只属于**你自己**，别人开打你的画面一动不动；
+  想连自己的也关掉，就在设置里把「受击特效」关掉（**暂停界面里也能改**，立刻生效）；
+- **技能 CD 在右上角**：一张小卡片写着技能名、`就绪` 或剩余秒数、底部进度条——
+  **只画你自己的**，联机里永远看不到别人的冷却；
+- **暂停里就有设置**：不用退回菜单，受击特效、自动躲弹都在暂停卡里；
+- **联机更省流量**：快照改成增量（协议 v10），只发变了的字段，每秒补一个关键帧兜底；
+  1.5.2 与 1.5.3 联机仍会被版本锁挡下，所以不会出现「一半新一半旧」；
+- **按钮不再「摁了没反应」**：暂停 → 重新开始不再留下冻结的战场，输入框里按回车不会误开局，
+  访客的灰按钮换成一句说明；
+- **内测面板不再吃按键**：焦点在输入框里时 WASD 属于输入框，离开就还给游戏；
+- **内测不再要密码**：点开就能改（这一版起仓库里也不再写任何口令）。
 
 ### 1.5.2 的紧急修复（今天就该更新）
 

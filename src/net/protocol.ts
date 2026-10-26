@@ -4,7 +4,7 @@
  * Bumped whenever the netcode changes shape. Two machines on different
  * versions refuse to play instead of silently desyncing.
  */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 /**
  * Hard cap on a transferred map blob. A 40×24 grid map is a few kilobytes, so
@@ -28,32 +28,42 @@ export interface TankInput {
   skill?: boolean;
 }
 
+/**
+ * One seat's state.
+ *
+ * v1.5.3: every field except `id` is optional. A snapshot only carries the
+ * fields that changed since the previous one (a full "keyframe" goes out every
+ * second and whenever the room changes), so a steady ten-player tick is a
+ * fraction of what it used to be. A receiver treats a missing field as "same as
+ * last time" — WebSocket is ordered and reliable, and the keyframe bounds any
+ * mistake to one second.
+ */
 export interface TankSnapshot {
   /** v1.3: p1…p10 – a room can hold ten players. */
   id: string;
-  x: number;
-  y: number;
-  body: number;
-  turret: number;
+  x?: number;
+  y?: number;
+  body?: number;
+  turret?: number;
   /** v1.3: health, not lives. */
-  hp: number;
-  kills: number;
-  deaths: number;
-  team: number;
-  damage: number;
-  alive: number;
+  hp?: number;
+  kills?: number;
+  deaths?: number;
+  team?: number;
+  damage?: number;
+  alive?: number;
   /** Milliseconds left on each effect (0 = inactive). */
-  shield: number;
-  speed: number;
-  rage: number;
-  slow: number;
+  shield?: number;
+  speed?: number;
+  rage?: number;
+  slow?: number;
   /** Shells left with double damage. */
-  rageShots: number;
+  rageShots?: number;
   /** Milliseconds until the skill is ready again. */
-  skillCd: number;
+  skillCd?: number;
   /** Barrel heat 0..100 and whether the gun is locked out. */
-  heat: number;
-  heatLocked: number;
+  heat?: number;
+  heatLocked?: number;
 }
 
 export interface BulletSnapshot {
@@ -68,9 +78,9 @@ export interface BulletSnapshot {
 
 /** Pickup state the guest needs to draw the arena identically. */
 export interface PickupSnapshot {
-  kind: 'health' | 'speed' | 'shield';
+  kind?: 'health' | 'speed' | 'shield';
   /** Seconds until it comes back; 0 = on the ground. */
-  respawn: number;
+  respawn?: number;
 }
 
 export type NetEventKind =
@@ -144,17 +154,24 @@ export interface MatchResultPayload {
 export interface Snapshot {
   t: 'state';
   seq: number;
-  level: number;
-  phase: string;
+  /** Present on a keyframe and whenever they changed (v1.5.3 deltas). */
+  level?: number;
+  phase?: string;
   /** Host's match clock in seconds, so a guest's top bar shows the same time. */
   elapsed?: number;
-  score: number;
-  crates: number[];
+  score?: number;
+  /** One 0/1 per crate; only sent when a crate changed (or on a keyframe). */
+  crates?: number[];
   tanks: TankSnapshot[];
   bullets: BulletSnapshot[];
-  /** One entry per authored pickup spot, in level order. */
-  pickups: PickupSnapshot[];
+  /**
+   * One entry per authored pickup spot, in level order. Only sent when a spot
+   * changed (or on a keyframe) — the kinds come from the shared map.
+   */
+  pickups?: PickupSnapshot[];
   events: NetEvent[];
+  /** Set on a full snapshot (every second / after any structural change). */
+  kf?: 1;
 }
 
 /**

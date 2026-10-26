@@ -74,6 +74,11 @@ export interface Settings {
   difficulty: Difficulty;
   /** Solo only: the hull dodges shells on its own, you keep the trigger. */
   autoDodge: boolean;
+  /**
+   * v1.5.3: shake + screen flash when *you* get hit. Off = no camera effect at
+   * all; damage on somebody else never shakes the screen anyway.
+   */
+  hitEffects: boolean;
   /** LAN: who this machine is in the match. */
   lanRole: 'host' | 'guest';
   /** LAN: host IP / URL. Empty = the page's own server. */
@@ -97,6 +102,7 @@ export const settings: Settings = {
   // The first version was too punishing, so the game now opens on the gentle preset.
   difficulty: 'easy',
   autoDodge: false,
+  hitEffects: true,
   lanRole: 'host',
   lanAddress: '',
   mapId: DEFAULT_LEVEL_ID,

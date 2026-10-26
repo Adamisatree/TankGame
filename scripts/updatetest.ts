@@ -435,9 +435,11 @@ const protocolSource = await readFile(new URL('../src/net/protocol.ts', import.m
 // so this asserts the floor instead of one exact number.
 const protocolVersion = Number(/PROTOCOL_VERSION\s*=\s*(\d+)/.exec(protocolSource)?.[1] ?? 0);
 check('protocol version is at least 3', protocolVersion >= 3, `got ${protocolVersion}`);
+// v1.5.3 made the snapshot fields optional (delta snapshots), so the check is
+// that both fields exist and a keyframe still declares them as numbers.
 check(
   'snapshots carry barrel heat in the protocol',
-  /heat:\s*number/.test(protocolSource) && /heatLocked:\s*number/.test(protocolSource)
+  /heat\?:\s*number/.test(protocolSource) && /heatLocked\?:\s*number/.test(protocolSource)
 );
 
 // ------------------------------------------------------------------ summary

@@ -249,7 +249,13 @@ const checks: [string, boolean, string?][] = [
   ['checking offline fails politely instead of throwing', updaterStatus.length > 0 && errors.length === updaterErrors, updaterStatus.slice(0, 80)],
   // v1.4: the internal tuning bench is reachable from the menu.
   ['the internal tuning panel is present', !!doc.querySelector('#tuning-panel')],
-  ['the tuning panel is locked until the passphrase is entered', !!doc.querySelector('#tune-pass')],
+  // v1.5.3 dropped the passphrase gate: the panel is simply open.
+  ['the tuning panel no longer asks for a passphrase', !doc.querySelector('#tune-pass')],
+  // v1.5.3: hit-effect switch, corner skill chip, and no password text anywhere.
+  ['the hit-effect toggle ships', html.includes('受击特效')],
+  ['the skill cooldown chip ships', html.includes('就绪') && html.includes('xs')],
+  ['no tuning passphrase is baked into the build', !/tank\d{4}/.test(html)],
+  ['the tuning panel opens on its own', !!doc.querySelector('#tuning-body')],
   ['the tuning panel exposes fire rate', !!doc.querySelector('[data-tune="fireCooldown"]')],
   ['the tuning panel exposes the aiming-line bounce knob', !!doc.querySelector('[data-tune="aimBounces"]')],
   ['the tuning panel exposes heat and damage knobs',

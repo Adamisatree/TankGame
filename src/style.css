@@ -1854,3 +1854,25 @@ a.chip.ghost {
   color: var(--muted);
   opacity: 0.85;
 }
+
+/* v1.5.3: "waiting for the host" is a note, not a dead button. */
+.wait-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.wait-host .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--player2);
+  flex: none;
+}
+
+/* The pause card's settings block sits above the key editor. */
+.overlay .setting-block {
+  margin: 4px 0 10px;
+}
