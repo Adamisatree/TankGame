@@ -318,12 +318,22 @@ await server.close();
 // --- v1.5.4: backpressure ----------------------------------------------------
 // A relay that never looks at `bufferedAmount` queues minutes of snapshots for a
 // client that stopped draining; it then replays them and can never catch up.
-// These use the *production* watermarks (64 KB / 1 MB) and a genuinely stalled
-// socket, so the numbers mean something; a healthy reader must never be touched
-// by somebody else's stall.
+//
+// The flood is *paced* (~2 MB/s, well above the real 30 Hz snapshot rate but
+// far below what a socket can drain): a healthy reader therefore never builds a
+// backlog, while a stalled one does. Dumping the same bytes in one tight loop
+// would back up even a healthy reader on Windows and prove nothing.
 console.log('\nbackpressure');
 {
-  const slow = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  // `slowBacklog` is raised so the hard cut cannot interrupt the skip phase; both
+  // levels are the same code path, only the number differs.
+  const slow = await createLanServer({
+    port: 0,
+    host: '127.0.0.1',
+    quiet: true,
+    coalesceBacklog: 64 * 1024,
+    slowBacklog: 6 * 1024 * 1024,
+  });
   const url = `ws://127.0.0.1:${slow.port}/ws`;
   const host = await open(url);
   host.send({ t: 'join', role: 'host' });
@@ -337,66 +347,90 @@ console.log('\nbackpressure');
   healthy.send({ t: 'join', role: 'guest', session: 'healthy-one' });
   await waitFor(() => healthy.messages.some((m) => m.t === 'joined'));
 
-  // Stop reading this socket entirely: the host's frames pile up in the server's
-  // send buffer exactly like they do for a stalled machine.
+  // Stop reading this socket entirely: frames pile up in the server's send
+  // buffer exactly like they do for a stalled machine.
   lagging.ws.pause();
 
-  // A socket only reports a backlog once the kernel's own buffers are full
-  // (several MB, and it autotunes), so the flood has to be comfortably bigger
-  // than that — but paced, so a healthy reader on any OS keeps its queue at 0.
-  const FRAMES = 700;
+  const pad = 'x'.repeat(30000);
+  const paced = async (from: number, count: number, keyframe: boolean): Promise<void> => {
+    for (let i = 0; i < count; i += 1) {
+      host.send({ t: 'state', seq: from + i, ...(keyframe ? { kf: 1 } : {}), tanks: [], bullets: [], events: [], pad });
+      // ~3.5 MB/s: far above the game's 30 Hz cadence, far below what any
+      // healthy reader needs in order to keep its own queue at zero.
+      await sleep(8);
+    }
+  };
+
+  // 600 × 30 KB ≈ 18 MB, which is more than any kernel buffer plus 64 KB.
+  const FRAMES = 600;
   const KEYFRAME = FRAMES + 1;
-  const pad = 'x'.repeat(15000);
-  for (let i = 1; i <= FRAMES; i += 1) {
-    host.send({ t: 'state', seq: i, tanks: [], bullets: [], events: [], pad });
-    if (i % 20 === 0) await sleep(4);
-  }
+  await paced(1, FRAMES, false);
   // The repair frame: a keyframe is never skipped.
   host.send({ t: 'state', seq: KEYFRAME, kf: 1, tanks: [], bullets: [], events: [], pad });
   await sleep(600);
 
   lagging.ws.resume();
-  await sleep(900);
+  await sleep(1200);
   const lagStates = lagging.messages.filter((m) => m.t === 'state');
   const lagDeltas = lagStates.filter((m) => m.kf !== 1).length;
   const healthyStates = healthy.messages.filter((m) => m.t === 'state');
-  check(
-    'a lagging guest skips backlogged deltas',
-    lagDeltas < FRAMES * 0.9,
-    `received ${lagDeltas}/${FRAMES} deltas`
-  );
+  const healthyDeltas = healthyStates.filter((m) => m.kf !== 1).length;
+  check('a lagging guest skips backlogged deltas', lagDeltas < FRAMES * 0.9, `received ${lagDeltas}/${FRAMES} deltas`);
   check('a lagging guest still receives the keyframe', lagStates.some((m) => m.kf === 1), `states=${lagStates.length}`);
   check(
     'a healthy guest is unaffected by a lagging one',
-    healthyStates.filter((m) => m.kf !== 1).length >= FRAMES * 0.9 &&
-      healthy.ws.readyState === healthy.ws.OPEN,
-    `received ${healthyStates.length}/${KEYFRAME}`
+    healthyDeltas === FRAMES && healthy.ws.readyState === healthy.ws.OPEN,
+    `received ${healthyDeltas}/${FRAMES} deltas`
   );
-
-  // Hopelessly behind: the queue is cut instead of growing forever, and the
-  // client's own reconnect (v1.5.4) then rebuilds it from a keyframe.
-  lagging.ws.pause();
-  let closed = false;
-  lagging.ws.once('close', () => {
-    closed = true;
-  });
-  // Only keyframes grow the queue once deltas are being skipped, so this is the
-  // flood that has to reach the hard watermark.
-  for (let i = 0; i < 800; i += 1) {
-    host.send({ t: 'state', seq: 5000 + i, kf: 1, tanks: [], bullets: [], events: [], pad });
-    if (i % 20 === 0) await sleep(4);
-  }
-  await sleep(300);
-  // A paused client only learns about the cut once it reads again.
-  lagging.ws.resume();
-  check('a hopelessly slow client is disconnected', await waitFor(() => closed, 6000));
-  check('the healthy guest is still connected afterwards', healthy.ws.readyState === healthy.ws.OPEN);
 
   const before = Date.now();
   await slow.close();
   check('closing the server is bounded', Date.now() - before < 3000, `${Date.now() - before}ms`);
   host.close();
   healthy.close();
+  lagging.close();
+}
+
+// The hard level: a queue that is hopeless is cut instead of growing forever,
+// and the client's own reconnect (v1.5.4) then rebuilds it from a keyframe.
+console.log('\nbackpressure · hard limit');
+{
+  const cut = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true, slowBacklog: 1024 * 1024 });
+  const url = `ws://127.0.0.1:${cut.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host' });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+  const lagging = await open(url);
+  lagging.send({ t: 'join', role: 'guest', session: 'stalled' });
+  await waitFor(() => lagging.messages.some((m) => m.t === 'joined'));
+  const watcher = await open(url);
+  watcher.send({ t: 'join', role: 'guest', session: 'watcher' });
+  await waitFor(() => watcher.messages.some((m) => m.t === 'joined'));
+  const stalledSeat = lagging.messages.find((m) => m.t === 'joined')?.id;
+
+  lagging.ws.pause();
+  const pad = 'x'.repeat(30000);
+  // The survivors are told about the cut, which is how we notice it while the
+  // stalled socket is not reading.
+  const dropped = () => watcher.messages.some((m) => m.t === 'peer' && m.state === 'left' && m.id === stalledSeat);
+  let sent = 0;
+  for (; sent < 900 && !dropped(); sent += 1) {
+    host.send({ t: 'state', seq: 9000 + sent, kf: 1, tanks: [], bullets: [], events: [], pad });
+    await sleep(6);
+  }
+  check('a hopelessly slow client is disconnected', await waitFor(dropped, 3000), `${sent} keyframes`);
+  let closed = false;
+  lagging.ws.once('close', () => {
+    closed = true;
+  });
+  // A paused client only learns about the cut once it reads again.
+  lagging.ws.resume();
+  check('the stalled socket really closes', await waitFor(() => closed, 4000));
+  check('the healthy guest is still connected afterwards', watcher.ws.readyState === watcher.ws.OPEN);
+
+  await cut.close();
+  host.close();
+  watcher.close();
 }
 
 const failed = checks.filter((c) => !c.ok);
