@@ -230,6 +230,8 @@ function countPlayers() {
  *              reconnect puts it back in its old seat and a keyframe rebuilds it.
  */
 const DEFAULT_LIMITS = { coalesceBacklog: 64 * 1024, slowBacklog: 1024 * 1024 };
+/** How often a socket that stopped answering pings is culled (see `createLanServer`). */
+const DEFAULT_HEARTBEAT_MS = 15_000;
 let limits = { ...DEFAULT_LIMITS };
 
 /** Bytes currently queued on this socket (ws exposes `bufferedAmount`). */
@@ -479,6 +481,7 @@ export function createLanServer({
   quiet = false,
   coalesceBacklog,
   slowBacklog,
+  heartbeatMs,
 } = {}) {
   // Tests inject tiny watermarks to trigger both levels deterministically.
   limits = {
@@ -486,6 +489,12 @@ export function createLanServer({
       Number.isFinite(coalesceBacklog) && coalesceBacklog > 0 ? coalesceBacklog : DEFAULT_LIMITS.coalesceBacklog,
     slowBacklog: Number.isFinite(slowBacklog) && slowBacklog > 0 ? slowBacklog : DEFAULT_LIMITS.slowBacklog,
   };
+  // v1.6 (review finding 3): the keep-alive probe is injectable. The backpressure
+  // tests stall a client's read channel on purpose — which also stops it answering
+  // pings — so a slow machine could have the heartbeat terminate that client mid
+  // test. Production keeps the 15 s default.
+  const heartbeatInterval =
+    Number.isFinite(heartbeatMs) && heartbeatMs > 0 ? heartbeatMs : DEFAULT_HEARTBEAT_MS;
   const server = createServer((req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405).end('method not allowed');
@@ -824,7 +833,7 @@ export function createLanServer({
       ws.isAlive = false;
       ws.ping();
     }
-  }, 15000);
+  }, heartbeatInterval);
   heartbeat.unref?.();
 
   // A failed listen on either listener must reject cleanly instead of throwing
@@ -870,25 +879,45 @@ export function createLanServer({
                 /* already gone */
               }
             }
-            // v1.5.4: an HTTP keep-alive connection (the game page itself) can
-            // hold `server.close()` open forever, which used to hang Electron's
-            // `before-quit` and the test process. Cut the idle sockets, and keep
-            // a hard 2 s ceiling in case a handshake is wedged.
+            // An HTTP keep-alive connection (the game page itself) can hold
+            // `server.close()` open forever, which used to hang Electron's
+            // `before-quit` and the test process: cut the idle sockets, then
+            // finish on the FIRST completion signal with a hard 2 s ceiling.
+            //
+            // v1.6 (review finding 5): the old shape waited only on the
+            // `wss.close → server.close` callback chain, so a wedged socket cost
+            // the full 2 s guard, and on Node < 18.2 that redundant
+            // `server.close()` threw *inside* the callback — silently killing the
+            // only completion path.
             let settled = false;
+            let guard = null;
             const finish = () => {
               if (settled) return;
               settled = true;
+              if (guard) clearTimeout(guard);
               done();
             };
-            const guard = setTimeout(finish, 2000);
+            guard = setTimeout(finish, 2000);
             guard.unref?.();
-            server.closeAllConnections?.();
-            wss.close(() => {
-              server.close(() => {
-                clearTimeout(guard);
-                finish();
+            // The HTTP server going down is enough; do not depend on the chain.
+            server.once('close', finish);
+            try {
+              server.closeAllConnections?.();
+            } catch {
+              /* an older runtime without the helper */
+            }
+            try {
+              wss.close(() => {
+                try {
+                  server.close(() => finish());
+                } catch {
+                  // Already closed: the 'close' listener above already fired.
+                  finish();
+                }
               });
-            });
+            } catch {
+              finish();
+            }
           }),
         stats: () => ({ players: countPlayers(), totalPlayers }),
       });

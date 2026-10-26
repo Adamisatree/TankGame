@@ -936,6 +936,32 @@ check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown 
   }
   await wait(60);
   check('a healthy stream takes the fast path', coalesceSeen.length === 6, `applied ${coalesceSeen.length}/6`);
+
+  // v1.6 (review finding 2): the window is measured on a monotonic clock, so a
+  // coarse or frozen wall clock cannot turn a live 30 Hz stream into a "burst".
+  // Windows' `Date.now()` ticks in ~15.6 ms steps — the same order as the 20 ms
+  // window. Pinning it to a constant simulates the worst case.
+  coalesceSeen.length = 0;
+  const realNow = Date.now;
+  let immediate = 0;
+  Date.now = () => 1_700_000_000_000;
+  try {
+    for (let i = 40; i < 46; i += 1) {
+      const before = coalesceSeen.length;
+      deliver(frame(i));
+      // The point is latency, not loss: a live frame must be applied on the
+      // spot. With a frozen clock every frame looked like a burst and took a
+      // 20 ms detour through the coalescer, which is the jitter a coarse
+      // Windows timer would cause in a real match.
+      if (coalesceSeen.length === before + 1) immediate += 1;
+      await wait(40);
+    }
+    await wait(60);
+  } finally {
+    Date.now = realNow;
+  }
+  check('a frozen wall clock does not delay a live stream', immediate === 6, `${immediate}/6 applied on arrival`);
+  check('no frame of a delayed stream is lost', coalesceSeen.length === 6, `applied ${coalesceSeen.length}/6`);
   coalescer.close();
 
   // (c) The real socket path still delivers frames end to end.
@@ -957,6 +983,44 @@ check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown 
   await wait(80);
   check('snapshots arrive over a real socket', liveSeen.length === 3, `applied ${liveSeen.length}/3`);
   live.close();
+
+  // (d) v1.6 (review finding 1): a control message handed to the client *while it
+  // is still dialling* must arrive once the socket opens. It used to be dropped
+  // by a `pending.length = 0` in `onopen`, which made 准备 / 开始对局 / 再来一局
+  // do nothing when pressed inside the reconnect window.
+  const received: any[] = [];
+  const hostSide = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  hostSide.on('connection', (socket: any) => {
+    socket.on('message', (raw: unknown) => {
+      try {
+        received.push(JSON.parse(String(raw)));
+      } catch {
+        /* ignore */
+      }
+    });
+  });
+  await new Promise<void>((resolve) => hostSide.once('listening', () => resolve()));
+  const hostAddr = hostSide.address();
+  const hostPort = typeof hostAddr === 'object' && hostAddr ? hostAddr.port : 0;
+  const dialing = new LanClient('host', `127.0.0.1:${hostPort}`, {});
+  dialing.connect();
+  // Still CONNECTING: this is the reconnect-window click.
+  dialing.send({ t: 'restart', level: 0 });
+  // The real lobby path (准备 in the room screen) goes through `setReady`.
+  dialing.setReady(true);
+  await wait(400);
+  check(
+    'a message queued mid-dial is delivered after the handshake',
+    received.some((m) => m.t === 'restart') && received.some((m) => m.t === 'ready'),
+    JSON.stringify(received.map((m) => m.t))
+  );
+
+  // ...and the queue is not replayed: a fresh dial starts empty.
+  received.length = 0;
+  dialing.close();
+  await wait(150);
+  check('a closed client does not keep a backlog', received.length === 0, JSON.stringify(received.map((m) => m.t)));
+  await new Promise<void>((resolve) => hostSide.close(() => resolve()));
   await new Promise<void>((resolve) => wss.close(() => resolve()));
 }
 

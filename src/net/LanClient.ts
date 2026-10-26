@@ -153,6 +153,12 @@ export class LanClient {
     this.clearRetry();
     this.closedByUser = false;
     this.setStatus('connecting');
+    // v1.6 (review finding 1): leftover frames belong to the *previous* socket,
+    // which is dead — drop them as this dial starts, not when it succeeds.
+    // Clearing in `onopen` instead threw away everything queued *during* this
+    // dial too (a 准备 click or 再来一局 in the 0.8–5 s retry window simply
+    // vanished), which made those buttons look dead until pressed again.
+    this.pending.length = 0;
     let ws: WebSocket;
     try {
       ws = new WebSocket(this.url);
@@ -164,8 +170,6 @@ export class LanClient {
 
     ws.onopen = () => {
       this.retry = 0;
-      // A frame queued from a previous socket belongs to a dead connection.
-      this.pending.length = 0;
       // The socket can already be closing here (the server went away between
       // the handshake and this callback); a throwing send would kill the loop.
       this.trySend(
@@ -189,7 +193,7 @@ export class LanClient {
         this.send({ t: 'config', ...this.matchConfig, tuning: this.tuning ?? undefined });
       }
       this.handlers.onLog?.(`已连接 ${this.url}`);
-      // Anything asked for while we were still dialling goes out now.
+      // Anything asked for while we were still dialling goes out now, in order.
       for (const message of this.pending.splice(0)) {
         this.trySend(ws, message);
       }
@@ -514,7 +518,12 @@ export class LanClient {
    * delta that was dropped).
    */
   private routeSnapshot(snap: Snapshot): void {
-    const now = Date.now();
+    // v1.6 (review finding 2): a monotonic clock. On Windows `Date.now()` can
+    // tick in ~15.6 ms steps, which is the same order as the 20 ms window — a
+    // real 30 Hz stream could then read as a burst (and be folded), or a burst
+    // as a live stream. `performance.now()` is sub-millisecond everywhere we
+    // run (browser, jsdom, Node) and never jumps when the system clock is set.
+    const now = LanClient.clock();
     const gap = now - this.lastSnapAt;
     this.lastSnapAt = now;
 
@@ -549,6 +558,12 @@ export class LanClient {
       this.snapTimer = null;
     }
     this.snapPending = null;
+  }
+
+  /** Monotonic milliseconds; falls back if a host has no `performance`. */
+  private static clock(): number {
+    const perf = globalThis.performance;
+    return typeof perf?.now === 'function' ? perf.now() : Date.now();
   }
 
   /** Exponential backoff: 0.8 s, 1.6 s, 3.2 s, then 5 s. */
