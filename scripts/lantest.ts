@@ -318,18 +318,12 @@ await server.close();
 // --- v1.5.4: backpressure ----------------------------------------------------
 // A relay that never looks at `bufferedAmount` queues minutes of snapshots for a
 // client that stopped draining; it then replays them and can never catch up.
-// The watermarks are injected tiny here so both levels fire deterministically
-// (the kernel only starts reporting a backlog once its own buffer is full, so
-// the flood is deliberately large).
+// These use the *production* watermarks (64 KB / 1 MB) and a genuinely stalled
+// socket, so the numbers mean something; a healthy reader must never be touched
+// by somebody else's stall.
 console.log('\nbackpressure');
 {
-  const slow = await createLanServer({
-    port: 0,
-    host: '127.0.0.1',
-    quiet: true,
-    coalesceBacklog: 4 * 1024,
-    slowBacklog: 512 * 1024,
-  });
+  const slow = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
   const url = `ws://127.0.0.1:${slow.port}/ws`;
   const host = await open(url);
   host.send({ t: 'join', role: 'host' });
@@ -343,34 +337,40 @@ console.log('\nbackpressure');
   healthy.send({ t: 'join', role: 'guest', session: 'healthy-one' });
   await waitFor(() => healthy.messages.some((m) => m.t === 'joined'));
 
-  // v1.5.4: stop reading this socket entirely, so the host's frames pile up in
-  // the server's send buffer exactly like they do for a stalled machine.
+  // Stop reading this socket entirely: the host's frames pile up in the server's
+  // send buffer exactly like they do for a stalled machine.
   lagging.ws.pause();
 
-  const DELTAS = 2000;
-  const pad = 'x'.repeat(7000);
-  for (let i = 1; i <= DELTAS; i += 1) {
+  // A socket only reports a backlog once the kernel's own buffers are full
+  // (several MB, and it autotunes), so the flood has to be comfortably bigger
+  // than that — but paced, so a healthy reader on any OS keeps its queue at 0.
+  const FRAMES = 700;
+  const KEYFRAME = FRAMES + 1;
+  const pad = 'x'.repeat(15000);
+  for (let i = 1; i <= FRAMES; i += 1) {
     host.send({ t: 'state', seq: i, tanks: [], bullets: [], events: [], pad });
-    if (i % 100 === 0) await sleep(4);
+    if (i % 20 === 0) await sleep(4);
   }
   // The repair frame: a keyframe is never skipped.
-  host.send({ t: 'state', seq: DELTAS + 1, kf: 1, tanks: [], bullets: [], events: [], pad });
-  await sleep(500);
+  host.send({ t: 'state', seq: KEYFRAME, kf: 1, tanks: [], bullets: [], events: [], pad });
+  await sleep(600);
 
   lagging.ws.resume();
-  await sleep(600);
+  await sleep(900);
   const lagStates = lagging.messages.filter((m) => m.t === 'state');
   const lagDeltas = lagStates.filter((m) => m.kf !== 1).length;
+  const healthyStates = healthy.messages.filter((m) => m.t === 'state');
   check(
     'a lagging guest skips backlogged deltas',
-    lagDeltas < DELTAS * 0.9,
-    `received ${lagDeltas}/${DELTAS} deltas`
+    lagDeltas < FRAMES * 0.9,
+    `received ${lagDeltas}/${FRAMES} deltas`
   );
   check('a lagging guest still receives the keyframe', lagStates.some((m) => m.kf === 1), `states=${lagStates.length}`);
   check(
     'a healthy guest is unaffected by a lagging one',
-    healthy.messages.filter((m) => m.t === 'state').length >= DELTAS * 0.9,
-    `received ${healthy.messages.filter((m) => m.t === 'state').length}/${DELTAS + 1}`
+    healthyStates.filter((m) => m.kf !== 1).length >= FRAMES * 0.9 &&
+      healthy.ws.readyState === healthy.ws.OPEN,
+    `received ${healthyStates.length}/${KEYFRAME}`
   );
 
   // Hopelessly behind: the queue is cut instead of growing forever, and the
@@ -380,14 +380,17 @@ console.log('\nbackpressure');
   lagging.ws.once('close', () => {
     closed = true;
   });
-  for (let i = 0; i < 1600; i += 1) {
+  // Only keyframes grow the queue once deltas are being skipped, so this is the
+  // flood that has to reach the hard watermark.
+  for (let i = 0; i < 800; i += 1) {
     host.send({ t: 'state', seq: 5000 + i, kf: 1, tanks: [], bullets: [], events: [], pad });
-    if (i % 100 === 0) await sleep(4);
+    if (i % 20 === 0) await sleep(4);
   }
   await sleep(300);
   // A paused client only learns about the cut once it reads again.
   lagging.ws.resume();
-  check('a hopelessly slow client is disconnected', await waitFor(() => closed, 5000));
+  check('a hopelessly slow client is disconnected', await waitFor(() => closed, 6000));
+  check('the healthy guest is still connected afterwards', healthy.ws.readyState === healthy.ws.OPEN);
 
   const before = Date.now();
   await slow.close();

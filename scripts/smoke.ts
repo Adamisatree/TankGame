@@ -288,7 +288,13 @@ const fireTimer = setInterval(() => {
   sawPlayerShell ||= poke.bullets.some((b) => b.owner === 'p1');
   sawEnemyShell ||= poke.bullets.some((b) => b.owner === 'enemy');
 }, 120);
-for (let i = 0; i < 40 && !(sawEnemyShell && sawPlayerShell); i++) await wait(100);
+// Sample on every tick as well: a shell can be born and die between two 120 ms
+// fire ticks, and on a loaded machine that made this check flaky.
+for (let i = 0; i < 80 && !(sawEnemyShell && sawPlayerShell); i++) {
+  await wait(100);
+  sawPlayerShell ||= poke.bullets.some((b) => b.owner === 'p1');
+  sawEnemyShell ||= poke.bullets.some((b) => b.owner === 'enemy');
+}
 clearInterval(fireTimer);
 check('player shells exist', sawPlayerShell);
 check('the AI fires shells', sawEnemyShell);
@@ -865,54 +871,92 @@ check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown 
   }
   check('sending on a closed client never throws', threw === null, threw ?? '');
 
-  // (b) A burst of frames is collapsed to the newest one; a normal 30 Hz stream
-  // goes straight through. Driven through a real socket, like the game.
+  // (b) A burst of frames is collapsed to the newest one, and a keyframe is
+  // never dropped in favour of an older delta. Driven through the real delivery
+  // point, one tick at a time, so the result does not depend on how fast this
+  // machine happens to be.
+  const coalesceSeen: any[] = [];
+  const coalescer = new LanClient('guest', '127.0.0.1:1', {
+    onSnapshot: (snap) => coalesceSeen.push(snap),
+  });
+  const deliver = (snap: any): void =>
+    (coalescer as unknown as { routeSnapshot: (s: any) => void }).routeSnapshot(snap);
+  const frame = (seq: number, kf?: 1): any => ({
+    t: 'state',
+    seq,
+    tanks: [],
+    bullets: [],
+    events: [],
+    ...(kf ? { kf } : {}),
+  });
+
+  // Warm-up frame: the very first one has no previous arrival to compare with,
+  // so it always takes the fast path.
+  deliver(frame(0));
+  await wait(60);
+  check('the first frame is applied immediately', coalesceSeen.length === 1, `${coalesceSeen.length}`);
+
+  // Same millisecond: a backlog, which is what a throttled tab sees on resume.
+  // The first frame after a quiet period legitimately goes straight through;
+  // everything queued behind it must collapse into one.
+  coalesceSeen.length = 0;
+  for (let i = 1; i <= 20; i += 1) deliver(frame(i));
+  await wait(60);
+  check('a burst of snapshots is coalesced', coalesceSeen.length <= 2, `applied ${coalesceSeen.length}/20`);
+  check(
+    'the newest frame of a burst wins',
+    coalesceSeen[coalesceSeen.length - 1]?.seq === 20,
+    JSON.stringify(coalesceSeen.map((m) => m.seq))
+  );
+  // The middle of the burst must never be replayed: that backlog is exactly
+  // what used to leave a guest animating towards where the host was seconds ago.
+  const replayed = coalesceSeen.filter((m) => m.seq > 1 && m.seq < 20);
+  check('the middle of a burst is dropped, not replayed', replayed.length === 0, JSON.stringify(replayed.map((m) => m.seq)));
+
+  // A keyframe must survive a burst: it is the only thing that repairs the
+  // deltas that were skipped.
+  await wait(40);
+  coalesceSeen.length = 0;
+  deliver(frame(30)); // gap > 20 ms → straight through
+  deliver(frame(31, 1)); // same tick → held as pending
+  deliver(frame(32)); // older-than-keyframe delta → must not replace it
+  await wait(60);
+  const survived = coalesceSeen.map((m) => `${m.seq}${m.kf ? ':kf' : ''}`);
+  check(
+    'a keyframe survives a burst',
+    survived.includes('31:kf') && !survived.includes('32'),
+    JSON.stringify(survived)
+  );
+
+  // Normal cadence (30 Hz): nothing is delayed or dropped.
+  coalesceSeen.length = 0;
+  for (let i = 30; i < 36; i += 1) {
+    deliver(frame(i));
+    await wait(40);
+  }
+  await wait(60);
+  check('a healthy stream takes the fast path', coalesceSeen.length === 6, `applied ${coalesceSeen.length}/6`);
+  coalescer.close();
+
+  // (c) The real socket path still delivers frames end to end.
   const { WebSocketServer } = await import('ws');
   const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise<void>((resolve) => wss.once('listening', () => resolve()));
   const addr = wss.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
-  wss.on('connection', (socket: any) => {
-    socket.on('message', () => {
-      /* the join frame; ignored here */
-    });
-  });
-
-  const seen: any[] = [];
-  const client = new LanClient('guest', `127.0.0.1:${port}`, {
-    onSnapshot: (snap) => seen.push(snap),
-  });
-  client.connect();
-  const sendToClient = (payload: any): void => {
-    for (const socket of wss.clients) socket.send(JSON.stringify(payload));
-  };
-  await wait(200);
-
-  // A flood in one go: this is what a throttled tab sees on resume.
-  for (let i = 1; i <= 20; i += 1) {
-    sendToClient({ t: 'state', seq: i, tanks: [], bullets: [], events: [] });
+  const liveSeen: any[] = [];
+  const live = new LanClient('guest', `127.0.0.1:${port}`, { onSnapshot: (snap) => liveSeen.push(snap) });
+  live.connect();
+  await wait(250);
+  for (let i = 1; i <= 3; i += 1) {
+    for (const socket of wss.clients) {
+      socket.send(JSON.stringify({ t: 'state', seq: i, tanks: [], bullets: [], events: [] }));
+    }
+    await wait(60);
   }
-  await wait(150);
-  check('a burst of snapshots is coalesced', seen.length > 0 && seen.length <= 3, `applied ${seen.length}/20`);
-  check('the newest frame of a burst wins', seen[seen.length - 1]?.seq === 20, `seq=${seen[seen.length - 1]?.seq}`);
-
-  // A keyframe must never be dropped in favour of a later, older delta.
-  seen.length = 0;
-  sendToClient({ t: 'state', seq: 21, kf: 1, tanks: [], bullets: [], events: [] });
-  sendToClient({ t: 'state', seq: 22, tanks: [], bullets: [], events: [] });
-  await wait(120);
-  check('a keyframe survives a burst', seen.some((m) => m.kf === 1), JSON.stringify(seen.map((m) => `${m.seq}${m.kf ? ':kf' : ''}`)));
-
-  // Normal cadence: every frame is applied as it arrives.
-  seen.length = 0;
-  for (let i = 30; i < 36; i += 1) {
-    sendToClient({ t: 'state', seq: i, tanks: [], bullets: [], events: [] });
-    await wait(45);
-  }
-  await wait(60);
-  check('a healthy stream takes the fast path', seen.filter((m) => m.seq >= 30).length === 6, `applied ${seen.length}/6`);
-
-  client.close();
+  await wait(80);
+  check('snapshots arrive over a real socket', liveSeen.length === 3, `applied ${liveSeen.length}/3`);
+  live.close();
   await new Promise<void>((resolve) => wss.close(() => resolve()));
 }
 
