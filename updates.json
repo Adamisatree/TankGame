@@ -1,13 +1,13 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-26T05:06:17.442Z",
+  "generatedAt": "2026-10-26T05:07:06.569Z",
   "releases": [
     {
       "tag": "v1.5.2",
       "version": "1.5.2",
       "name": "v1.5.2",
-      "notes": "## What's Changed\n* docs: 证书 / 签名 / 安装包问题排查（含 Q&A） by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/20\n* v1.5.2 · 退出不再毁局 · 乱斗可开局 · 多人团队出生点 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/21\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.5.1...v1.5.2",
+      "notes": "## 紧急修复（v1.5.2）\n\n### 1. 一个人退出不再毁掉整局\n- 走掉的那一席：坦克撤离、清掉复活排队 / 输入 / 开火冷却，弹一次「**P3 退出了游戏**」，**其余人继续打**。\n- 只剩一个人（团队模式：只剩一支队伍）时才收尾 —— 结果卡「你赢了」，原因 `left`。\n- 房主自己退出：客机看到「房主离开了房间，这一局作废」，不再卡在半局。\n- 倒计时阶段走人也一样处理；对局中不再插队弹「等待对手加入…」。\n\n### 2. 乱斗（FFA）终于能开局\n「开始对局」原来按「有没有空队伍」置灰，可乱斗里所有人都在 0 队、其余队伍永远为空 —— 按钮一直是灰的。\n现在只有**团队模式**才检查空队伍（规则抽成可测的 `roomStartBlockers()`）。\n\n### 3. 多人团队模式开局卡死\n出生点只有 4–6 个，超出的座位全落在同一坐标（10 人房实测 p3–p7 全部 `640,615`），十台坦克叠成一格、互相推回去，看着就是卡死。\n- 出生点现在按车身大小向外一圈圈找空位，**复活**也走同一套；\n- 完全重合的两台坦克终于能被分开（以前算不出分离方向）。\n\n### 验证\n- 6 个**真客户端**（1 房主 + 5 客机）：每台 6 台坦克、稳定 60 fps、0 运行时错误；10 座真机探针 10 个不同出生点。\n- 退出流程：走 1 人 → 仍在进行；走光一队 → `reason: 'left'`，`winners: ['p1','p3']`。\n- `smoke` 131/131（新增 16 项）、`selftest` 193、`lantest` 63、`maptest` 103、`updatetest` 82、`desktop` 7、`build` + 单文件包全绿。\n\n细节：[`docs/v1.5.2-fixes.md`](https://github.com/Adamisatree/TankGame/blob/main/docs/v1.5.2-fixes.md)\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.5.1...v1.5.2",
       "publishedAt": "2026-10-26T05:06:03Z",
       "prerelease": false,
       "assets": [
