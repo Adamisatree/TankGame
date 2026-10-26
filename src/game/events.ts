@@ -60,7 +60,7 @@ export type OverlayState =
   /** LAN match ended: kills/time, with the full public scoreboard. */
   | {
       kind: 'matchOver';
-      reason: 'kills' | 'time' | 'surrender';
+      reason: 'kills' | 'time' | 'surrender' | 'left' | 'host-left';
       scoreboard: { id: string; name: string; team: number; kills: number; deaths: number; hp: number }[];
       winners: string[];
       draw: boolean;

@@ -121,10 +121,18 @@ export interface ResultRow {
  * The host's verdict, sent once when a match ends. Guests do not re-run the
  * win check themselves: two machines must never disagree about who won.
  */
+/**
+ * Why a match ended.
+ *
+ * `left` means "everybody else walked out, this is what is left"; `host-left`
+ * means the referee itself is gone, so there is no match to continue.
+ */
+export type MatchEndReason = 'kills' | 'time' | 'surrender' | 'left' | 'host-left';
+
 export interface MatchResultPayload {
   winners: string[];
   draw: boolean;
-  reason: 'kills' | 'time' | 'surrender';
+  reason: MatchEndReason;
   scoreboard: ResultRow[];
   elapsed: number;
   mode: 'ffa' | 'team';

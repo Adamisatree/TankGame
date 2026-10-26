@@ -901,6 +901,9 @@ check(
   const { OVERLAY_EVENT, MATCH_LEFT_EVENT } = await import('../src/game/events');
   const overlays: any[] = [];
   game.events.on(OVERLAY_EVENT, (state: any) => overlays.push(state));
+  const overlayReset = (): void => {
+    overlays.length = 0;
+  };
   let leftEvents = 0;
   game.events.on(MATCH_LEFT_EVENT, () => {
     leftEvents += 1;
@@ -937,7 +940,7 @@ check(
 
   // Leaving the room in the lobby must not look like a surrender.
   overlays.length = 0;
-  (room as unknown as { handleSurrender: (by: string) => void }).handleSurrender('p2');
+  (room as unknown as { seatLeft: (by: string) => void }).seatLeft('p2');
   await wait(150);
   check('a lobby exit is not treated as a surrender', !overlays.some((o) => o.kind === 'matchOver'), JSON.stringify(overlays.map((o) => o.kind)));
 
@@ -1013,6 +1016,20 @@ check(
     JSON.stringify(overlays.map((o) => o.kind))
   );
 
+  // --- v1.5.2: a seat leaving no longer voids the match. The last player left
+  // standing is told they won, and the card explains why.
+  overlayReset();
+  poke.restartGame();
+  await wait(900);
+  peer.send(JSON.stringify({ t: 'leave' }));
+  await wait(5200);
+  const lastCard = [...overlays].reverse().find((o) => o.kind === 'matchOver');
+  check('a seat walking out decides the match', !!lastCard, JSON.stringify(overlays.map((o) => o.kind)));
+  check('the end reason is a departure, not a surrender', lastCard?.reason === 'left', `${lastCard?.reason}`);
+  check('the survivor is told they won', lastCard?.verdict === 'win', `${lastCard?.verdict}`);
+  check('the survivor is named as the winner', JSON.stringify(lastCard?.winners ?? []) === '["p1"]', JSON.stringify(lastCard?.winners));
+  check('the match is not left hanging', room.phase === 'matchOver' && room.matchOver === true, room.phase);
+
   peer.close();
   lanServer2.close();
   await wait(300);
@@ -1072,6 +1089,45 @@ check(
     'B1: kills-only mode ignores the clock',
     evaluateMatch(lines, { ...DEFAULT_MATCH, winCondition: 'kills', killTarget: 5, timeLimit: 1 }, 999).kind === 'running'
   );
+}
+
+// --- v1.5.2: the lobby start gate (乱斗 must always be startable) and spread spawns.
+{
+  const { roomStartBlockers, chooseRespawn } = await import('../src/game/rules');
+  const ffa = roomStartBlockers({ mode: 'ffa', roster: [{ team: 0 }, { team: 0 }], teams: 2 });
+  check('B2: a 乱斗 room is never blocked by empty teams', ffa.emptyTeams.length === 0, JSON.stringify(ffa));
+  const teamEmpty = roomStartBlockers({ mode: 'team', roster: [{ team: 0 }], teams: 2 });
+  check('B2: an empty team still blocks 团队模式', teamEmpty.emptyTeams.join(',') === '1', JSON.stringify(teamEmpty));
+  const teamFull = roomStartBlockers({ mode: 'team', roster: [{ team: 0 }, { team: 1 }, { team: 2 }], teams: 3 });
+  check('B2: three filled teams may start', teamFull.emptyTeams.length === 0, JSON.stringify(teamFull));
+  check(
+    'B2: a custom map still travelling blocks the start',
+    roomStartBlockers({ mode: 'ffa', roster: [], teams: 2, mapNeedsSync: true }).mapPending === true
+  );
+
+  // Six seats, four spawn points: the extra seats must not pile onto a taken point.
+  const spawns = [
+    { id: 0, x: 100, y: 100, angle: 0 },
+    { id: 1, x: 600, y: 640, angle: 0 },
+    { id: 2, x: 640, y: 200, angle: 0 },
+    { id: 3, x: 500, y: 300, angle: 0 },
+  ];
+  const taken = new Map<number, number>();
+  const picks: { x: number; y: number }[] = [];
+  for (let seat = 0; seat < 6; seat += 1) {
+    const used = new Set(picks.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`));
+    const free = chooseRespawn({
+      spawns,
+      players: picks.map((p) => ({ x: p.x, y: p.y, team: 0, alive: true })),
+      team: 0,
+      mode: 'ffa',
+      isFree: (x, y) => !used.has(`${Math.round(x)},${Math.round(y)}`),
+    });
+    check(`B2: seat ${seat + 1} still gets a spawn point`, !!free);
+    if (free) picks.push({ x: free.x, y: free.y });
+    taken.set(seat, free?.id ?? -1);
+  }
+  check('B2: chooseRespawn respects the isFree hint', picks.length === 6, JSON.stringify(taken.get(0)));
 }
 
 console.log('');

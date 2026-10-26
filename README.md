@@ -20,7 +20,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.5.1-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.5.2-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -33,12 +33,12 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.5.1-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.5.1-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.5.1-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.5.1-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.5.1-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.5.1-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.1/TankGame-1.5.1-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.5.2-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.5.2-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.5.2-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.5.2-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.5.2-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.5.2-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.5.2/TankGame-1.5.2-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
@@ -68,7 +68,7 @@ npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
 
 ## 自动更新、换版本、镜像下载
 
-菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.5.1`）：
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.5.2`）：
 
 - **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
 - **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
@@ -106,7 +106,7 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 
 输入框做了处理：**中文输入法打出来的「192。168。1。10」会自动变成「192.168.1.10」**，全角数字也会转成半角，粘贴整句话只会保留地址部分——之前那种「打不出点」的问题不会再出现。
 
-**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.5.1，你是 1.5.0。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
+**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.5.2，你是 1.5.1。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
 
 技术上是**房主权威**：房主的机器跑物理、算道具、判命中，每秒 30 次把状态推给对方，对方只上传操作意图。所以两边看到的结果一定一致，也不怕对方改内存。
 
@@ -255,6 +255,20 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 - **随机地图先摇再广播**：以前房主和访客各摇各的，可能进不同的地图；
 - **再来一局不再重连**：房主重开时保留这条 socket（以前会重新建房，把全房间踢回房间界面）；
 - **访客的结算卡**上是「等房主再来一局」（重开由房主决定）。
+
+### 1.5.2 的紧急修复（今天就该更新）
+
+细节在 [`docs/v1.5.2-fixes.md`](docs/v1.5.2-fixes.md)：
+
+- **一个人退出不再毁掉整局**：以前任何人走掉，房主直接判「投降」把**所有人**结算掉。
+  现在只处理走掉的那一席——弹一次「**P3 退出了游戏**」，他的坦克从场上撤掉，其他人接着打；
+  只剩一个人（团队模式：只剩一支队伍）时才收尾，判他「你赢了」。
+  房主自己退出时，客机会看到「房主离开了房间，这一局作废」，不再卡在半局。
+- **乱斗终于能开局**：「开始对局」按钮原来是按「有没有空队伍」置灰的，可乱斗里所有人都在 0 队，
+  其余队伍永远是空的——于是按钮一直是灰的。现在只有团队模式才看空队伍，乱斗点下去就开。
+- **多人团队开局不再卡死**：出生点只有 4～6 个，超出的座位全都落在**同一个坐标**上，
+  十台坦克叠成一格、互相推回去，看起来就是开局卡死。现在出生点会按车身大小一圈圈向外找空位，
+  复活也走同一套；完全重合的两台坦克也终于能被分开（以前这种情况算不出分离方向）。
 
 ### 1.5.1 的修复
 
