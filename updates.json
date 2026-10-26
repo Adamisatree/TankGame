@@ -1,8 +1,90 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-26T08:59:54.135Z",
+  "generatedAt": "2026-10-26T09:57:09.971Z",
   "releases": [
+    {
+      "tag": "v1.6.0",
+      "version": "1.6.0",
+      "name": "v1.6.0",
+      "notes": "## What's Changed\n* chore: updates.json 指向 v1.5.4 的发布说明 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/30\n* v1.6.0：代码审查整改（5 条发现全部修复） by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/31\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.5.4...v1.6.0",
+      "publishedAt": "2026-10-26T09:56:58Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.6.0-arm64-setup.exe",
+          "size": 82784745,
+          "sha256": "5b9f4a2b67c647c02a1cf92d1fa4b8fd4ce00845cf475b6585491c63c92f9716",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.0-arm64.dmg",
+          "size": 96133839,
+          "sha256": "c9036d45724ffa6f96f30e9659fccf8e279d8f14f1c98a57b6518c2eaf5e7ecd",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.0-arm64.zip",
+          "size": 92609375,
+          "sha256": "e596a72c1883f505c1ab01ab221580ee2936ba29488210f4374fd54989894e49",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.0-portable.exe",
+          "size": 78589410,
+          "sha256": "aed3bcaa54c327c758c90ab3374446f73a2122eb47305b4c6d18e89832fb7729",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.0-portable.html",
+          "size": 1711209,
+          "sha256": "79e667aa31a3d73650d84eaab25d5360cc207f971b453fc2aed009340d0a4935",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.0-setup.exe",
+          "size": 161009253,
+          "sha256": "ac57405d5f0a4e324bda4b66679d24920a9ef4ed238409c218b485012ba98ab3",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.0-x64-setup.exe",
+          "size": 78821924,
+          "sha256": "c822fbdadecf8889b7b95fa477dd9e4faa34fdc57754688b91a39593e6a2fa3d",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.6.0-x64.dmg",
+          "size": 102154394,
+          "sha256": "df15644b47af52e4ddb464cba02c48e0f8991e585083f044299e9f7f587a0ac9",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.5.4",
       "version": "1.5.4",
