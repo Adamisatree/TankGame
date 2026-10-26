@@ -1,13 +1,13 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-26T05:39:40.586Z",
+  "generatedAt": "2026-10-26T05:41:35.526Z",
   "releases": [
     {
       "tag": "v1.5.3",
       "version": "1.5.3",
       "name": "v1.5.3",
-      "notes": "## What's Changed\n* chore: refresh updates.json (v1.5.2 release notes) by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/22\n* ci: 手动刷新 / 重新挂载 updates.json 的工作流 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/23\n* v1.5.3：受击特效开关 / 角落技能 CD / 暂停设置 / 增量快照 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/24\n* v1.5.3 收尾：别人开火不再抖屏 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/25\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.5.2...v1.5.3",
+      "notes": "## 坦克大作战 1.5.3\n\n这一版没有新玩法，全是「用起来别扭」的地方。细节见 [`docs/v1.5.3-fixes.md`](https://github.com/Adamisatree/TankGame/blob/main/docs/v1.5.3-fixes.md)。\n\n### 画面不再乱抖\n- **敌人掉血不再晃你的屏幕**：受击震屏 / 闪白只属于**你自己**的坦克。十人房里别人互相开打，你的画面一动不动；别人开火也不会再抖（以前房主要替所有座位模拟开火，一秒抖十几次）。\n- **设置里有「受击特效」开关**（默认开）：关掉之后自己挨打也不抖，正在抖的那一下立刻停。\n- **暂停界面里就有设置**：受击特效、自动躲弹，改完立刻生效，不用退回菜单。\n\n### 自己的技能 CD 看得见\n- 右上角一张小卡片：技能名 + `就绪` / 剩余秒数 + 底部进度条。\n- **只画你自己那一席**（本地双人两行）；联机里永远看不到别人的冷却。\n\n### 联机更省流量（协议 v10）\n- 快照改成**增量**：只发变了的字段。木箱压成 `0/1`、道具按 `kind+respawn` 做键、坦克逐字段 diff、炮弹坐标量化，`dmg` 只有不是 1 才发。\n- 兜底：**每秒一个关键帧**，换图 / 有人进房 / 再来一局都会补关键帧；字段全是可选，客机把「没出现」当「没变」，缺字段不会崩。\n- 1.5.2 与 1.5.3 联机仍会被版本锁挡下，请两边一起更新。\n\n### 按钮不再「摁了没反应」\n- 暂停 → **重新开始**不再留下一个冻结的战场（以前遮罩消失、车还是动不了）；\n- 输入框里按回车 / 空格不再误触发开局；\n- 客机的两处灰按钮换成一句说明（重新开始由房主决定 / 等房主点再来一局）；\n- 退出对局用**自己的座位号**报投降（以前固定写 p2，结算卡会点错人）。\n\n### 内测面板\n- **不再吃按键**：焦点在输入框 / 下拉框时 WASD 属于输入框，离开自动还给游戏，暂停、静音这些热键也一起让路。\n- **不再要密码**：密码门整个删除，点开就能改；仓库和发布说明里也不再出现任何口令。\n\n### 下载\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.5.3-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.5.3-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.5.3-portable.exe` | Windows 免安装 |\n| `TankGame-1.5.3-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.5.3-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n> 局域网联机需要一端的桌面客户端当服务器；只想单机，双击 `portable.html` 即可。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.5.2...v1.5.3\n",
       "publishedAt": "2026-10-26T05:39:28Z",
       "prerelease": false,
       "assets": [
