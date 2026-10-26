@@ -524,3 +524,5 @@ if (failures.length) {
   for (const failure of failures) console.error(` - ${failure}`);
   throw new Error('maptest failed');
 }
+// v1.5.4: same exit guard as lantest/multitest.
+setTimeout(() => process.exit(0), 250).unref();

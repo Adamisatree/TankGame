@@ -267,7 +267,9 @@ check('the AI is on the same health pool', poke.enemy?.hp === 100, `hp=${poke.en
 check('a grace period before the AI may fire', poke.aiGraceUntil > scene.time.now);
 
 // Wait for the ready banner, then let a real skirmish run.
-await wait(1600);
+// v1.5.4: 1.6 s was tight on a loaded CI box — the room start and the first
+// snapshots can queue behind the build; the phase is what matters, not the clock.
+await wait(2400);
 check('the match starts playing', poke.phase === 'playing', poke.phase);
 
 let sawEnemyShell = false;
@@ -507,6 +509,29 @@ check(
   typeof anySnap('phase') === 'string' && typeof anySnap('level') === 'number' && Array.isArray(anySnap('crates')),
   JSON.stringify({ phase: anySnap('phase'), level: anySnap('level') })
 );
+// v1.5.4: the map travels by *id* as well as index — an index alone points at a
+// different arena when the two machines order their custom maps differently.
+{
+  const keyframes = snapSeen().filter((m) => m.kf === 1);
+  check(
+    'snapshots name the map by id, not just index',
+    keyframes.every((m) => typeof m.levelId === 'string' && m.levelId.length > 0),
+    JSON.stringify(keyframes.map((m) => m.levelId))
+  );
+}
+
+// v1.5.4: pausing the host freezes its loop, so the pause rides on one frame
+// that has to leave at the moment of the click.
+{
+  const before = snapSeen().length;
+  poke.setPaused(true);
+  await wait(250);
+  const paused = snapSeen().slice(before).filter((m) => m.paused === 1);
+  check('a paused host is announced to the room', paused.length > 0, `new frames=${snapSeen().length - before}`);
+  poke.setPaused(false);
+  await wait(250);
+}
+
 // v1.5.3 delta snapshots: match-wide scalars ride on the keyframes only, which
 // is what makes the payload small — but a keyframe must always carry them.
 {
@@ -815,6 +840,81 @@ settings.lanAddress = '';
 poke.restartGame();
 await wait(1200);
 check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown }).lan, 'socket still open');
+
+// --- v1.5.4 netcode: a dead socket must never throw, and a burst must coalesce.
+{
+  const { LanClient } = await import('../src/net/LanClient');
+
+  // (a) The freeze: `send()` on a CLOSING/CLOSED socket throws, and a snapshot
+  // goes out 30 times a second. An exception there used to escape Phaser's
+  // update loop and stop the whole game.
+  const dead = new LanClient('guest', '127.0.0.1:1', {});
+  let threw: string | null = null;
+  try {
+    dead.sendInput({ turn: 1, drive: 1, aim: 0, fire: true });
+    dead.sendSnapshot({ t: 'state', seq: 1, tanks: [], bullets: [], events: [] });
+    dead.send({ t: 'restart', level: 0 });
+    dead.close();
+    // ...and again after teardown, which is exactly what the update loop does.
+    for (let i = 0; i < 40; i += 1) {
+      dead.sendInput({ turn: 0, drive: 0, aim: 0, fire: false });
+      dead.sendSnapshot({ t: 'state', seq: i, tanks: [], bullets: [], events: [] });
+    }
+  } catch (err) {
+    threw = String(err);
+  }
+  check('sending on a closed client never throws', threw === null, threw ?? '');
+
+  // (b) A burst of frames is collapsed to the newest one; a normal 30 Hz stream
+  // goes straight through. Driven through a real socket, like the game.
+  const { WebSocketServer } = await import('ws');
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  await new Promise<void>((resolve) => wss.once('listening', () => resolve()));
+  const addr = wss.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+  wss.on('connection', (socket: any) => {
+    socket.on('message', () => {
+      /* the join frame; ignored here */
+    });
+  });
+
+  const seen: any[] = [];
+  const client = new LanClient('guest', `127.0.0.1:${port}`, {
+    onSnapshot: (snap) => seen.push(snap),
+  });
+  client.connect();
+  const sendToClient = (payload: any): void => {
+    for (const socket of wss.clients) socket.send(JSON.stringify(payload));
+  };
+  await wait(200);
+
+  // A flood in one go: this is what a throttled tab sees on resume.
+  for (let i = 1; i <= 20; i += 1) {
+    sendToClient({ t: 'state', seq: i, tanks: [], bullets: [], events: [] });
+  }
+  await wait(150);
+  check('a burst of snapshots is coalesced', seen.length > 0 && seen.length <= 3, `applied ${seen.length}/20`);
+  check('the newest frame of a burst wins', seen[seen.length - 1]?.seq === 20, `seq=${seen[seen.length - 1]?.seq}`);
+
+  // A keyframe must never be dropped in favour of a later, older delta.
+  seen.length = 0;
+  sendToClient({ t: 'state', seq: 21, kf: 1, tanks: [], bullets: [], events: [] });
+  sendToClient({ t: 'state', seq: 22, tanks: [], bullets: [], events: [] });
+  await wait(120);
+  check('a keyframe survives a burst', seen.some((m) => m.kf === 1), JSON.stringify(seen.map((m) => `${m.seq}${m.kf ? ':kf' : ''}`)));
+
+  // Normal cadence: every frame is applied as it arrives.
+  seen.length = 0;
+  for (let i = 30; i < 36; i += 1) {
+    sendToClient({ t: 'state', seq: i, tanks: [], bullets: [], events: [] });
+    await wait(45);
+  }
+  await wait(60);
+  check('a healthy stream takes the fast path', seen.filter((m) => m.seq >= 30).length === 6, `applied ${seen.length}/6`);
+
+  client.close();
+  await new Promise<void>((resolve) => wss.close(() => resolve()));
+}
 
 // ---------------------------------------------------------------- new systems
 

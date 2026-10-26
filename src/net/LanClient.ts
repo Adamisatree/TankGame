@@ -102,8 +102,21 @@ export class LanClient {
   private status: LanStatus = 'idle';
   private retry = 0;
   private closedByUser = false;
-  private retryTimer: number | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private url: string;
+  /**
+   * v1.5.4: a drop is a hiccup, not the end of the match. The server keeps a
+   * seat for SESSION_TTL_MS (two minutes), so keep dialling for a bit longer
+   * than that with a growing delay; 30 tries ≈ 2.5 minutes.
+   */
+  private static readonly MAX_RETRIES = 30;
+  /** Two frames closer together than this are a backlog, not a live stream. */
+  private static readonly SNAP_MIN_GAP_MS = 20;
+  /** Snapshot coalescing: the last frame not yet applied, and its arrival time. */
+  private snapPending: Snapshot | null = null;
+  private snapPendingAt = 0;
+  private snapTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastSnapAt = 0;
   /** Summoner skill this machine picked; sent with the join message. */
   skill = '';
   /** Messages queued while the socket was still connecting (e.g. a restart). */
@@ -151,7 +164,12 @@ export class LanClient {
 
     ws.onopen = () => {
       this.retry = 0;
-      ws.send(
+      // A frame queued from a previous socket belongs to a dead connection.
+      this.pending.length = 0;
+      // The socket can already be closing here (the server went away between
+      // the handshake and this callback); a throwing send would kill the loop.
+      this.trySend(
+        ws,
         JSON.stringify({
           t: 'join',
           role: this.role,
@@ -173,11 +191,7 @@ export class LanClient {
       this.handlers.onLog?.(`已连接 ${this.url}`);
       // Anything asked for while we were still dialling goes out now.
       for (const message of this.pending.splice(0)) {
-        try {
-          ws.send(message);
-        } catch {
-          /* socket died mid-flush */
-        }
+        this.trySend(ws, message);
       }
     };
 
@@ -304,7 +318,7 @@ export class LanClient {
           maybe.t === 'chat' ||
           maybe.t === 'result')
       ) {
-        if (maybe.t === 'state') this.handlers.onSnapshot?.(maybe);
+        if (maybe.t === 'state') this.routeSnapshot(maybe);
         else this.handlers.onHostMessage?.(maybe);
       }
     };
@@ -318,17 +332,21 @@ export class LanClient {
         this.setStatus('closed');
         return;
       }
-      // One quick automatic retry keeps a flaky Wi-Fi hiccup from ending the match.
-      if (this.retry < 2) {
+      // v1.5.4: keep dialling. Two tries (~2 s) used to turn one Wi-Fi hiccup
+      // into a permanent "连接已断开" — the server holds our seat for two
+      // minutes, so retry with a growing delay for about 2.5 minutes and let
+      // the room hand the old seat (and tank) back.
+      if (this.retry < LanClient.MAX_RETRIES) {
         this.retry += 1;
-        this.setStatus('connecting', `连接中断，重试中 (${this.retry}/2)`);
+        const delay = LanClient.retryDelay(this.retry);
+        this.setStatus('connecting', `连接中断，正在自动重连（第 ${this.retry} 次）…`);
         this.clearRetry();
-        this.retryTimer = window.setTimeout(() => {
+        this.retryTimer = setTimeout(() => {
           this.retryTimer = null;
           if (!this.closedByUser) this.connect();
-        }, 900);
+        }, delay);
       } else {
-        this.setStatus('closed', '连接已断开');
+        this.setStatus('closed', '多次重连失败：房主可能已离线，回菜单重新加入');
       }
     };
   }
@@ -418,41 +436,129 @@ export class LanClient {
     this.sendRaw({ t: 'map-ack', id: '', rev: 0, hash, ok: false, reason: '地图文件读不出来' });
   }
 
+  /**
+   * v1.5.4: the one place a frame leaves this machine.
+   *
+   * A browser WebSocket that is CLOSING / CLOSED throws `InvalidStateError` from
+   * `send()`, and between the `readyState` check and the call there is a real
+   * race (the socket can die in that gap). An exception thrown from here used to
+   * escape the Phaser `update()` — a snapshot is sent 30 times a second — and
+   * kill the requestAnimationFrame loop for good: the whole screen froze.
+   * Nothing in the game may throw because a socket went away, so every send is
+   * funnelled through this and swallows the failure. Returns false when the
+   * frame was not written.
+   */
+  private trySend(ws: WebSocket | null, payload: string): boolean {
+    if (!ws) return false;
+    try {
+      if (ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Raw envelope for lobby messages that are not HostMessages. */
   private sendRaw(message: Record<string, unknown>): void {
-    const payload = JSON.stringify(message);
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      if (this.pending.length < 20) this.pending.push(payload);
-      return;
-    }
-    this.ws.send(payload);
+    this.write(message, true);
   }
 
   /** 30Hz guest → host. */
   sendInput(input: TankInput): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.role !== 'guest') return;
+    if (this.role !== 'guest') return;
     this.seq += 1;
-    this.ws.send(JSON.stringify({ t: 'input', input, seq: this.seq }));
+    // Input is state, not an event: a frame that missed its moment is worthless,
+    // so this never queues and never throws.
+    this.write({ t: 'input', input, seq: this.seq }, false);
   }
 
   /** 30Hz host → guest. */
   sendSnapshot(snap: Snapshot): void {
-    this.send(snap);
+    // Deltas are only meaningful in order: queueing a stale one and replaying it
+    // later would apply an old diff to a newer state. The next keyframe (≤1 s)
+    // repairs whatever was dropped, so a closed socket simply skips it.
+    this.write(snap, false);
   }
 
   send(message: HostMessage): void {
-    const payload = JSON.stringify(message);
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      // Queue briefly: a restart fired right after connect() must not be lost.
-      if (this.pending.length < 20) this.pending.push(payload);
+    // Control traffic (restart / config / map) still gets the short queue so a
+    // frame fired right after connect() survives the handshake.
+    this.write(message, true);
+  }
+
+  /** Serialise once, then either write it now or keep it for the handshake. */
+  private write(message: object, queue: boolean): void {
+    let payload: string;
+    try {
+      payload = JSON.stringify(message);
+    } catch {
       return;
     }
-    this.ws.send(payload);
+    const ws = this.ws;
+    if (ws && ws.readyState === WebSocket.OPEN && this.trySend(ws, payload)) return;
+    if (!queue) return;
+    if (this.pending.length < 20) this.pending.push(payload);
+  }
+
+  /**
+   * v1.5.4: hand a snapshot to the game, unless frames are arriving faster than
+   * the screen can use them.
+   *
+   * A guest that was throttled (background tab, slow machine) comes back to a
+   * burst of queued frames. Applying all of them plays minutes of old sounds and
+   * leaves the arena interpolating towards where the host was several seconds
+   * ago — the "everyone else is fine, I am stuck" freeze. Frames at the normal
+   * 30 Hz cadence go straight through; only a burst is collapsed, keeping the
+   * newest frame (a keyframe always wins: it is the only thing that repairs a
+   * delta that was dropped).
+   */
+  private routeSnapshot(snap: Snapshot): void {
+    const now = Date.now();
+    const gap = now - this.lastSnapAt;
+    this.lastSnapAt = now;
+
+    if (gap >= LanClient.SNAP_MIN_GAP_MS && !this.snapTimer) {
+      this.handlers.onSnapshot?.(snap);
+      return;
+    }
+
+    // Burst: keep the newest, but never throw away a keyframe in favour of an
+    // older delta.
+    const pendingIsKeyframe = this.snapPending?.kf === 1;
+    if (snap.kf === 1 || !pendingIsKeyframe) {
+      this.snapPending = snap;
+      this.snapPendingAt = now;
+    }
+    if (this.snapTimer) return;
+    this.snapTimer = setTimeout(() => {
+      this.snapTimer = null;
+      const kept = this.snapPending;
+      this.snapPending = null;
+      if (kept && !this.closedByUser) {
+        this.lastSnapAt = Math.max(this.lastSnapAt, this.snapPendingAt);
+        this.handlers.onSnapshot?.(kept);
+      }
+    }, LanClient.SNAP_MIN_GAP_MS);
+  }
+
+  /** Anything queued from a burst is dropped on teardown. */
+  private clearSnapCoalesce(): void {
+    if (this.snapTimer !== null) {
+      clearTimeout(this.snapTimer);
+      this.snapTimer = null;
+    }
+    this.snapPending = null;
+  }
+
+  /** Exponential backoff: 0.8 s, 1.6 s, 3.2 s, then 5 s. */
+  private static retryDelay(attempt: number): number {
+    return Math.min(800 * 2 ** Math.max(0, attempt - 1), 5000);
   }
 
   private clearRetry(): void {
     if (this.retryTimer !== null) {
-      window.clearTimeout(this.retryTimer);
+      clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
   }
@@ -460,6 +566,8 @@ export class LanClient {
   close(): void {
     this.closedByUser = true;
     this.clearRetry();
+    this.clearSnapCoalesce();
+    this.pending.length = 0;
     const ws = this.ws;
     this.ws = null;
     // Drop the handlers first: a socket closing during teardown must not trigger
