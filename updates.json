@@ -1,8 +1,90 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-26T08:59:54.135Z",
+  "generatedAt": "2026-10-26T09:58:10.877Z",
   "releases": [
+    {
+      "tag": "v1.6.0",
+      "version": "1.6.0",
+      "name": "v1.6.0",
+      "notes": "## 坦克大作战 1.6.0 —— 代码审查整改\n\n1.5.4 发布后做了一轮完整审查（干净 clone、重装依赖、跑完整测试矩阵、逐文件 diff）。\n这一版把审查里 **5 条发现全部修掉**，每条都补了可复现的自动化检查。**没有新玩法，只有正确性和稳定性。**\n细节见 [`docs/v1.6.0-fixes.md`](https://github.com/Adamisatree/TankGame/blob/main/docs/v1.6.0-fixes.md)。\n\n### 1. 重连窗口里按的按钮不再被吞掉（中等）\n浏览器的 WebSocket 在握手前不能发消息，所以控制消息会先排队、连上后补发。但旧代码在\n**连接成功的回调里**把这个队列整个清空了——连**本次拨号期间**排队的消息一起扔，补发循环\n成了死代码。\n\n玩家看到的就是「点了没反应」：\n\n- 访客在断线重连的那几秒里点**准备 / 选技能 / 换队** → 房主永远收不到，要再点一次；\n- 房主在同样窗口点**开始对局 / 换地图 / 改规则** → 房间毫无反应；\n- 房主在断线期间点**再来一局** → 访客永远停在上一局的结算卡上。\n\n现在残帧在**开始拨号时**清（那才是属于死连接的），本次拨号期间排队的消息在握手后按顺序补发。\n\n### 2. 快照合并改用单调时钟（低）\n判断「正常 30 Hz 流」还是「积压洪泛」用的是 20 ms 窗口，以前读 `Date.now()`。\nWindows 的系统计时粒度约 **15.6 ms**，和这个阈值同一量级：正常的流可能被误判成积压\n（每帧多绕 20 ms，画面轻微抖动），积压也可能被误判成正常（偶发重放旧帧）。\n现在用 `performance.now()` —— 亚毫秒、单调，改系统时间也不受影响。\n\n### 3. 服务器关闭更快（加固）\n以前只等 `wss.close → server.close` 这一条回调链：链上任何一条 socket 卡在关闭握手里，\n退出就要烧满 2 秒兜底；在较老的 Node 上，对已关闭的 server 再 `close()` 还会**同步抛错**，\n而那个错恰好抛在回调里、没人接，于是这条唯一通路直接失效。\n现在 HTTP server 一关闭就完成（`server.once('close')`），两处 try/catch 兜底，2 秒上限仅作保险。\n\n### 4. 保活探测可配置（测试稳定性）\n背压测试会故意停掉客户端读取来制造积压——这同时也停掉了 ping/pong 应答，慢机器上\n15 秒心跳会把被测连接提前清掉，造成假红。新增 `createLanServer({ heartbeatMs })`\n（生产仍是 15 秒），测试注入长间隔，互不干扰。\n\n### 5. 文档计数更正\n`docs/v1.5.4-fixes.md` 里的测试计数停留在写稿时的版本，且同一页「4 条 / 5 条」互相矛盾。\n现已按 1.5.4 的实际结果更正为 lantest **70**（+7）、smoke **143**（+10），并逐条列出新增检查。\n\n### 验证\n`tsc` 0 错误；selftest 192、lantest **71**、multitest 40、maptest 103、updatetest 82、\nsmoke **147**（运行时错误 0）；`build` / `build:single` / `verify:single` / 桌面端全部通过。\n\n两条关键回归都做了反向验证——**把旧代码放回去，新断言确实会红**：\n拨号期的消息只剩 `join`、冻结时钟下 0/6 帧按到达应用。\n\n### 下载\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.6.0-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.6.0-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.6.0-portable.exe` | Windows 免安装 |\n| `TankGame-1.6.0-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.6.0-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n> 局域网联机需要一端的桌面客户端当服务器；只想单机，双击 `portable.html` 即可。\n\n### 重要\n网络协议格式没有变化（仍是 v11），但应用版本变了，服务器的版本锁按版本号比对：\n**1.5.4 与 1.6.0 不能联机**，请和朋友一起更新。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.5.4...v1.6.0\n",
+      "publishedAt": "2026-10-26T09:56:58Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.6.0-arm64-setup.exe",
+          "size": 82784745,
+          "sha256": "5b9f4a2b67c647c02a1cf92d1fa4b8fd4ce00845cf475b6585491c63c92f9716",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.0-arm64.dmg",
+          "size": 96133839,
+          "sha256": "c9036d45724ffa6f96f30e9659fccf8e279d8f14f1c98a57b6518c2eaf5e7ecd",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.0-arm64.zip",
+          "size": 92609375,
+          "sha256": "e596a72c1883f505c1ab01ab221580ee2936ba29488210f4374fd54989894e49",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.0-portable.exe",
+          "size": 78589410,
+          "sha256": "aed3bcaa54c327c758c90ab3374446f73a2122eb47305b4c6d18e89832fb7729",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.0-portable.html",
+          "size": 1711209,
+          "sha256": "79e667aa31a3d73650d84eaab25d5360cc207f971b453fc2aed009340d0a4935",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.0-setup.exe",
+          "size": 161009253,
+          "sha256": "ac57405d5f0a4e324bda4b66679d24920a9ef4ed238409c218b485012ba98ab3",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.0-x64-setup.exe",
+          "size": 78821924,
+          "sha256": "c822fbdadecf8889b7b95fa477dd9e4faa34fdc57754688b91a39593e6a2fa3d",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.6.0-x64.dmg",
+          "size": 102154394,
+          "sha256": "df15644b47af52e4ddb464cba02c48e0f8991e585083f044299e9f7f587a0ac9",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.5.4",
       "version": "1.5.4",
