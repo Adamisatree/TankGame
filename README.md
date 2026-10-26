@@ -20,7 +20,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.6.0-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.6.1-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -33,12 +33,12 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.6.0-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.6.0-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.6.0-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.6.0-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.6.0-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.6.0-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.0/TankGame-1.6.0-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.6.1-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.6.1-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.6.1-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.6.1-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.6.1-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.6.1-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
@@ -68,7 +68,7 @@ npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
 
 ## 自动更新、换版本、镜像下载
 
-菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.6.0`）：
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.6.1`）：
 
 - **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
 - **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
@@ -106,7 +106,7 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 
 输入框做了处理：**中文输入法打出来的「192。168。1。10」会自动变成「192.168.1.10」**，全角数字也会转成半角，粘贴整句话只会保留地址部分——之前那种「打不出点」的问题不会再出现。
 
-**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.6.0，你是 1.5.4。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
+**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.6.1，你是 1.6.0。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
 
 技术上是**房主权威**：房主的机器跑物理、算道具、判命中，每秒 30 次把状态推给对方（只推变了的部分，每秒一次全量兜底），对方只上传操作意图。掉线会自动重连回原座位；某个人的网络跟不上时，只会暂停给他发的增量，其他人不受影响。所以两边看到的结果一定一致，也不怕对方改内存。
 
@@ -255,6 +255,25 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 - **随机地图先摇再广播**：以前房主和访客各摇各的，可能进不同的地图；
 - **再来一局不再重连**：房主重开时保留这条 socket（以前会重新建房，把全房间踢回房间界面）；
 - **访客的结算卡**上是「等房主再来一局」（重开由房主决定）。
+
+### 1.6.1 改了什么（多人联机：谁控制哪台坦克）
+
+1.6.0 之后又做了一轮联机审查。四个症状——**人多就有人卡死 / 像顶号 / 基本只有 2 个人能同时动 /
+团队开不了局**——其实是「一个根因 + 两个放大器」。细节在
+[`docs/v1.6.1-fixes.md`](docs/v1.6.1-fixes.md)。
+
+- **输入按座位 id 路由，不再看「它在哪个槽位」**（根因）：房主的第 1 台远程坦克住在 `p2` 槽位、
+  其余在 `extras`，而槽位会换人——有人退出时下一台会被「晋升」进去，重连的人也会落到别的槽位。
+  以前 `p2` 槽位只吃 `p2` 这个 id 的输入，于是晋升后的坦克被**上一个玩家的残留按键**开着走
+  （幽灵），真正的主人反而动不了（**基本只有 2 个人能同时动**），重连回来的 p2 则在开别人的坦克
+  （**顶号**）。现在每台坦克永远读**自己 id** 的输入，放哪个槽位都一样；座位离开时它的输入行也一起清掉；
+- **座位号不再只增不减**（放大器 1）：房间空掉后计数器没复位，第二局起新访客拿到 p4/p5，
+  第一个远程座位开局就没有输入 → **第二轮必现有人冻结**。现在总是分配**最小空闲座位号**，
+  掉线玩家的号码仍为自己的重连保留，新人抢不走；
+- **空房间会忘掉上一局**（放大器 2）：上一局设的 4 队、容量、规则都留着，下一局只有 3 个人时
+  服务端以「第 4 队没有人」拒绝开局、按钮同时置灰——这就是**团队模式开不了局**。现在房间清空
+  即复位（队伍数 / 容量 / 模式 / 规则）；
+- 顺手把一条在高负载下会偶发假红的测试（AI 开局保护期）改成容差断言。
 
 ### 1.6.0 改了什么（代码审查整改）
 

@@ -129,11 +129,14 @@ async function serveStatic(req, res) {
  * Seats are handed out on join (p2, p3, …), teams alternate, and everyone gets
  * the same roster so every screen shows identical information.
  */
+/** Seats in a fresh room; the host can raise it to 10 in the lobby. */
+const DEFAULT_CAPACITY = 6;
+
 const room = {
   host: null,
   /** id -> socket, host included as 'p1'. */
   players: new Map(),
-  capacity: 6,
+  capacity: DEFAULT_CAPACITY,
   mode: 'ffa',
   config: null,
   nextId: 2,
@@ -422,6 +425,42 @@ function pair() {
 /** How long a dropped seat waits for its owner to reconnect. */
 const SESSION_TTL_MS = 120_000;
 
+/** Seats a room can hand out, in order: p2 … p10. */
+const SEAT_LIMIT = 10;
+
+/**
+ * v1.6.1: the smallest free seat id.
+ *
+ * A plain counter (`p${nextId++}`) only ever climbs, and nothing reset it — so
+ * the second match in the same server process handed out p4/p5, and the *first*
+ * remote tank in the host's `p2` slot then belonged to a seat called p4 with no
+ * input line. Reusing the lowest free number keeps ids inside the palette the
+ * game knows (p2…p10) however long the room lives.
+ *
+ * A seat whose owner dropped is still reserved by `room.sessions`, so a
+ * reconnecting guest always gets *its own* number back and never collides with
+ * a newcomer.
+ */
+function nextSeatId() {
+  const now = Date.now();
+  const reserved = new Set();
+  for (const [session, entry] of room.sessions) {
+    if (now - entry.leftAt > SESSION_TTL_MS) {
+      room.sessions.delete(session);
+      continue;
+    }
+    reserved.add(entry.id);
+  }
+  for (let seat = 2; seat < SEAT_LIMIT + 2; seat += 1) {
+    const id = `p${seat}`;
+    if (room.players.has(id) || reserved.has(id)) continue;
+    return id;
+  }
+  // Every seat is spoken for: fall back to the old counter so the capacity
+  // check (not this function) decides what happens.
+  return `p${room.nextId++}`;
+}
+
 function rememberSession(ws, id) {
   if (!ws.session || id === 'p1') return;
   room.sessions.set(ws.session, {
@@ -462,11 +501,22 @@ function unlink(ws) {
   room.mapAcks.delete(id);
   // An empty room forgets the last session entirely.
   if (!room.players.size) {
+    // v1.6.1: an empty room is a *new* room. Anything left over here surfaced
+    // as "team mode will not start" in the next session: the host's 4-team
+    // setting survived, the next room had three people, and the server refused
+    // `begin` for the empty fourth team while the start button greyed out to
+    // match. Sessions are already cleared above, so no seat is left waiting to
+    // be resumed and the counters below are free to start over.
     room.started = false;
     room.map = null;
     room.mapHash = '';
     room.mapAcks.clear();
     room.sessions.clear();
+    room.nextId = 2;
+    room.teamCount = 2;
+    room.mode = 'ffa';
+    room.capacity = DEFAULT_CAPACITY;
+    room.config = null;
   }
   send(ws, { t: 'bye' });
   // Tell the survivors exactly who left. An explicit surrender was already
@@ -608,7 +658,7 @@ export function createLanServer({
           console.log(`[lan] rejected guest: room ${room.players.size}/${room.capacity}`);
           return;
         }
-        const id = `p${room.nextId++}`;
+        const id = nextSeatId();
         ws.playerId = id;
         ws.role = 'guest';
         ws.team = room.mode === 'team' ? balancedTeam() : 0;
