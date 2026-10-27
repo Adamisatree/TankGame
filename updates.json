@@ -1,13 +1,95 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-27T02:28:17.898Z",
+  "generatedAt": "2026-10-27T03:14:29.934Z",
   "releases": [
+    {
+      "tag": "v1.6.4",
+      "version": "1.6.4",
+      "name": "v1.6.4",
+      "notes": "## What's Changed\n* chore: updates.json 指向 1.6.3 的发布说明 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/39\n* fix(lan): 座位耗尽（团队凑不齐人）+ 本地日志 · v1.6.4 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/40\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.6.3...v1.6.4",
+      "publishedAt": "2026-10-27T03:14:17Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.6.4-arm64-setup.exe",
+          "size": 82806814,
+          "sha256": "8f0e45cef4cfc638ff071fe855ef16ec58c348beeaa3da18b7b6f7fa6627c6e9",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.4-arm64.dmg",
+          "size": 96151539,
+          "sha256": "1011eed29218712390606629e4e9a1baaf30265bbb75a0410e46bd547542ad86",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.4-arm64.zip",
+          "size": 92633831,
+          "sha256": "16c5cf7cb86d870619fc4c079f48174f7c6b8b77d59f9866936ca1e4a70fa8b6",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.4-portable.exe",
+          "size": 78611621,
+          "sha256": "e98a69c576f333eb0ddf92ea1c5931edde14a401b5ff158f45e55033bf1d3f7e",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.4-portable.html",
+          "size": 1718333,
+          "sha256": "c2a6e1404ef1f6ad945b763d50eb1bf5fe5453d61d89d35818263f051288696c",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.4-setup.exe",
+          "size": 161053528,
+          "sha256": "92bfed41a2d35f25525852f7d5334c584c548c6d20be72426c58e5bd6e8be533",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.4-x64-setup.exe",
+          "size": 78844166,
+          "sha256": "25d6678c8936b132374ead008e03123ac9c0f6ad1b340f3cb45d38c178769ef4",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.6.4-x64.dmg",
+          "size": 102201634,
+          "sha256": "9e071dbcf3c6c7c9a26a90f9bb1a11b04fa813e63f0fe08ba69fa904a2772b7e",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.6.3",
       "version": "1.6.3",
       "name": "v1.6.3",
-      "notes": "## 坦克大作战 1.6.3 —— 桌面版启动崩溃热修\n\n**如果你装了 1.6.2 的桌面版，请直接装这个版本。** 1.6.2 的 exe / dmg **双击就崩**，\n窗口一个都出不来：\n\n```\nError [ERR_REQUIRE_ESM]: require() of ES Module\n…\\resources\\app\\shared\\asset-guard.mjs not supported\n```\n\n这一版只修这一件事，外加让这类事故以后不可能再被漏测。**没有新玩法。**\n\n### 根因\n\n1.6.2 把新加的下载守卫抽成了 ES 模块（为了能在没有 Electron 的环境里做单元测试），\n但 `electron/updater.cjs` 是 **CommonJS**（Electron 直接加载主进程文件，必须是 CJS），\n里面用了同步 `require()`：\n\n```js\nconst assetGuard = require('../shared/asset-guard.mjs'); // ← Node 20 直接抛\n```\n\nElectron 31 内置 **Node 20**，`require()` 一个 ES 模块会抛 `ERR_REQUIRE_ESM`；\n这行在**模块顶层**，所以崩在启动最早的一步——窗口、IPC、连内置更新器都还没建立。\n换句话说，这不是「某个功能坏了」，是应用根本起不来，而且**它自己的更新器也救不了它**。\n\n### 修复\n\n- 守卫改成**惰性动态导入**（和仓库里 `loadCore()` 完全同一写法），`safeAssetName` 变 async；\n- `main.cjs` 里唯一的调用点补 `await`；\n- `shared/asset-guard.mjs` **一行未改**：1.6.2 修好的「文件名穿越」和「镜像白名单」原样生效。\n\n### 为什么测试没拦住（已补齐）\n\n`updatetest` 和 `desktop-test` 都是**直接 import 纯守卫**，没有一处加载 `updater.cjs`；\nCI 的测试步骤只跑 `typecheck / selftest / lantest / test:update`；而开发机是 Node 22\n（`require(esm)` 默认可用，会**碰巧成功**）。于是「全绿」的流水线发出了一个全员打不开的包。\n\n现在：\n\n- 新增 `scripts/electron-load-check.cjs`：用 stub 顶掉 `electron`，**真的加载**\n  `electron/updater.cjs` 和 `electron/main.cjs`（8 条检查，不需要 Electron 二进制、不需要显示器）；\n- `desktop-test` 增加静态扫描（任何 `.cjs` 里出现 `require('*.mjs')` 即失败）+ 实际加载，\n  Node ≥ 22 时带 `--no-experimental-require-module` 复现 Node 20 的规则（17 → **19** 条）；\n- CI 的 Windows 与 macOS job 都在**打包前**跑加载检查，Windows 另外跑完整 `desktop-test`。\n\n**反向验证**：把旧的 `require` 放回去，实测复现了玩家看到的同一条 `ERR_REQUIRE_ESM`，\n两条新检查同时变红（`desktop FAILED (2)`）。\n\n### 已经装了 1.6.2 怎么办\n\n1.6.2 连更新器都跑不到，只能重装：下载本版本的安装包**覆盖安装**即可，\n   设置、地图库、已下载的历史版本都在 `%APPDATA%\\TankGame`，覆盖不会丢；\n2. 只想单机：`TankGame-1.6.3-portable.html` 双击即玩，不受这个 bug 影响（网页版没有主进程）。\n\n### 验证\n\n`tsc` 0 错误；selftest 194、lantest 118、multitest 40、maptest 109、updatetest 86、\nsmoke 177（运行时错误 0）、desktop-test **19**；`build` / `build:single` / `verify:single` 全部通过。\nCI（Node 20，即出事的那个运行时）的加载检查与 Windows 的完整桌面测试都已跑过。\n\n### 下载\n\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.6.3-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.6.3-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.6.3-portable.exe` | Windows 免安装 |\n| `TankGame-1.6.3-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.6.3-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n\n### 兼容\n\n协议格式没变（仍是 v11），但服务器的版本锁按版本号比对：**1.6.2 与 1.6.3 不能联机**。\n1.6.2 的桌面端本来就起不来，请和朋友一起用 1.6.3。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.6.2...v1.6.3",
+      "notes": "## 坦克大作战 1.6.3 —— 桌面版启动崩溃热修\n\n**如果你装了 1.6.2 的桌面版，请直接装这个版本。** 1.6.2 的 exe / dmg **双击就崩**，\n窗口一个都出不来：\n\n```\nError [ERR_REQUIRE_ESM]: require() of ES Module\n…\\resources\\app\\shared\\asset-guard.mjs not supported\n```\n\n这一版只修这一件事，外加让这类事故以后不可能再被漏测。**没有新玩法。**\n\n### 根因\n\n1.6.2 把新加的下载守卫抽成了 ES 模块（为了能在没有 Electron 的环境里做单元测试），\n但 `electron/updater.cjs` 是 **CommonJS**（Electron 直接加载主进程文件，必须是 CJS），\n里面用了同步 `require()`：\n\n```js\nconst assetGuard = require('../shared/asset-guard.mjs'); // ← Node 20 直接抛\n```\n\nElectron 31 内置 **Node 20**，`require()` 一个 ES 模块会抛 `ERR_REQUIRE_ESM`；\n这行在**模块顶层**，所以崩在启动最早的一步——窗口、IPC、连内置更新器都还没建立。\n换句话说，这不是「某个功能坏了」，是应用根本起不来，而且**它自己的更新器也救不了它**。\n\n### 修复\n\n- 守卫改成**惰性动态导入**（和仓库里 `loadCore()` 完全同一写法），`safeAssetName` 变 async；\n- `main.cjs` 里唯一的调用点补 `await`；\n- `shared/asset-guard.mjs` **一行未改**：1.6.2 修好的「文件名穿越」和「镜像白名单」原样生效。\n\n### 为什么测试没拦住（已补齐）\n\n`updatetest` 和 `desktop-test` 都是**直接 import 纯守卫**，没有一处加载 `updater.cjs`；\nCI 的测试步骤只跑 `typecheck / selftest / lantest / test:update`；而开发机是 Node 22\n（`require(esm)` 默认可用，会**碰巧成功**）。于是「全绿」的流水线发出了一个全员打不开的包。\n\n现在：\n\n- 新增 `scripts/electron-load-check.cjs`：用 stub 顶掉 `electron`，**真的加载**\n  `electron/updater.cjs` 和 `electron/main.cjs`（8 条检查，不需要 Electron 二进制、不需要显示器）；\n- `desktop-test` 增加静态扫描（任何 `.cjs` 里出现 `require('*.mjs')` 即失败）+ 实际加载，\n  Node ≥ 22 时带 `--no-experimental-require-module` 复现 Node 20 的规则（17 → **19** 条）；\n- CI 的 Windows 与 macOS job 都在**打包前**跑加载检查，Windows 另外跑完整 `desktop-test`。\n\n**反向验证**：把旧的 `require` 放回去，实测复现了玩家看到的同一条 `ERR_REQUIRE_ESM`，\n两条新检查同时变红（`desktop FAILED (2)`）。\n\n### 已经装了 1.6.2 怎么办\n\n1.6.2 连更新器都跑不到，只能重装：下载本版本的安装包**覆盖安装**即可，\n   设置、地图库、已下载的历史版本都在 `%APPDATA%\\TankGame`，覆盖不会丢；\n2. 只想单机：`TankGame-1.6.3-portable.html` 双击即玩，不受这个 bug 影响（网页版没有主进程）。\n\n### 验证\n\n`tsc` 0 错误；selftest 194、lantest 118、multitest 40、maptest 109、updatetest 86、\nsmoke 177（运行时错误 0）、desktop-test **19**；`build` / `build:single` / `verify:single` 全部通过。\nCI（Node 20，即出事的那个运行时）的加载检查与 Windows 的完整桌面测试都已跑过。\n\n### 下载\n\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.6.3-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.6.3-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.6.3-portable.exe` | Windows 免安装 |\n| `TankGame-1.6.3-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.6.3-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n\n### 兼容\n\n协议格式没变（仍是 v11），但服务器的版本锁按版本号比对：**1.6.2 与 1.6.3 不能联机**。\n1.6.2 的桌面端本来就起不来，请和朋友一起用 1.6.3。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.6.2...v1.6.3\n",
       "publishedAt": "2026-10-27T02:28:04Z",
       "prerelease": false,
       "assets": [
