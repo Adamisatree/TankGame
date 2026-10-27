@@ -1,13 +1,95 @@
 {
   "app": "TankGame",
   "repo": "Adamisatree/TankGame",
-  "generatedAt": "2026-10-27T01:48:33.429Z",
+  "generatedAt": "2026-10-27T02:28:17.898Z",
   "releases": [
+    {
+      "tag": "v1.6.3",
+      "version": "1.6.3",
+      "name": "v1.6.3",
+      "notes": "## What's Changed\n* chore: updates.json 指向 1.6.2 的发布说明 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/37\n* fix(desktop): 1.6.2 桌面版启动崩溃（import() 加载守卫）→ 1.6.3 by @Adamisatree in https://github.com/Adamisatree/TankGame/pull/38\n\n\n**Full Changelog**: https://github.com/Adamisatree/TankGame/compare/v1.6.2...v1.6.3",
+      "publishedAt": "2026-10-27T02:28:04Z",
+      "prerelease": false,
+      "assets": [
+        {
+          "name": "TankGame-1.6.3-arm64-setup.exe",
+          "size": 82799165,
+          "sha256": "78d6d727de1714dc984d3f6bded70e2b8adb51800e2f70f8b864d962be7b05b2",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-arm64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.3-arm64.dmg",
+          "size": 96142324,
+          "sha256": "01fb7ffc545db465451b6bcdd83186d4aeb8e16ea800b31edee01e96aa56f694",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-arm64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.3-arm64.zip",
+          "size": 92625670,
+          "sha256": "8ddf17bec3eed880b7d839ab3dff12484ca8c7a0794d130deee87f7987f1535a",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-arm64.zip",
+          "kind": "zip",
+          "platform": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "name": "TankGame-1.6.3-portable.exe",
+          "size": 78603964,
+          "sha256": "54ee10957468f2c217e6e5e0853f1d2f18f18a7e9ed27ee7a6772a4118976756",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-portable.exe",
+          "kind": "portable",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.3-portable.html",
+          "size": 1714444,
+          "sha256": "236125239ea3311aa3e31660773698701eef8f7f0123f818cd23394b7f013ecf",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-portable.html",
+          "kind": "html",
+          "platform": "any",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.3-setup.exe",
+          "size": 161038310,
+          "sha256": "ea338bed6fd3c7b21121108665826dfad3ed6f462d4ef06ef1907103b4bb6adb",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "any"
+        },
+        {
+          "name": "TankGame-1.6.3-x64-setup.exe",
+          "size": 78836543,
+          "sha256": "246302d70ea5beec74d1230e20ce81e1f2597ba615ef2f265a1cd03a5cf5e8dd",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-x64-setup.exe",
+          "kind": "installer",
+          "platform": "win32",
+          "arch": "x64"
+        },
+        {
+          "name": "TankGame-1.6.3-x64.dmg",
+          "size": 102188308,
+          "sha256": "31fc4544273e2132121241cfcf592ac2a9ade41ff665c884dad9970b2faf3216",
+          "url": "https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-x64.dmg",
+          "kind": "dmg",
+          "platform": "darwin",
+          "arch": "x64"
+        }
+      ]
+    },
     {
       "tag": "v1.6.2",
       "version": "1.6.2",
       "name": "v1.6.2",
-      "notes": "## 坦克大作战 1.6.2 —— 联机稳定性 + 桌面安全\n\n1.6.1 之后做了第三轮审查（服务器全文、客户端联机段、大厅/规则、桌面/更新/地图四路），\n一共 **49 条**发现，这一版全部处理：41 条改掉，其余几条是审查本身的环境假象或设计决定，\n理由写在文档里。**没有新玩法，只有正确性和安全。**\n逐条细节见 [`docs/v1.6.2-fixes.md`](https://github.com/Adamisatree/TankGame/blob/main/docs/v1.6.2-fixes.md)。\n\n### 1. P0：一条消息就能作废对局，或一条请求打死服务器（🔴）\n\n| 问题 | 旧行为 | 现在 |\n| --- | --- | --- |\n| **谁都能替房主投降** | 没 join 过的 socket 发 `{t:'surrender',by:'p1'}` → 全场弹「房主离开，本局作废」 | 只有坐座位上的人能投降，`by` 只取服务器记录的座位号 |\n| **被顶替的旧连接还留着权限** | 房主刷新后新连接拿 p1，旧的照样能发快照、改房间、开别人的坦克，心跳永远不清它 | 顶替时清空 `playerId`/`role`/`session`/`ready` 并标记失效；客户端收到 `replaced` 主动断开并提示「座位已在别处重连」 |\n| **`GET /%` 打死整个进程** | `decodeURIComponent` 抛 URIError → 未 await 的 promise → unhandledRejection → 进程退出（旧代码下 lantest 直接以 `URIError` 退出） | 解码包 try/catch，坏请求回 400，服务器继续服务 |\n| **「开始对局」永久置灰** | 自定义地图等确认，欠确认的访客直接离开 → 房主按钮灰、还看不到「重发地图」按钮 | 名单变化时清掉已离开者的确认项，服务端补发 `map-status` |\n\n### 2. P1：公平与体验（节选）\n\n- **掉线重连不再免费满血**：重连继承原坦克的血量与战绩（宽限期内），真正退场才清空，\n  下一个坐这个座位的人不会继承。\n- **不再幽灵自动开局**：换图/推送新地图会清掉挂起的开局请求，必须再点一次。\n- **ESC 暂停会广播**：访客看到「房主已暂停」，不再被看门狗判成「网络不稳」→「收不到房主数据」。\n- **暂停期间加入不再黑屏**：看门狗移到「还没收到快照」判空之前，房主暂停时会补推一帧。\n- **地图绝不按索引猜**：房主报了 `levelId` 而本机没有 → 明确提示「地图不同步」，不再偷偷加载另一张图。\n- **join 幂等 / token 一座位**：同一连接重复 join 不多占座位；同一 token 再来视为重连，直接回原座。\n- **开始按钮防连点**：`started` 去重，乱斗单人开不了局（`lobby-error: solo`）；版本缺失的访客同样被拒。\n- 容量不会被缩到低于在线人数；乱斗不再写出越界的队伍号；满座直接拒绝，座位号恒在 p2–p10。\n\n### 3. 客户端与大厅\n\n- 版本不一致的提示不再被「连接已断开」秒覆盖；断线瞬间的旧帧不会在重连后回放。\n- 快速点技能不再丢；`ws://host/ws/` 不再拼成 `/ws/ws`。\n- 后进访客的大厅能拿到房间规则；地图标签、公示区队伍标签跟模式一致；房主离开后访客不再滞留无主房间。\n- 内测面板重复绑定导致监听器翻倍（点 3 次跑 21 次）已修；团队赛同帧达标改为并列获胜。\n\n### 4. 桌面端 / 更新器（安全向）\n\n- 封掉「局域网 → 更新面板 → 下载 → 执行」这条链：面板文本统一转义；资源名只接受纯文件名\n  （`..\\..\\evil.exe` 这类路径穿越被拒）；下载地址必须是**官方发布地址或镜像前缀 + 官方地址**，\n  重定向落地地址也复核；UDP 广播的房间名不再原样进 `innerHTML`。\n- 收到的地图先校验再入库（空地图不会覆盖本地同 id 地图）；地图哈希升到 64 位。\n- 预发布版本按 semver 比较（`beta.10 > beta.2`）；sha256 只接受 64 位小写十六进制。\n- 安装不再双 spawn；设置写入串行化且原子（临时文件 + rename）；局域网地址优先取默认路由网卡（避开 WSL/VPN）。\n\n### 验证\n\n`tsc` 0 错误；selftest **194**、lantest **118**（+38）、multitest 40、maptest **109**、updatetest **86**、\nsmoke **177**（运行时错误 0）、desktop-test **17**；`build` / `build:single` / `verify:single` 全部通过。\n\n新增断言都做了**反向验证**——把修复放回旧行为，对应检查确实变红（例如旧服务器下 `lantest` 直接以\n`URIError` 退出；面板连点 3 次跑 21 次；未知地图从 0 回退到 1；`surrenderBy` 指向 `p3`）。\n完整表格在 `docs/v1.6.2-fixes.md` 的「反向验证」一节。\n\n### 下载\n\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.6.2-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.6.2-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.6.2-portable.exe` | Windows 免安装 |\n| `TankGame-1.6.2-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.6.2-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n> 局域网联机需要一端的桌面客户端当服务器；只想单机，双击 `portable.html` 即可。\n\n### 重要\n\n网络协议格式没有变化（仍是 v11），但服务器的版本锁按版本号比对：\n**1.6.1 与 1.6.2 不能联机**，请和朋友一起更新（更新面板支持一键安装，也支持降级）。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.6.1...v1.6.2",
+      "notes": "## 坦克大作战 1.6.2 —— 联机稳定性 + 桌面安全\n\n1.6.1 之后做了第三轮审查（服务器全文、客户端联机段、大厅/规则、桌面/更新/地图四路），\n一共 **49 条**发现，这一版全部处理：41 条改掉，其余几条是审查本身的环境假象或设计决定，\n理由写在文档里。**没有新玩法，只有正确性和安全。**\n逐条细节见 [`docs/v1.6.2-fixes.md`](https://github.com/Adamisatree/TankGame/blob/main/docs/v1.6.2-fixes.md)。\n\n### 1. P0：一条消息就能作废对局，或一条请求打死服务器（🔴）\n\n| 问题 | 旧行为 | 现在 |\n| --- | --- | --- |\n| **谁都能替房主投降** | 没 join 过的 socket 发 `{t:'surrender',by:'p1'}` → 全场弹「房主离开，本局作废」 | 只有坐座位上的人能投降，`by` 只取服务器记录的座位号 |\n| **被顶替的旧连接还留着权限** | 房主刷新后新连接拿 p1，旧的照样能发快照、改房间、开别人的坦克，心跳永远不清它 | 顶替时清空 `playerId`/`role`/`session`/`ready` 并标记失效；客户端收到 `replaced` 主动断开并提示「座位已在别处重连」 |\n| **`GET /%` 打死整个进程** | `decodeURIComponent` 抛 URIError → 未 await 的 promise → unhandledRejection → 进程退出（旧代码下 lantest 直接以 `URIError` 退出） | 解码包 try/catch，坏请求回 400，服务器继续服务 |\n| **「开始对局」永久置灰** | 自定义地图等确认，欠确认的访客直接离开 → 房主按钮灰、还看不到「重发地图」按钮 | 名单变化时清掉已离开者的确认项，服务端补发 `map-status` |\n\n### 2. P1：公平与体验（节选）\n\n- **掉线重连不再免费满血**：重连继承原坦克的血量与战绩（宽限期内），真正退场才清空，\n  下一个坐这个座位的人不会继承。\n- **不再幽灵自动开局**：换图/推送新地图会清掉挂起的开局请求，必须再点一次。\n- **ESC 暂停会广播**：访客看到「房主已暂停」，不再被看门狗判成「网络不稳」→「收不到房主数据」。\n- **暂停期间加入不再黑屏**：看门狗移到「还没收到快照」判空之前，房主暂停时会补推一帧。\n- **地图绝不按索引猜**：房主报了 `levelId` 而本机没有 → 明确提示「地图不同步」，不再偷偷加载另一张图。\n- **join 幂等 / token 一座位**：同一连接重复 join 不多占座位；同一 token 再来视为重连，直接回原座。\n- **开始按钮防连点**：`started` 去重，乱斗单人开不了局（`lobby-error: solo`）；版本缺失的访客同样被拒。\n- 容量不会被缩到低于在线人数；乱斗不再写出越界的队伍号；满座直接拒绝，座位号恒在 p2–p10。\n\n### 3. 客户端与大厅\n\n- 版本不一致的提示不再被「连接已断开」秒覆盖；断线瞬间的旧帧不会在重连后回放。\n- 快速点技能不再丢；`ws://host/ws/` 不再拼成 `/ws/ws`。\n- 后进访客的大厅能拿到房间规则；地图标签、公示区队伍标签跟模式一致；房主离开后访客不再滞留无主房间。\n- 内测面板重复绑定导致监听器翻倍（点 3 次跑 21 次）已修；团队赛同帧达标改为并列获胜。\n\n### 4. 桌面端 / 更新器（安全向）\n\n- 封掉「局域网 → 更新面板 → 下载 → 执行」这条链：面板文本统一转义；资源名只接受纯文件名\n  （`..\\..\\evil.exe` 这类路径穿越被拒）；下载地址必须是**官方发布地址或镜像前缀 + 官方地址**，\n  重定向落地地址也复核；UDP 广播的房间名不再原样进 `innerHTML`。\n- 收到的地图先校验再入库（空地图不会覆盖本地同 id 地图）；地图哈希升到 64 位。\n- 预发布版本按 semver 比较（`beta.10 > beta.2`）；sha256 只接受 64 位小写十六进制。\n- 安装不再双 spawn；设置写入串行化且原子（临时文件 + rename）；局域网地址优先取默认路由网卡（避开 WSL/VPN）。\n\n### 验证\n\n`tsc` 0 错误；selftest **194**、lantest **118**（+38）、multitest 40、maptest **109**、updatetest **86**、\nsmoke **177**（运行时错误 0）、desktop-test **17**；`build` / `build:single` / `verify:single` 全部通过。\n\n新增断言都做了**反向验证**——把修复放回旧行为，对应检查确实变红（例如旧服务器下 `lantest` 直接以\n`URIError` 退出；面板连点 3 次跑 21 次；未知地图从 0 回退到 1；`surrenderBy` 指向 `p3`）。\n完整表格在 `docs/v1.6.2-fixes.md` 的「反向验证」一节。\n\n### 下载\n\n| 文件 | 平台 |\n| --- | --- |\n| `TankGame-1.6.2-setup.exe` | Windows（x64 + arm64 合一的省心版） |\n| `TankGame-1.6.2-x64-setup.exe` / `-arm64-setup.exe` | Windows 单架构 |\n| `TankGame-1.6.2-portable.exe` | Windows 免安装 |\n| `TankGame-1.6.2-portable.html` | **单文件网页版**，双击即玩（1.7 MB） |\n| `TankGame-1.6.2-arm64.dmg` / `-x64.dmg` / `-arm64.zip` | macOS |\n\n> 安装包**没有代码签名**：Windows 点「更多信息 → 仍要运行」，macOS 右键 →「打开」。\n> 局域网联机需要一端的桌面客户端当服务器；只想单机，双击 `portable.html` 即可。\n\n### 重要\n\n网络协议格式没有变化（仍是 v11），但服务器的版本锁按版本号比对：\n**1.6.1 与 1.6.2 不能联机**，请和朋友一起更新（更新面板支持一键安装，也支持降级）。\n\n**完整改动**：https://github.com/Adamisatree/TankGame/compare/v1.6.1...v1.6.2\n",
       "publishedAt": "2026-10-27T01:48:20Z",
       "prerelease": false,
       "assets": [
