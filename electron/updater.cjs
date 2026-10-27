@@ -15,8 +15,6 @@ const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const MIRRORS_FILE = join(__dirname, '..', 'mirrors.json');
-/** Pure download/asset guards (no Electron, so the tests can import them). */
-const assetGuard = require('../shared/asset-guard.mjs');
 const TIMEOUT_MS = 12000;
 
 /** @type {typeof import('../shared/update-core.mjs') | null} */
@@ -24,6 +22,25 @@ let core = null;
 async function loadCore() {
   if (!core) core = await import(pathToFileURL(join(__dirname, '..', 'shared', 'update-core.mjs')).href);
   return core;
+}
+
+/**
+ * The pure download/asset guards, kept in an ES module so the test suite can
+ * import them without an Electron binary.
+ *
+ * v1.6.3 hotfix: this file is CommonJS, and `require()` of an ESM throws
+ * `ERR_REQUIRE_ESM` on the Node 20 that Electron 31 ships — at *module load*,
+ * before any window exists, so the app died on launch and its own updater could
+ * never run. Loaded lazily through a dynamic import instead, exactly like
+ * `loadCore()` above; both call sites were already async.
+ * @type {typeof import('../shared/asset-guard.mjs') | null}
+ */
+let assetGuard = null;
+async function loadGuard() {
+  if (!assetGuard) {
+    assetGuard = await import(pathToFileURL(join(__dirname, '..', 'shared', 'asset-guard.mjs')).href);
+  }
+  return assetGuard;
 }
 
 function settingsPath() {
@@ -239,13 +256,20 @@ function versionsDir() {
   return join(app.getPath('userData'), 'versions');
 }
 
-/** v1.6.2: a name from a manifest is a file name, never a path (see shared/asset-guard). */
-function safeAssetName(name) {
-  return assetGuard.safeAssetName(name);
+/**
+ * v1.6.2: a name from a manifest is a file name, never a path (see shared/asset-guard).
+ * Async since v1.6.3, because the guard is an ES module loaded with `import()`.
+ * @param {unknown} name
+ * @returns {Promise<string>} the plain file name, or '' when it is not one
+ */
+async function safeAssetName(name) {
+  const guard = await loadGuard();
+  return guard.safeAssetName(name);
 }
 
-function versionFileFor(asset) {
-  const safe = safeAssetName(asset?.name);
+/** @param {{ name?: unknown } | null | undefined} asset */
+async function versionFileFor(asset) {
+  const safe = await safeAssetName(asset?.name);
   if (!safe) throw new Error('安装包文件名不合法');
   return join(versionsDir(), safe);
 }
@@ -259,7 +283,7 @@ function versionFileFor(asset) {
  * @param {{ mirrorId?: string, onProgress?: (p: any) => void }} [options]
  */
 async function ensureDownloaded(url, asset, options = {}) {
-  const dest = versionFileFor(asset);
+  const dest = await versionFileFor(asset);
   await mkdir(versionsDir(), { recursive: true });
   try {
     const info = await stat(dest);
@@ -409,7 +433,8 @@ async function allowedDownloadHosts() {
 async function isAllowedAssetUrl(url) {
   const core = await loadCore();
   const hosts = await allowedDownloadHosts();
-  return assetGuard.assetUrlAllowed(url, { hosts, repo: core.REPO });
+  const guard = await loadGuard();
+  return guard.assetUrlAllowed(url, { hosts, repo: core.REPO });
 }
 
 async function openFolder(path) {

@@ -33,7 +33,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          { npm run typecheck && npm run selftest && npm run lantest && npm run test:update; } 2>&1 | tee test.log
+          { npm run typecheck && npm run selftest && npm run lantest && npm run test:update \
+            && node scripts/electron-load-check.cjs; } 2>&1 | tee test.log
 
       - name: Explain the test failure
         if: failure()
@@ -49,6 +50,12 @@ jobs:
         run: |
           set -o pipefail
           npm run build:desktop 2>&1 | tee build.log
+
+      - name: Desktop main-process smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:desktop 2>&1 | tee -a test.log
 
       - name: Package Windows app
         shell: bash
@@ -99,7 +106,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          { npm run typecheck && npm run test:update; } 2>&1 | tee test.log
+          { npm run typecheck && npm run test:update && node scripts/electron-load-check.cjs; } 2>&1 | tee test.log
 
       - name: Explain the test failure
         if: failure()
