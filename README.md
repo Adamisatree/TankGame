@@ -20,7 +20,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.6.3-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.6.4-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -33,12 +33,12 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.6.3-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.6.3-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.6.3-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.6.3-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.6.3-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.6.3-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.3/TankGame-1.6.3-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.6.4-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.6.4-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.6.4-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.6.4-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.6.4-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.6.4-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.4/TankGame-1.6.4-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
@@ -68,7 +68,7 @@ npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
 
 ## 自动更新、换版本、镜像下载
 
-菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.6.3`）：
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.6.4`）：
 
 - **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
 - **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
@@ -255,6 +255,23 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 - **随机地图先摇再广播**：以前房主和访客各摇各的，可能进不同的地图；
 - **再来一局不再重连**：房主重开时保留这条 socket（以前会重新建房，把全房间踢回房间界面）；
 - **访客的结算卡**上是「等房主再来一局」（重开由房主决定）。
+
+### 1.6.4 改了什么（团队凑不齐人 + 本地日志）
+
+- **座位耗尽（P0）**：掉线的座位会被保留 2 分钟（为了重连回原座），但 1.6.2 的「满了就拒绝」
+  把**保留位也算成了有人在**。一个晚上正常玩就能攒满 9 条保留记录，之后**所有新访客都被拒**，
+  房间明明空着却提示满员 —— 团队模式因此永远凑不齐人。现在容量是唯一硬闸，保留位在最久未归的人身上让位。
+- 同时修掉一处更隐蔽的越界：座位号循环写成了 `2…11`，**p11 是不存在的座位**
+  （没有配色、房主那边也没有输入行），访客拿到它就是「进来了但看不见」。
+- **本地日志**：安装目录下新增 `log\`（`tankgame-main.log` / `tankgame-renderer.log` /
+  `tankgame-server.log`），崩溃、未处理异常、渲染进程**卡死**（12 秒无心跳，附带最后
+  `phase` 与坦克数）、联机拒绝与断开都会落盘；512 KB 轮转、保留 5 份，装到只读目录时自动回退
+  `%APPDATA%\TankGame\log`。
+- **不再把玩家留在背景图上**：点开始后若场景 2 秒内没完成初始化，会弹出错误卡
+  （写明原因 + 日志目录），并带一个「用兼容模式重开」（切到 Canvas 渲染）的按钮。
+- 联机被拒的提示按原因说人话：满员 / 房主不在 / 版本不一致。
+
+逐条见 [`docs/v1.6.4-fixes.md`](docs/v1.6.4-fixes.md)。
 
 ### 1.6.3 改了什么（桌面版启动崩溃的热修）
 

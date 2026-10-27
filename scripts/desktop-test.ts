@@ -6,9 +6,10 @@
  *   npm run test:desktop   (needs `npm run build` first)
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, relative, resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { startLanServer } = require('../electron/lan-boot.cjs') as {
@@ -131,6 +132,76 @@ check('shutting down releases the port', await fetch(`${base}/`).then(() => fals
     run.status === 0 && output.includes('electron-load ok'),
     failures || `exit ${run.status}`
   );
+}
+
+// --- v1.6.4: the log files a player can send us ---------------------------
+{
+  const { createLogger } = require('../electron/log.cjs') as {
+    createLogger: (options: {
+      dir?: string;
+      fallbackDir?: string;
+      maxBytes?: number;
+      keep?: number;
+    }) => {
+      write: (stream: string, line: unknown) => boolean;
+      dir: () => string | null;
+      reason: () => string;
+      file: (stream: string) => string;
+    };
+  };
+
+  const scratch = mkdtempSync(join(tmpdir(), 'tankgame-log-'));
+
+  // 1. Plain append.
+  const plain = createLogger({ dir: join(scratch, 'log'), fallbackDir: join(scratch, 'fallback') });
+  const wrote = plain.write('tankgame-main.log', 'hello from the test');
+  const text = readFileSync(join(scratch, 'log', 'tankgame-main.log'), 'utf8');
+  check('the logger writes the line it was given', wrote && text.includes('hello from the test'), text.slice(0, 80));
+  check('every line is timestamped', /^\d{4}-\d{2}-\d{2}T/.test(text), text.slice(0, 40));
+
+  // 2. Rotation: 512 KB is the production limit, 200 bytes here so the test is quick.
+  const rotating = createLogger({ dir: join(scratch, 'rot'), fallbackDir: '', maxBytes: 400, keep: 2 });
+  for (let index = 0; index < 60; index += 1) rotating.write('tankgame-renderer.log', `line ${index} ${'x'.repeat(40)}`);
+  const rotated = readdirSync(join(scratch, 'rot')).sort();
+  check('a full log is rotated, not truncated', rotated.length > 1, rotated.join(','));
+  check('only the newest archives are kept', rotated.filter((n) => /-\d+\.log$/.test(n)).length <= 2, rotated.join(','));
+
+  // 3. An unwritable install folder falls back to userData and says why.
+  const blocker = join(scratch, 'not-a-folder');
+  writeFileSync(blocker, 'x');
+  const fallback = createLogger({ dir: join(blocker, 'log'), fallbackDir: join(scratch, 'user', 'log') });
+  const fellBack = fallback.write('tankgame-main.log', 'after the fallback');
+  check('an unwritable install folder falls back', fellBack && fallback.dir() === join(scratch, 'user', 'log'), String(fallback.dir()));
+  check('...and the reason is recorded', fallback.reason().includes('not writable'), fallback.reason());
+
+  // 4. Logging can never be the reason a crash happens.
+  let survived = true;
+  try {
+    const junk = createLogger({ dir: '', fallbackDir: '' });
+    junk.write('', undefined);
+    junk.write('../../etc/passwd', null);
+    junk.write('x'.repeat(500), { toString: () => 'object' });
+    (createLogger as unknown as (options: unknown) => { write: (a: unknown, b: unknown) => boolean })(null).write('a', 'b');
+  } catch {
+    survived = false;
+  }
+  check('the logger never throws, whatever it is handed', survived);
+
+  // 5. A real crash in the main process lands in the file, and the process still
+  //    exits non-zero (logging must not swallow the crash).
+  const crashRoot = join(scratch, 'crash');
+  mkdirSync(crashRoot, { recursive: true });
+  const crash = spawnSync(process.execPath, ['scripts/electron-load-check.cjs', '--crash'], {
+    cwd: resolve('.'),
+    encoding: 'utf8',
+    env: { ...process.env, TANK_APP_ROOT: crashRoot },
+  });
+  const crashLog = join(crashRoot, 'log', 'tankgame-main.log');
+  const crashText = existsSync(crashLog) ? readFileSync(crashLog, 'utf8') : '';
+  check('an uncaught exception is written to the log', crashText.includes('boom-from-test'), crashText.slice(0, 200));
+  check('the app still dies after logging it', crash.status === 1, `exit ${crash.status}`);
+
+  rmSync(scratch, { recursive: true, force: true });
 }
 
 let failed = 0;

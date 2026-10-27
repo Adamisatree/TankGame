@@ -26,13 +26,20 @@ const os = require('node:os');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
-const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'tankgame-load-'));
+// v1.6.4: the main process now creates `<app>/log` while it loads, so the stub
+// points `getAppPath()` at a scratch folder — loading the app must never leave
+// files in the checkout. `TANK_APP_ROOT` lets the test inspect what was written.
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'tankgame-load-'));
+const appRoot = process.env.TANK_APP_ROOT || sandbox;
+const userData = path.join(sandbox, 'userData');
+fs.mkdirSync(userData, { recursive: true });
 
 const noop = () => {};
 const app = {
-  isPackaged: false,
+  isPackaged: true,
   getPath: (key) => (key === 'userData' ? userData : path.join(userData, String(key))),
-  getAppPath: () => root,
+  getAppPath: () => appRoot,
+  getVersion: () => require(path.join(root, 'package.json')).version,
   // Never resolves: no window, no LAN server, nothing to clean up afterwards.
   whenReady: () => new Promise(noop),
   on: noop,
@@ -128,6 +135,22 @@ async function main() {
     const requiredGuard = Object.keys(Module._cache).filter((file) => file.endsWith('asset-guard.mjs'));
     check('the ES-module guard is not loaded through require()', requiredGuard.length === 0, requiredGuard.join(', '));
   }
+
+  // --- v1.6.4: the app opens a log file as soon as it starts.
+  const mainLog = path.join(appRoot, 'log', 'tankgame-main.log');
+  const mainText = fs.existsSync(mainLog) ? fs.readFileSync(mainLog, 'utf8') : '';
+  check('starting the app writes log/tankgame-main.log', mainText.length > 0, mainLog);
+  check('the first line names the version and the log folder', /=== TankGame \d+\.\d+\.\d+ started/.test(mainText), mainText.split('\n')[0]);
+  check('the crash handlers are installed', process.listenerCount('uncaughtException') >= 1 && process.listenerCount('unhandledRejection') >= 1);
+
+  // `--crash`: throw *after* the checks so the parent can prove a crash still
+  // reaches the log file (and that the process still exits non-zero).
+  if (process.argv.includes('--crash')) {
+    setTimeout(() => {
+      throw new Error('boom-from-test');
+    }, 5);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
 }
 
 main()
@@ -138,7 +161,7 @@ main()
       console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${!ok && detail ? ` — ${detail}` : ''}`);
       if (!ok) failed++;
     }
-    fs.rmSync(userData, { recursive: true, force: true });
+    if (!process.env.TANK_APP_ROOT) fs.rmSync(sandbox, { recursive: true, force: true });
     console.log(failed ? `electron-load FAILED (${failed})` : `electron-load ok (${results.length})`);
     process.exit(failed ? 1 : 0);
   });

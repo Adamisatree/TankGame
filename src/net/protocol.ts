@@ -284,7 +284,7 @@ export type ServerMessage =
     }
   | { t: 'config'; config: Record<string, unknown>; tuning?: Record<string, number> }
   | { t: 'peer'; state: 'joined' | 'left'; id?: string; host?: boolean; skill?: string; version?: string }
-  | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string }
+  | { t: 'reject'; reason: 'version' | 'full' | 'unknown'; hostVersion?: string; yourVersion?: string; capacity?: number }
   | { t: 'surrender'; by: string }
   | { t: 'input'; input: TankInput; seq: number; from?: string }
   /** The host's map arrived; store it, then answer with `map-ack`. */

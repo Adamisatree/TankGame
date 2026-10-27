@@ -92,6 +92,13 @@ declare global {
       isDesktop?: boolean;
       scanLan?: () => Promise<{ name: string; host: string; port: number }[]>;
       update?: UpdateBridge;
+      /** v1.6.4: local log files (desktop) — see src/log.ts. */
+      log?: {
+        write?: (entry: { level?: string; source?: string; message?: string; stack?: string }) => void;
+        heartbeat?: (state: string) => void;
+        folder?: () => Promise<{ dir: string; reason: string }>;
+        reveal?: () => Promise<boolean>;
+      };
     };
   }
 }

@@ -15,6 +15,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appendFileSync } from 'node:fs';
 import { WebSocketServer } from 'ws';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -78,7 +79,31 @@ export function createLanServer({
   coalesceBacklog,
   slowBacklog,
   heartbeatMs,
+  /** v1.6.4: `(line) => void`, wired to the desktop log folder by lan-boot. */
+  logLine,
+  /** v1.6.4: append to this file instead (standalone `node server/lan-server.mjs`). */
+  logFile,
 } = {}) {
+  // Logging is diagnostics, never behaviour: a full disk, a locked file or a
+  // junk callback must not affect a single message the server relays.
+  const writeLog =
+    typeof logLine === 'function'
+      ? (line) => {
+          try {
+            logLine(line);
+          } catch {
+            /* ignore */
+          }
+        }
+      : typeof logFile === 'string' && logFile
+        ? (line) => {
+            try {
+              appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`, 'utf8');
+            } catch {
+              /* ignore */
+            }
+          }
+        : () => {};
   // v1.6.2: the room, the watermarks and the counters live in this closure.
   // They used to be module-level, so a second `createLanServer()` in the same
   // process silently shared the first one's room (tests, embedded use).
@@ -495,28 +520,63 @@ export function createLanServer({
    * game knows (p2…p10) however long the room lives.
    *
    * A seat whose owner dropped is still reserved by `room.sessions`, so a
-   * reconnecting guest always gets *its own* number back and never collides with
-   * a newcomer.
+   * reconnecting guest gets *its own* number back and never collides with a
+   * newcomer.
+   *
+   * v1.6.4: a reservation is a *promise*, not an occupant.
+   *
+   * v1.6.2 changed the overflow case from "hand out p11" (no colour, no input
+   * routing) to "refuse the join", but it counted every seat still waiting for a
+   * reconnect as taken. Nine guests coming and going inside two minutes — one
+   * evening of play — therefore reserved p2…p10 and the room refused everybody
+   * with `every seat is taken` while it was visibly empty. Now the *capacity*
+   * check upstream is the only hard gate: when every seat is free but reserved,
+   * the longest-absent reservation is dropped and its seat goes to the newcomer.
+   * Reconnect-from-your-old-seat stays best effort (it always was: the TTL is
+   * what ends it), and nobody is ever turned away from a room that has space.
+   *
+   * @returns {string | null} a seat id, or null when the seats really are taken
    */
   function nextSeatId() {
     const now = Date.now();
-    const reserved = new Set();
+    /** @type {Map<string, number>} seat id -> when its owner left */
+    const reserved = new Map();
     for (const [session, entry] of room.sessions) {
       if (now - entry.leftAt > SESSION_TTL_MS) {
         room.sessions.delete(session);
         continue;
       }
-      reserved.add(entry.id);
+      reserved.set(entry.id, entry.leftAt);
     }
-    for (let seat = 2; seat < SEAT_LIMIT + 2; seat += 1) {
+    // v1.6.4: `seat < SEAT_LIMIT + 2` ran to p11 — a seat with no palette colour
+    // and no input line on the host (`MAX_SEATS`/`SEAT_COLORS` stop at p10). It
+    // was unreachable while the capacity check ran first, but a room full of
+    // *reservations* with few live players could still hand it out; the client
+    // then had nowhere to put that tank. p2…p10 is the whole range.
+    for (let seat = 2; seat <= SEAT_LIMIT; seat += 1) {
       const id = `p${seat}`;
       if (room.players.has(id) || reserved.has(id)) continue;
       return id;
     }
-    // Every seat is spoken for (live players plus seats still reserved for a
-    // reconnect). v1.6.2: the old fallback handed out p11+, which has no colour
-    // and no input routing — the caller now refuses the join instead.
-    return null;
+    // Every seat is reserved. Give the newcomer the one whose owner has been
+    // away the longest: that is the one least likely to come back, and the
+    // caller has already established that the room has room (players < capacity).
+    let oldestId = null;
+    let oldestAt = Infinity;
+    for (const [id, leftAt] of reserved) {
+      if (room.players.has(id)) continue;
+      if (leftAt < oldestAt) {
+        oldestAt = leftAt;
+        oldestId = id;
+      }
+    }
+    if (!oldestId) return null; // every seat is held by somebody who is here
+    for (const [session, entry] of room.sessions) {
+      if (entry.id === oldestId) room.sessions.delete(session);
+    }
+    console.log(`[lan] seat ${oldestId} taken back from a stale reservation`);
+    writeLog(`[lan] seat ${oldestId} reclaimed from a stale reservation`);
+    return oldestId;
   }
 
   function rememberSession(ws, id) {
@@ -644,6 +704,7 @@ export function createLanServer({
         if (role === 'guest' && ws.version !== VERSION) {
           send(ws, { t: 'reject', reason: 'version', hostVersion: VERSION, yourVersion: ws.version });
           console.log(`[lan] rejected guest ${ws.version} (host ${VERSION})`);
+          writeLog(`[lan] refused guest: version ${ws.version} (host ${VERSION})`);
           ws.role = null;
           return;
         }
@@ -675,6 +736,7 @@ export function createLanServer({
           if (isMapPayload(msg.map)) setRoomMap(msg.map, msg.mapHash ?? msg.hash);
           send(ws, { t: 'joined', role: 'host', id: 'p1', guest: false, capacity: room.capacity, version: VERSION });
           console.log('[lan] host joined');
+          writeLog('[lan] host joined');
           announceRoster();
           return;
         }
@@ -760,12 +822,16 @@ export function createLanServer({
         if (room.players.size >= room.capacity || !room.host) {
           send(ws, { t: 'reject', reason: room.host ? 'full' : 'unknown', capacity: room.capacity });
           console.log(`[lan] rejected guest: room ${room.players.size}/${room.capacity}`);
+          writeLog(`[lan] refused guest: room full ${room.players.size}/${room.capacity}`);
           return;
         }
         const id = nextSeatId();
         if (!id) {
+          // v1.6.4: after the reservation fix this means every guest seat is
+          // held by somebody who is *here* — a real full house.
           send(ws, { t: 'reject', reason: 'full', capacity: room.capacity });
           console.log('[lan] rejected guest: every seat is taken');
+          writeLog('[lan] refused guest: every seat is taken');
           return;
         }
         ws.playerId = id;
@@ -788,6 +854,7 @@ export function createLanServer({
           peerVersion: room.host?.version,
         });
         console.log(`[lan] guest ${id} joined (${room.players.size}/${room.capacity})`);
+        writeLog(`[lan] guest ${id} joined (${room.players.size}/${room.capacity})`);
         // The host is the one client that may see a seat's skill, but even it
         // gets that from the roster, not from this notification.
         // A map picked before this guest walked in still has to reach it.
@@ -1012,6 +1079,7 @@ export function createLanServer({
       if (seat) unlink(ws);
       ws.role = null;
       if (seat) console.log(`[lan] ${seat} disconnected (${room.players.size}/${room.capacity})`);
+      if (seat) writeLog(`[lan] ${seat} disconnected (${room.players.size}/${room.capacity})`);
     });
   });
 
@@ -1055,6 +1123,7 @@ export function createLanServer({
       const actual = typeof addr === 'object' && addr ? addr.port : port;
       currentPort = actual;
       cleanup();
+      writeLog(`[lan] listening on ${host}:${actual} (v${VERSION})`);
       if (!quiet) {
         const ips = lanAddresses();
         console.log(`\n  坦克大作战 · 局域网服务已启动`);
@@ -1094,6 +1163,7 @@ export function createLanServer({
               if (settled) return;
               settled = true;
               if (guard) clearTimeout(guard);
+              writeLog('[lan] stopped');
               done();
             };
             guard = setTimeout(finish, 2000);

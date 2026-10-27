@@ -52,13 +52,36 @@ import {
 } from './maps/store';
 import { refreshLevels } from './maps/registry';
 import { APP_VERSION } from './version';
+import { drainPreviousErrors, installErrorHooks, logFolder, logLine, revealLogs, startHeartbeat } from './log';
 import './update/types';
 
 const overlay = document.getElementById('overlay') as HTMLDivElement;
 const card = document.getElementById('card') as HTMLDivElement;
 
+/**
+ * v1.6.4: if a machine's WebGL driver wedges the canvas, nothing in the page can
+ * fix it — but the player can be moved to Phaser's Canvas renderer, which is
+ * slower and far more forgiving. The error card offers that switch; the choice
+ * sticks for the next launches.
+ */
+const RENDER_KEY = 'tankduel.renderer';
+function forcesCanvas(): boolean {
+  try {
+    return localStorage.getItem(RENDER_KEY) === 'canvas';
+  } catch {
+    return false;
+  }
+}
+function forceCanvasNextTime(): void {
+  try {
+    localStorage.setItem(RENDER_KEY, 'canvas');
+  } catch {
+    /* storage disabled: the reload still retries */
+  }
+}
+
 const game = new Phaser.Game({
-  type: Phaser.AUTO,
+  type: forcesCanvas() ? Phaser.CANVAS : Phaser.AUTO,
   parent: 'game',
   width: GAME_W,
   height: GAME_H,
@@ -77,6 +100,20 @@ const game = new Phaser.Game({
 });
 
 const gameScene = (): GameScene | null => (game.scene.getScene('Game') as GameScene | null) ?? null;
+
+// ---------------------------------------------------------------- diagnostics
+//
+// v1.6.4: "it froze on the background picture" had no trace anywhere. From now
+// on an exception, a rejected promise and a stopped heartbeat all end up in
+// `log\tankgame-renderer.log` (desktop) or localStorage (browser).
+installErrorHooks();
+startHeartbeat(() => (game.scene.isActive('Game') ? gameScene() : null));
+for (const old of drainPreviousErrors()) {
+  // Errors from the last run: fold them into this run's log so a crash the
+  // player has already restarted past is still on the record.
+  logLine({ level: 'previous', source: 'last-run', message: old });
+  console.warn('[tankgame] previous run:', old);
+}
 
 let state: OverlayState = { kind: 'start' };
 
@@ -965,13 +1002,81 @@ function returnToMenu(): void {
 function startMatch(): void {
   sound.resume();
   sound.ui();
-  game.scene.stop('Menu');
-  if (game.scene.isActive('Game')) {
-    // Re-entering with a different mode has to rebuild the scene.
-    game.scene.stop('Game');
+  try {
+    game.scene.stop('Menu');
+    if (game.scene.isActive('Game')) {
+      // Re-entering with a different mode has to rebuild the scene.
+      game.scene.stop('Game');
+    }
+    game.scene.start('Game');
+  } catch (error) {
+    const err = error as Error;
+    logLine({ level: 'fatal', source: 'startMatch', message: err?.message ?? String(error), stack: err?.stack ?? '' });
+    showBootFailure(err?.message ?? String(error));
+    return;
   }
-  game.scene.start('Game');
   render({ kind: 'hidden' });
+  watchBoot();
+}
+
+/**
+ * v1.6.4: the scene is started, but did it finish `create()`?
+ *
+ * Phaser swallows exceptions thrown inside a scene's `create()` in some builds,
+ * and the overlay is already hidden by then — the player sees the paper
+ * background and nothing else, forever. If the scene has not signalled `booted`
+ * after two seconds, say so on screen (with the log folder) instead of leaving
+ * them staring at a picture.
+ */
+function watchBoot(): void {
+  window.setTimeout(() => {
+    const scene = gameScene();
+    if (scene?.booted === true && game.scene.isActive('Game')) return;
+    showBootFailure('开局画面没有完成初始化');
+  }, 2000);
+}
+
+/** Full-screen, state-machine-free failure card: the match never began. */
+function showBootFailure(detail: string): void {
+  logLine({ level: 'fatal', source: 'boot-watchdog', message: detail });
+  try {
+    game.scene.stop('Game');
+  } catch {
+    /* the scene was never up */
+  }
+  overlay.classList.remove('hidden');
+  card.setAttribute('data-state', 'error');
+  card.classList.remove('wide');
+  card.innerHTML = `
+    <div class="kicker">TankGame ${APP_VERSION}</div>
+    <h1>这一局没能<strong>开始</strong></h1>
+    <div class="rule"></div>
+    <p>${escapeHtml(detail)}</p>
+    <p class="hint" id="boot-log-hint">正在收集日志…</p>
+    <div class="actions">
+      <button class="primary" id="boot-back">返回菜单</button>
+      <button class="ghost" id="boot-compat">用兼容模式重开</button>
+      <button class="ghost" id="boot-logs" hidden>打开日志目录</button>
+    </div>
+    <p class="hint">画面卡住、只看到背景图时，先试「兼容模式」：它换成软件的 Canvas 渲染，慢一点但几乎不会卡。</p>`;
+  document.getElementById('boot-back')?.addEventListener('click', () => render({ kind: 'start' }));
+  document.getElementById('boot-compat')?.addEventListener('click', () => {
+    forceCanvasNextTime();
+    logLine({ level: 'info', source: 'boot-watchdog', message: 'switching to the canvas renderer' });
+    window.location.reload();
+  });
+  document.getElementById('boot-logs')?.addEventListener('click', () => void revealLogs());
+  void logFolder().then((dir) => {
+    const hint = document.getElementById('boot-log-hint');
+    const button = document.getElementById('boot-logs');
+    if (!hint) return;
+    if (dir) {
+      hint.textContent = `日志已写在这里：${dir}`;
+      if (button) button.removeAttribute('hidden');
+    } else {
+      hint.textContent = '浏览器版没有日志文件，错误已记录在本机浏览器存储里。';
+    }
+  });
 }
 
 
