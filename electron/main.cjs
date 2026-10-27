@@ -205,7 +205,8 @@ ipcMain.handle('update:download', async (event, payload) => {
   if (!rawName || !version) return { ok: false, error: 'missing asset' };
   // v1.6.2: the manifest is fetched over the network, so its values are input,
   // not trust. A `name` of `..\..\evil.exe` was written outside the version store.
-  const assetName = updater.safeAssetName(rawName);
+  // v1.6.3: the guard lives in an ES module, so this is a dynamic import now.
+  const assetName = await updater.safeAssetName(rawName);
   if (!assetName) return { ok: false, error: '安装包文件名不合法' };
   // Only a real sha256 is worth comparing; a dirty value made every mirror
   // report a mismatch (D5).

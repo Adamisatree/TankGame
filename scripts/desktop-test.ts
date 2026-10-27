@@ -5,9 +5,10 @@
  *
  *   npm run test:desktop   (needs `npm run build` first)
  */
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { startLanServer } = require('../electron/lan-boot.cjs') as {
@@ -55,7 +56,7 @@ check('shutting down releases the port', await fetch(`${base}/`).then(() => fals
 {
   // The guards are pure (shared/asset-guard.mjs), so they can be checked without
   // an Electron binary — which is also why they live there now.
-  const guard = require('../shared/asset-guard.mjs') as {
+  const guard = (await import('../shared/asset-guard.mjs')) as unknown as {
     safeAssetName: (name: unknown) => string;
     assetUrlAllowed: (url: string, options: { hosts: string[]; repo: string }) => boolean;
   };
@@ -86,6 +87,50 @@ check('shutting down releases the port', await fetch(`${base}/`).then(() => fals
     !allowed('https://github.com/Adamisatree/TankGame-evil/releases/download/v1/TankGame.exe')
   );
   check('plain http is refused', !allowed(`http://github.com/${repo}/releases/download/v1/x.exe`));
+}
+
+// --- v1.6.3: the app itself must be able to start -----------------------
+{
+  // 1.6.2 shipped with `require('../shared/asset-guard.mjs')` in a CommonJS
+  // main-process file. On the Node inside Electron that is a load-time
+  // ERR_REQUIRE_ESM, so every desktop user got a crash instead of a game — and
+  // nothing here loaded that file, which is how a green suite shipped it.
+  const offenders: string[] = [];
+  const scan = (dir: string): void => {
+    for (const entry of readdirSync(resolve(dir), { withFileTypes: true })) {
+      const full = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== 'node_modules') scan(full);
+        continue;
+      }
+      if (!/\.(cjs|js)$/.test(entry.name)) continue;
+      const hit = readFileSync(full, 'utf8').match(/require\(\s*['"][^'"]+\.mjs['"]\s*\)/);
+      if (hit) offenders.push(`${relative('.', full)}: ${hit[0]}`);
+    }
+  };
+  for (const dir of ['electron', 'server', 'shared', 'scripts']) scan(dir);
+  check('no CommonJS file requires an ES module', offenders.length === 0, offenders.join('; '));
+
+  // 2. Actually load the main-process modules (stub `electron`, no binary).
+  //    `--no-experimental-require-module` restores Node 20's rule on Node ≥ 22,
+  //    where `require()` of ESM would otherwise silently work and hide it again.
+  const major = Number(process.versions.node.split('.')[0]);
+  const flags = major >= 22 ? ['--no-experimental-require-module'] : [];
+  const run = spawnSync(process.execPath, [...flags, 'scripts/electron-load-check.cjs'], {
+    cwd: resolve('.'),
+    encoding: 'utf8',
+  });
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  const failures = output
+    .split('\n')
+    .filter((line) => line.includes('FAIL'))
+    .map((line) => line.trim())
+    .join(' | ');
+  check(
+    'the main process loads (updater.cjs + main.cjs)',
+    run.status === 0 && output.includes('electron-load ok'),
+    failures || `exit ${run.status}`
+  );
 }
 
 let failed = 0;
