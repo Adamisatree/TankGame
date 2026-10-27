@@ -1,0 +1,3 @@
+run: https://github.com/Adamisatree/TankGame/actions/runs/40434238757
+job: macos
+no build.log
