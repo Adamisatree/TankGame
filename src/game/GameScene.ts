@@ -370,7 +370,25 @@ export class GameScene extends Phaser.Scene {
 
   // ------------------------------------------------------------------ setup
 
+  /**
+   * v1.6.4: set at the *end* of `create()`. The menu watches it for a couple of
+   * seconds after pressing 开始: a scene that never gets there leaves the canvas
+   * showing the paper background forever, with the overlay already hidden — the
+   * "stuck on the background picture" report. Seeing it from the outside is the
+   * only way to tell that apart from "the match started and nothing moves".
+   */
+  booted = false;
+
+  /** v1.6.4: one line of state for the freeze watchdog (no secrets). */
+  logState(): string {
+    return (
+      `phase=${this.phase} tanks=${this.tanks().length} paused=${this.paused} ` +
+      `matchOver=${this.matchOver} mode=${settings.mode} role=${this.lanRole ?? '-'}`
+    );
+  }
+
   create(): void {
+    this.booted = false;
     makeTextures(this);
     paperBackground(this);
 
@@ -428,6 +446,8 @@ export class GameScene extends Phaser.Scene {
     });
 
     if (this.lanMode) this.connectLan();
+    // Last statement of create(): everything a live match needs exists now.
+    this.booted = true;
   }
 
   // ------------------------------------------------------------------ LAN

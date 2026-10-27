@@ -1027,6 +1027,19 @@ check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown 
   await wait(1200);
 }
 
+// --- v1.6.4: the boot watchdog and the freeze heartbeat -------------------
+//
+// main.ts hides the overlay and then waits for the scene to announce that
+// create() finished. If the scene cannot say that, the player gets an error card
+// with the log folder instead of a still picture.
+{
+  const booted = scene as unknown as { booted: boolean; logState: () => string };
+  check('the game scene reports itself booted', booted.booted === true, String(booted.booted));
+  const state = booted.logState();
+  check('the heartbeat line names the phase', /phase=\w+/.test(state), state);
+  check('the heartbeat line says how many tanks are up', /tanks=\d+/.test(state), state);
+}
+
 // --- v1.6.2: the client half of the review -------------------------------
 //
 // Everything below is a symptom a player actually hit: a reconnect that healed

@@ -12,6 +12,7 @@ const path = require('node:path');
 const { startLanServer } = require('./lan-boot.cjs');
 const { startBeacon, scanForHosts, localIPv4 } = require('./discovery.cjs');
 const updater = require('./updater.cjs');
+const { createLogger } = require('./log.cjs');
 const { pathToFileURL: toFileUrl } = require('node:url');
 
 const DEV_URL = process.env.TANK_DEV_URL; // set to http://localhost:5173 while developing the UI
@@ -19,10 +20,102 @@ let serverHandle = null;
 let win = null;
 let beacon = null;
 
+// ---------------------------------------------------------------- local logs
+//
+// v1.6.4: every "it just froze" report needs a file to look at. The log folder
+// sits inside the installation (`<app>\log`) so a player can find it without
+// digging through AppData; if the install is read-only we fall back to
+// `userData\log` and say so in the first line (see electron/log.cjs).
+const APP_ROOT = app.isPackaged ? app.getAppPath() : path.join(__dirname, '..');
+const logs = createLogger({
+  dir: path.join(APP_ROOT, 'log'),
+  fallbackDir: path.join(app.getPath('userData'), 'log'),
+});
+
+function writeLog(stream, line) {
+  return logs.write(stream, line);
+}
+
+function startupBanner() {
+  const where = logs.dir() ?? '(nowhere writable)';
+  const why = logs.reason();
+  writeLog(
+    'tankgame-main.log',
+    `=== TankGame ${app.getVersion()} started · pid ${process.pid} · ${process.platform} · ` +
+      `electron ${process.versions.electron ?? '-'} · node ${process.versions.node} · log ${where}` +
+      (why ? ` (${why})` : '') +
+      ' ==='
+  );
+}
+
+startupBanner();
+
+// A crash has to be *recorded* before the process goes away. Node's default for
+// an uncaught exception is to exit; keeping that behaviour (rather than silently
+// continuing in a half-dead main process) is what the player expects. The write
+// is synchronous, so the line is on disk before exit(1).
+process.on('uncaughtException', (error) => {
+  writeLog('tankgame-main.log', `[main-crash] ${error && error.stack ? error.stack : String(error)}`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  writeLog('tankgame-main.log', `[main-rejection] ${reason && reason.stack ? reason.stack : String(reason)}`);
+});
+
+// "The picture stopped moving but the window is alive" is not a JS error and not
+// a crash: the renderer stops answering. The renderer sends a heartbeat every
+// second with the scene phase, so this log line says *where* it stopped.
+const FREEZE_MS = 12_000;
+let lastHeartbeat = Date.now();
+let lastState = 'unknown';
+let freezeLoggedAt = 0;
+
+setInterval(() => {
+  try {
+    if (!win || win.isDestroyed() || !lastState) return;
+    const idle = Date.now() - lastHeartbeat;
+    if (idle < FREEZE_MS) return;
+    // Once a minute while it stays stuck, not four times per second.
+    if (Date.now() - freezeLoggedAt < 60_000) return;
+    freezeLoggedAt = Date.now();
+    writeLog(
+      'tankgame-main.log',
+      `[freeze] renderer silent for ${Math.round(idle / 1000)}s — last state: ${lastState}`
+    );
+  } catch {
+    /* a watchdog must never be the reason for a crash */
+  }
+}, 3000).unref();
+
+ipcMain.on('log:heartbeat', (_event, state) => {
+  lastHeartbeat = Date.now();
+  lastState = typeof state === 'string' ? state.slice(0, 300) : '';
+});
+
+ipcMain.on('log:write', (_event, entry) => {
+  const item = entry && typeof entry === 'object' ? entry : {};
+  const clip = (value, max) => String(value ?? '').slice(0, max);
+  writeLog(
+    'tankgame-renderer.log',
+    `[${clip(item.level, 16) || 'error'}] ${clip(item.source, 64) || 'renderer'} ${clip(item.message, 2000)} ${clip(item.stack, 8000)}`
+  );
+});
+
+ipcMain.handle('log:path', () => ({ dir: logs.dir() ?? '', reason: logs.reason() }));
+
+ipcMain.handle('log:reveal', async () => {
+  const dir = logs.dir();
+  if (!dir) return false;
+  await shell.openPath(dir);
+  return true;
+});
+
 async function startServer() {
-  const appRoot = app.isPackaged ? app.getAppPath() : path.join(__dirname, '..');
   // 8787 first, then a few neighbours, and finally any free port.
-  return startLanServer({ appRoot });
+  return startLanServer({
+    appRoot: APP_ROOT,
+    logLine: (line) => writeLog('tankgame-server.log', line),
+  });
 }
 
 function buildMenu(port) {
@@ -115,7 +208,9 @@ app.whenReady().then(async () => {
     serverHandle = await startServer();
     beacon = startBeacon(serverHandle.port);
     console.log(`[desktop] LAN server on port ${serverHandle.port}`);
+    writeLog('tankgame-main.log', `[lan] server on port ${serverHandle.port}`);
   } catch (err) {
+    writeLog('tankgame-main.log', `[lan] server failed to start: ${err && err.stack ? err.stack : String(err)}`);
     dialog.showErrorBox('无法启动局域网服务', String(err));
   }
   buildMenu(serverHandle?.port ?? 0);

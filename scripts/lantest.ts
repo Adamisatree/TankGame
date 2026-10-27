@@ -883,6 +883,80 @@ console.log('\nmap checklist after a departure (A-4)');
   await fresh.close();
 }
 
+// v1.6.4: reservations must never fake a full room -----------------------
+//
+// v1.6.2 refused a join when no seat id was free, but a seat whose owner had
+// left stays reserved for two minutes (so a reconnect lands back in its own
+// tank). Nine guests in and out inside that window — one evening of play —
+// reserved p2…p10 and the room then refused *everybody* with "every seat is
+// taken" while it was visibly empty. Reported as "team mode can never fill up".
+console.log('\nseat reservations do not fake a full room (v1.6.4)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+  // Room big enough that a seat shortage can only come from reservations.
+  host.send({ t: 'config', capacity: 10, mode: 'team', teams: 2, roomName: 'seats' });
+  await sleep(80);
+
+  // Ten guests in and out: ten reservations cover every seat there is, which is
+  // what an evening of play does. (Nine was not enough to fill p2…p11, which is
+  // exactly the off-by-one below.)
+  const used: string[] = [];
+  const refusals: string[] = [];
+  for (let index = 0; index < 10; index += 1) {
+    const guest = await open(url);
+    guest.send({ t: 'join', role: 'guest', version: TANK_VERSION, session: `left-${index}` });
+    await waitFor(() => guest.messages.some((m) => m.t === 'joined' || m.t === 'reject'), 2000);
+    const joined = guest.messages.find((m) => m.t === 'joined');
+    if (joined) used.push(String(joined.id));
+    else refusals.push(JSON.stringify(guest.messages.find((m) => m.t === 'reject')));
+    guest.close();
+    await sleep(50);
+  }
+  check('ten guests in and out never ran out of seats', refusals.length === 0, refusals.join(' '));
+  check('they reused the nine real seats', new Set(used).size === 9, used.join(','));
+  check('no seat outside p2…p10 was handed out', used.every((id) => /^p([2-9]|10)$/.test(id)), used.join(','));
+
+  const late = await open(url);
+  late.send({ t: 'join', role: 'guest', version: TANK_VERSION, session: 'late-arrival' });
+  await waitFor(() => late.messages.some((m) => m.t === 'joined' || m.t === 'reject'), 2000);
+  const lateReject = late.messages.find((m) => m.t === 'reject');
+  const lateJoin = late.messages.find((m) => m.t === 'joined');
+  check('an empty room still seats a newcomer after ten reservations', !lateReject && !!lateJoin, JSON.stringify(late.messages));
+  check('the newcomer gets one of the reserved seats back', typeof lateJoin?.id === 'string' && used.includes(lateJoin.id), `${lateJoin?.id} vs ${used.join(',')}`);
+
+  const roster = host.messages.filter((m) => m.t === 'roster').pop();
+  const ids = (roster?.players ?? []).map((p: { id: string }) => p.id);
+  check('the host sees exactly the two of them', ids.length === 2 && ids.includes('p1'), JSON.stringify(ids));
+
+  // The room is genuinely full once the capacity is reached: the refusal has to
+  // stay a refusal (no seat may be minted outside p2…p10).
+  const crowd: Box[] = [];
+  for (let index = 0; index < 8; index += 1) {
+    const guest = await open(url);
+    guest.send({ t: 'join', role: 'guest', version: TANK_VERSION, session: `crowd-${index}` });
+    await waitFor(() => guest.messages.some((m) => m.t === 'joined' || m.t === 'reject'), 1500);
+    crowd.push(guest);
+  }
+  const overflow = await open(url);
+  overflow.send({ t: 'join', role: 'guest', version: TANK_VERSION, session: 'overflow' });
+  await waitFor(() => overflow.messages.some((m) => m.t === 'joined' || m.t === 'reject'), 1500);
+  const overflowReject = overflow.messages.find((m) => m.t === 'reject');
+  check('a genuinely full room still refuses, and says why', overflowReject?.reason === 'full', JSON.stringify(overflow.messages));
+  const seats = [...crowd, late].map((box) => box.messages.find((m) => m.t === 'joined')?.id).filter(Boolean);
+  check('every seat handed out stays inside p2…p10', seats.every((id) => /^p([2-9]|10)$/.test(String(id))), seats.join(','));
+
+  overflow.close();
+  for (const box of crowd) box.close();
+  late.close();
+  host.close();
+  await sleep(150);
+  await fresh.close();
+}
+
 const failed = checks.filter((c) => !c.ok);
 console.log('');
 console.log(`${checks.length - failed.length}/${checks.length} LAN checks passed`);

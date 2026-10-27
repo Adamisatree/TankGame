@@ -217,7 +217,9 @@ export class LanClient {
             'rejected',
             msg.reason === 'version'
               ? `版本不一致：房主 ${msg.hostVersion ?? '?'}，你是 ${msg.yourVersion ?? APP_VERSION}。请两边用同一版本。`
-              : '房间拒绝了这次连接。'
+              : msg.reason === 'full'
+                ? `房间满了${msg.capacity ? `（最多 ${msg.capacity} 人）` : ''}，等有人离开再试。`
+                : '房主不在房间里，稍后再试（或问一下房主的地址）。'
           );
           try {
             this.ws?.close();
