@@ -97,13 +97,24 @@ const DOWN = Math.PI / 2;
 // ------------------------------------------------------------------ helpers
 
 /** FNV-1a – tiny, dependency free, good enough to spot a corrupted transfer. */
+/**
+ * 64-bit FNV-1a over UTF-16 code units.
+ *
+ * v1.6.2: this used to be 32-bit, which is only ~4 billion values — a forged map
+ * could be made to collide with a real one and two machines would then disagree
+ * about the arena while both were "verified". 64 bits (two independently folded
+ * lanes) is enough that a collision is not something a player can arrange; it
+ * stays synchronous, unlike WebCrypto's SHA-256.
+ */
 export function hashString(text: string): string {
-  let hash = 0x811c9dc5;
+  const PRIME = 0x100000001b3n;
+  const MASK = 0xffffffffffffffffn;
+  let hash = 0xcbf29ce484222325n;
   for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+    hash ^= BigInt(text.charCodeAt(i));
+    hash = (hash * PRIME) & MASK;
   }
-  return hash.toString(16).padStart(8, '0');
+  return hash.toString(16).padStart(16, '0');
 }
 
 /** Canonical JSON for hashing and equality: keys sorted, no volatile fields. */
@@ -210,7 +221,12 @@ export function normalizeMapFile(raw: unknown): MapFile {
     // Keep a newer schemaVersion visible so the UI can warn instead of silently
     // downgrading somebody's map.
     schemaVersion: Math.max(1, Math.round(num(input.schemaVersion, MAP_SCHEMA_VERSION))),
-    id: typeof input.id === 'string' && input.id.trim() ? input.id.trim().slice(0, 48) : newMapId(),
+    // v1.6.2: an imported map could carry any string as its id (spaces, quotes,
+    // a whole URL). Ids travel over LAN and are compared for equality, so keep
+    // them to a plain identifier and mint a fresh one otherwise.
+    id: /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(String(input.id ?? '').trim())
+      ? String(input.id).trim()
+      : newMapId(),
     rev: Math.max(1, Math.round(num(input.rev, 1))),
     name,
     author: typeof input.author === 'string' ? input.author.slice(0, 24) : '',

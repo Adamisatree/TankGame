@@ -69,6 +69,12 @@ check('1.0.10 > 1.0.9 (numeric, not lexicographic)', compareVersions('1.0.10', '
 check('equal with v prefix', compareVersions('v1.1.0', '1.1.0') === 0);
 check('release beats its own prerelease', compareVersions('1.2.0', '1.2.0-beta.1') > 0);
 check('prerelease sorts below release', compareVersions('1.2.0-beta.1', '1.2.0') < 0);
+// v1.6.2: the tag used to be compared as one string, so beta.10 lost to beta.2.
+check('beta.10 is newer than beta.2', compareVersions('1.2.0-beta.10', '1.2.0-beta.2') > 0);
+check('numeric tags sort below word tags', compareVersions('1.2.0-1', '1.2.0-alpha') < 0);
+check('a shorter tag list sorts first', compareVersions('1.2.0-beta', '1.2.0-beta.1') < 0);
+// Trailing junk is not silently accepted as a patch number.
+check('trailing junk is not a valid patch', compareVersions('1.2.1beta', '1.2.1') < 0);
 check('isNewer rejects downgrade', !isNewer('1.1.0', '1.2.0'));
 check('isNewer accepts upgrade', isNewer('1.3.0', '1.2.0'));
 

@@ -105,10 +105,37 @@ export function tuningPanelHtml(readOnly = false): string {
     </div>`;
 }
 
-/** Wires the panel up. `onChange` runs once per committed value (not per pixel). */
+/**
+ * Wires the panel up. `onChange` runs once per committed value (not per pixel).
+ *
+ * v1.6.2: a rebind detaches the previous one first. 恢复默认 and 导入参数 rebuild
+ * the rows and then call this function again — which used to add *another*
+ * listener to 恢复默认 / 导出 / 导入 / 展开, the buttons that are never replaced.
+ * Each click doubled the previous count (2, 4, 8, …) and the panel ground to a
+ * halt. The detach list is explicit rather than an `AbortController`: the tests
+ * drive the panel with jsdom nodes inside a Node realm, where a foreign
+ * AbortSignal is rejected by the DOM binding.
+ */
 export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => {}): void {
   const panel = root.querySelector<HTMLElement>('#tuning-panel');
   if (!panel) return;
+
+  const bound = panel as HTMLElement & { tuneDetach?: () => void };
+  bound.tuneDetach?.();
+  const listeners: { target: EventTarget; type: string; handler: EventListener }[] = [];
+  bound.tuneDetach = () => {
+    for (const entry of listeners) entry.target.removeEventListener(entry.type, entry.handler);
+    listeners.length = 0;
+  };
+  const on = <K extends keyof HTMLElementEventMap>(
+    target: EventTarget | null | undefined,
+    type: K | string,
+    handler: (event: never) => void
+  ): void => {
+    if (!target) return;
+    target.addEventListener(type, handler as EventListener);
+    listeners.push({ target, type: String(type), handler: handler as EventListener });
+  };
 
   const body = root.querySelector<HTMLElement>('#tuning-body');
   const toggle = root.querySelector<HTMLButtonElement>('#tuning-toggle');
@@ -132,7 +159,7 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     if (toggle) toggle.textContent = '收起';
   };
 
-  toggle?.addEventListener('click', () => {
+  on(toggle, 'click', () => {
     if (!body) return;
     if (body.hidden) open();
     else {
@@ -162,25 +189,25 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
   controls?.querySelectorAll<HTMLInputElement>('input[data-tune]').forEach((input) => {
     const key = input.dataset.tune as keyof Tuning;
     for (const type of ['keydown', 'keyup', 'keypress'] as const) {
-      input.addEventListener(type, swallow);
+      on(input, type, swallow as (event: never) => void);
     }
     if (readOnly) {
       input.disabled = true;
       return;
     }
     // Live readout while dragging, commit on release.
-    input.addEventListener('input', () => {
+    on(input, 'input', () => {
       const out = root.querySelector<HTMLElement>(`[data-tune-value="${key}"]`);
       if (out) out.textContent = valueLabel(key, Number(input.value));
       if (summary) summary.textContent = balanceSummary();
     });
-    input.addEventListener('change', () => {
+    on(input, 'change', () => {
       applyValue(key, Number(input.value));
       onChange();
     });
   });
 
-  root.querySelector<HTMLButtonElement>('#tune-reset')?.addEventListener('click', () => {
+  on(root.querySelector('#tune-reset'), 'click', () => {
     resetTuning();
     // Repaint the panel in place with the defaults.
     if (controls) controls.innerHTML = controlsHtml();
@@ -189,7 +216,7 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     onChange();
   });
 
-  root.querySelector<HTMLButtonElement>('#tune-export')?.addEventListener('click', () => {
+  on(root.querySelector('#tune-export'), 'click', () => {
     const blob = new Blob([JSON.stringify(exportTuning(), null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -199,14 +226,14 @@ export function bindTuningPanel(root: HTMLElement, onChange: () => void = () => 
     URL.revokeObjectURL(url);
   });
 
-  root.querySelector<HTMLButtonElement>('#tune-import')?.addEventListener('click', () => {
+  on(root.querySelector('#tune-import'), 'click', () => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'application/json,.json';
     for (const type of ['keydown', 'keyup', 'keypress'] as const) {
-      input.addEventListener(type, swallow);
+      on(input, type, swallow as (event: never) => void);
     }
-    input.addEventListener('change', () => {
+    on(input, 'change', () => {
       const file = input.files?.[0];
       if (!file) return;
       void file.text().then((text) => {

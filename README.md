@@ -20,7 +20,7 @@
 
 ### 1. 什么都不装：双击一个文件
 
-[`TankGame-1.6.1-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
+[`TankGame-1.6.2-portable.html`](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-portable.html)是一个**完全自包含**的网页（1.7 MB，脚本、样式、素材全在里面，没有任何外部依赖）。
 
 - Windows / macOS / Linux：双击它，用浏览器打开就能玩**单人闯关**和**本地双人**；
 - 想发给朋友，直接把这一个文件发过去即可，不需要联网、不需要装任何东西。
@@ -33,12 +33,12 @@
 
 | 你的电脑 | 下载 |
 | --- | --- |
-| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.6.1-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-setup.exe) |
-| Windows（Intel / AMD，单架构更小） | [TankGame-1.6.1-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-x64-setup.exe) |
-| Windows（ARM 笔记本，单架构更小） | [TankGame-1.6.1-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64-setup.exe) |
-| Windows 免安装（解压即用） | [TankGame-1.6.1-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-portable.exe) |
-| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.6.1-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-arm64.dmg) |
-| Mac（Intel） | [TankGame-1.6.1-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.1/TankGame-1.6.1-x64.dmg) |
+| Windows（省心版：x64 与 arm64 合成一个安装包） | [TankGame-1.6.2-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-setup.exe) |
+| Windows（Intel / AMD，单架构更小） | [TankGame-1.6.2-x64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-x64-setup.exe) |
+| Windows（ARM 笔记本，单架构更小） | [TankGame-1.6.2-arm64-setup.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-arm64-setup.exe) |
+| Windows 免安装（解压即用） | [TankGame-1.6.2-portable.exe](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-portable.exe) |
+| Mac（M1/M2/M3/M4，`.app` 打包） | [TankGame-1.6.2-arm64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-arm64.dmg) |
+| Mac（Intel） | [TankGame-1.6.2-x64.dmg](https://github.com/Adamisatree/TankGame/releases/download/v1.6.2/TankGame-1.6.2-x64.dmg) |
 
 装好之后桌面上就有「坦克大作战」图标，**双击即玩**：客户端自己会起局域网服务，切到「局域网联机」直接建房/加入，不需要命令行、不需要 npm。
 
@@ -68,7 +68,7 @@ npm run test:update  # 更新 / 换版本 / 镜像回退逻辑的检查
 
 ## 自动更新、换版本、镜像下载
 
-菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.6.1`）：
+菜单最下面有一个 **「更新与版本」** 折叠面板（标题右边一直显示当前版本，比如 `v1.6.2`）：
 
 - **检查更新**：同时向 jsDelivr CDN、几个 GitHub 加速站和 GitHub 官方 API 发请求，**谁先回谁用**，再等一下下取其中最新的一份——所以既快又不会拿到过期的缓存；
 - **任意版本号都能装**：列表里每个版本都有「下载并安装」，往上装是升级，**往下装就是降级**（想回到上个版本玩，选旧版本装回去即可）；
@@ -106,7 +106,7 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 
 输入框做了处理：**中文输入法打出来的「192。168。1。10」会自动变成「192.168.1.10」**，全角数字也会转成半角，粘贴整句话只会保留地址部分——之前那种「打不出点」的问题不会再出现。
 
-**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.6.1，你是 1.6.0。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
+**两边版本必须一致**：客人点「加入房间」时会带上自己的版本号，房主发现对不上就直接拒绝，并弹出「版本不一致：房主 1.6.2，你是 1.6.1。请两边用同一版本。」，不会出现打一半不同步的情况。菜单里的「更新与版本」面板可以一键装到房主的那个版本（降级也行）。
 
 技术上是**房主权威**：房主的机器跑物理、算道具、判命中，每秒 30 次把状态推给对方（只推变了的部分，每秒一次全量兜底），对方只上传操作意图。掉线会自动重连回原座位；某个人的网络跟不上时，只会暂停给他发的增量，其他人不受影响。所以两边看到的结果一定一致，也不怕对方改内存。
 
@@ -255,6 +255,58 @@ node scripts/gen-update-manifest.mjs /tmp/releases.json   # 或直接 node scrip
 - **随机地图先摇再广播**：以前房主和访客各摇各的，可能进不同的地图；
 - **再来一局不再重连**：房主重开时保留这条 socket（以前会重新建房，把全房间踢回房间界面）；
 - **访客的结算卡**上是「等房主再来一局」（重开由房主决定）。
+
+### 1.6.2 改了什么（联机稳定性 + 安全）
+
+1.6.1 之后又做了一轮全面审查，报告里有 **49 条**发现。这一版把它们全部处理掉了：
+联机侧的重点是「谁有权限」「谁还占着座位」「谁的按钮卡住了」，桌面侧是一条局域网可达的
+下载/安装链。逐条对照见 [`docs/v1.6.2-fixes.md`](docs/v1.6.2-fixes.md)。
+
+**联机（P0）**
+
+- **任意设备一条消息就能结束别人的对局**：未加入房间的裸连接可以发「房主投降」，
+  所有访客都会弹「房主离开了房间，这一局作废」。现在只有真正坐在座位上的人能投降，
+  而且「是谁」由服务器填，不由发包的人填。
+- **被顶替的旧连接还留着全部权限**：房主换页 / 访客重连后，旧 socket 仍能广播假快照、
+  改房间设置、继续给同一台坦克发操作。现在被顶替的连接**当场失去身份**，客户端也会自己断开。
+- **畸形网址打死服务器**（`/%`、`/%zz` 之类）：解码失败时请求挂死，Node 默认把未捕获异常
+  变成进程退出——局域网上任何一台设备发一个请求就能让房主掉线。现在返回 400。
+- **「开始对局」永久置灰**：欠确认地图的访客离开后，房主的地图清单里留着它的 id，
+  开始按钮一直灰着，也没有「重发地图」按钮可点。现在清单按在场座位修剪，服务端在有人离开时
+  也会重发状态。
+
+**联机（公平 / 体验）**
+
+- **掉线重连不再等于免费满血**：原来重连会新建一台满血、0 杀的坦克（被围攻时断网即回血，
+  一次 Wi-Fi 抖动就把战绩清零）。现在房主按座位记住血量与战绩，重连继承；
+  真正退场后记忆清空，不会被下一个坐到这个号的人继承。
+- **ESC 暂停会告诉访客**：以前只有面板上的暂停会推帧，按 ESC 时访客的看门狗会一路提示
+  「网络不稳」→「收不到房主数据」。现在两条路径都推 `paused` 帧。
+- **暂停期间进来的访客不再黑屏**：看门狗原来被「一帧都没收到」挡住，现在先诊断再判空。
+- **改地图后不会再「自动开局」**：房主之前点过一次开始、地图没同步完，之后换图并等确认完的瞬间
+  会自己开局。现在换图即清掉挂起的开始。
+- **地图不同步会说出来**：房主报的图本机没有时，以前按索引回退加载**另一张图**，
+  两边各打各的；现在拒绝回退并提示「地图不同步」。
+- 结果卡上的「谁离开导致结束」、版本不一致提示被秒覆盖、快速点技能偶发丢键、
+  大厅里多人时的队伍标签、队伍赛同帧达标由坦克创建顺序决定胜负……都已修。
+
+**安全（桌面端 / 更新器）**
+
+- 更新面板把镜像清单里的版本号、文件名、sha256 直接拼进 HTML → 恶意镜像可以注入脚本；
+  现在全部转义。
+- 下载只校验域名，镜像前缀可以包装任意主机（`ghfast.top/https://别处/x.exe`）→
+  现在要求**整条 URL** 都是官方发布地址（或官方地址加镜像前缀），重定向也复核。
+- 安装包文件名没校验（`..\..\evil.exe` 写到版本目录外）、`install-file` 的前缀检查
+  可被 `..` 绕过、安装可被双击启动两次 → 全部加上校验与互斥。
+- 局域网扫描结果里的房间名来自 UDP 广播，却被原样拼进 HTML → 现在转义并校验端口。
+
+**其它**
+
+- 服务器房间状态改为**每个实例一份**（同进程起两个服务器会互相污染，测试环境的假象就来自这里）；
+  座位号不再可能发出 p11+；`join` 幂等、同 token 只占一个座位；容量不能缩到低于在线人数；
+  乱斗的自动分队不再写越界的队伍号；关闭时先关 HTTP 再关 socket，同端口可立刻重启。
+- 地图哈希从 32 位升到 64 位；地图库容量按**字节**而不是张数封顶；
+  收到的地图先做内容校验再入库（不能让对端用空图覆盖你的图）；更新器不再把 beta.10 排在 beta.2 前。
 
 ### 1.6.1 改了什么（多人联机：谁控制哪台坦克）
 

@@ -13,7 +13,7 @@
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
@@ -71,460 +71,6 @@ const NO_DIST = `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p>或者直接运行 <code>npm run lan</code>（会自动先构建）。</p>
 </body></html>`;
 
-function json(res, code, body) {
-  const text = JSON.stringify(body);
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text) });
-  res.end(text);
-}
-
-async function serveStatic(req, res) {
-  const url = new URL(req.url ?? '/', 'http://lan.local');
-  if (url.pathname === '/info') {
-    return json(res, 200, {
-      ok: true,
-      version: VERSION,
-      port: currentPort,
-      addresses: lanAddresses(),
-      players: countPlayers(),
-      capacity: room.capacity,
-      mode: room.mode,
-      roster: roster().players,
-    });
-  }
-
-  const rel = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
-  // normalize() collapses "..", and the prefix check rejects anything that escapes.
-  const file = normalize(join(DIST, rel));
-  if (!file.startsWith(DIST)) {
-    res.writeHead(403).end('forbidden');
-    return;
-  }
-
-  try {
-    const info = await stat(file);
-    if (!info.isFile()) throw new Error('not a file');
-    const body = await readFile(file);
-    res.writeHead(200, {
-      'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
-      'content-length': body.length,
-      'cache-control': 'no-cache',
-    });
-    res.end(body);
-  } catch {
-    // Single-page app: unknown paths fall back to index.html when it exists.
-    try {
-      const html = await readFile(join(DIST, 'index.html'));
-      res.writeHead(200, { 'content-type': MIME['.html'], 'content-length': html.length });
-      res.end(html);
-    } catch {
-      res.writeHead(200, { 'content-type': MIME['.html'] }).end(NO_DIST);
-    }
-  }
-}
-
-/**
- * v1.3: one room, up to 10 players.
- *
- * The host (p1) keeps the authoritative simulation; the server only relays.
- * Seats are handed out on join (p2, p3, …), teams alternate, and everyone gets
- * the same roster so every screen shows identical information.
- */
-/** Seats in a fresh room; the host can raise it to 10 in the lobby. */
-const DEFAULT_CAPACITY = 6;
-
-const room = {
-  host: null,
-  /** id -> socket, host included as 'p1'. */
-  players: new Map(),
-  capacity: DEFAULT_CAPACITY,
-  mode: 'ffa',
-  config: null,
-  nextId: 2,
-  /** True once the host has started a match; a new join drops back to lobby. */
-  started: false,
-  /**
-   * sessionId -> the seat it owned, kept for a short grace period after a drop.
-   * A flaky Wi-Fi hiccup must not turn into "everyone back to the lobby": the
-   * same client reconnects and takes its old seat (and its tank) back.
-   */
-  sessions: new Map(),
-  /** How many teams team-mode uses. The host can add/remove teams in the lobby. */
-  teamCount: 2,
-  /**
-   * The map the room will play. The host pushes the file itself, the server
-   * keeps it so late joiners get the same one, and every guest must confirm it
-   * before `begin` is accepted.
-   */
-  map: null,
-  mapHash: '',
-  /** Seats that have confirmed they hold the current map. */
-  mapAcks: new Set(),
-};
-
-/** Same cap as `MAX_MAP_BYTES` in src/net/protocol.ts. */
-const MAX_MAP_BYTES = 48 * 1024;
-
-/** Guests that still need to confirm the room's map. */
-function mapPending() {
-  if (!room.map) return [];
-  return [...room.players.keys()].filter((id) => id !== 'p1' && !room.mapAcks.has(id));
-}
-
-function mapStatus() {
-  return {
-    t: 'map-status',
-    waiting: mapPending(),
-    ready: [...room.mapAcks].filter((id) => id !== 'p1' && room.players.has(id)),
-  };
-}
-
-/** True when the payload is a map file we are willing to relay. */
-function isMapPayload(map) {
-  if (!map || typeof map !== 'object') return false;
-  if (map.format !== 'tankmap') return false;
-  try {
-    return JSON.stringify(map).length <= MAX_MAP_BYTES;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Host pushed a map: cache it, hand it to the guests, forget old acks.
- * `hash` is what the host computed; guests echo it back in `map-ack`, which is
- * how a damaged or stale copy is caught before the first shot.
- */
-function setRoomMap(map, hash) {
-  room.map = map;
-  room.mapHash = typeof hash === 'string' ? hash : '';
-  room.mapAcks.clear();
-  broadcast({ t: 'map', map: room.map, hash: room.mapHash });
-  console.log(`[lan] map ${map.id ?? '?'} rev ${map.rev ?? '?'} -> room`);
-}
-
-/** Host switched back to a built-in map: nothing to relay, nothing to ack. */
-function clearRoomMap() {
-  if (!room.map && !room.mapHash) return;
-  room.map = null;
-  room.mapHash = '';
-  room.mapAcks.clear();
-  broadcast({ t: 'map', map: null, hash: '' });
-  console.log('[lan] room back on a built-in map');
-}
-let totalPlayers = 0;
-let currentPort = 0;
-
-function countPlayers() {
-  return room.players.size;
-}
-
-/**
- * v1.5.4: per-connection backpressure watermarks.
- *
- * A relay that only calls `ws.send()` will happily queue minutes of snapshots
- * for a client whose socket (or machine) has stopped draining. That client then
- * replays the backlog in order — every old sound and every old position — and
- * can never catch up, while the process grows. Two levels:
- *
- *   coalesce — stop forwarding *plain deltas* to this connection only. It is at
- *              most one second from the next keyframe, which re-syncs it fully;
- *              every other player is untouched.
- *   slow     — the queue is hopeless (1 MB), so terminate it; the client's own
- *              reconnect puts it back in its old seat and a keyframe rebuilds it.
- */
-const DEFAULT_LIMITS = { coalesceBacklog: 64 * 1024, slowBacklog: 1024 * 1024 };
-/** How often a socket that stopped answering pings is culled (see `createLanServer`). */
-const DEFAULT_HEARTBEAT_MS = 15_000;
-let limits = { ...DEFAULT_LIMITS };
-
-/** Bytes currently queued on this socket (ws exposes `bufferedAmount`). */
-function backlogOf(ws) {
-  const amount = ws?.bufferedAmount;
-  return typeof amount === 'number' && Number.isFinite(amount) ? amount : 0;
-}
-
-/**
- * One serialisation per message, then a cheap write per receiver.
- * `budget` = the largest backlog a receiver may have before it is skipped,
- * or Infinity for traffic that must always be delivered.
- */
-function writeAll(msg, { exceptWs = null, skipBacklogged = false } = {}) {
-  let payload;
-  try {
-    payload = JSON.stringify(msg);
-  } catch {
-    return;
-  }
-  for (const ws of room.players.values()) {
-    if (ws === exceptWs) continue;
-    if (ws.readyState !== ws.OPEN) continue;
-    const backlog = backlogOf(ws);
-    // The hard level is checked first: a connection that is already hopeless
-    // must be cut, not merely skipped (`skipBacklogged` only saves bandwidth).
-    if (backlog > limits.slowBacklog) {
-      console.log(`[lan] dropping ${ws.playerId ?? '?'}: ${Math.round(backlog / 1024)} KB backlog`);
-      try {
-        ws.terminate();
-      } catch {
-        /* already gone */
-      }
-      continue;
-    }
-    if (skipBacklogged && backlog > limits.coalesceBacklog) continue;
-    try {
-      ws.send(payload);
-    } catch {
-      /* a socket that died mid-broadcast must not stop the others */
-    }
-  }
-}
-
-/** Control traffic: always delivered, still bounded by the hard watermark. */
-function send(ws, msg) {
-  if (!ws || ws.readyState !== ws.OPEN) return;
-  if (backlogOf(ws) > limits.slowBacklog) {
-    try {
-      ws.terminate();
-    } catch {
-      /* already gone */
-    }
-    return;
-  }
-  try {
-    ws.send(JSON.stringify(msg));
-  } catch {
-    /* socket died between the check and the write */
-  }
-}
-
-/**
- * Snapshots are the only high-rate traffic, so they are the only thing that is
- * coalesced: a guest that is behind simply skips the deltas and picks the next
- * keyframe up. A keyframe (`kf`) is never skipped — it is the repair.
- */
-function broadcast(msg, exceptWs = null) {
-  const isDelta = msg?.t === 'state' && msg.kf !== 1;
-  writeAll(msg, { exceptWs, skipBacklogged: isDelta });
-}
-
-/**
- * Room snapshot, tailored per viewer.
- *
- * A player's summoner-skill choice is **private**: only the seat itself (and the
- * host, which has to simulate it) ever receives the value. Everyone else just
- * learns whether the seat has picked something yet.
- */
-function roster(viewer = null) {
-  const viewerId = viewer?.playerId ?? null;
-  const isHost = viewer?.role === 'host';
-  const players = [];
-  for (const [id, ws] of room.players) {
-    const mine = id === viewerId || isHost;
-    const chosen = ws.skill ?? '';
-    players.push({
-      id,
-      name: ws.name || `P${id.replace(/^p/, '')}`,
-      skill: mine ? chosen : '',
-      /** True once that seat has picked something (safe for others to know). */
-      hasSkill: !!chosen,
-      team: ws.team ?? 0,
-      ready: id === 'p1' ? true : !!ws.ready,
-      host: id === 'p1',
-    });
-  }
-  return {
-    t: 'roster',
-    players,
-    capacity: room.capacity,
-    mode: room.mode,
-    teams: room.teamCount,
-    host: players.find((p) => p.host)?.id ?? null,
-    started: room.started,
-    config: room.config,
-  };
-}
-
-function clampTeam(team) {
-  return Math.max(0, Math.min(room.teamCount - 1, Number(team) || 0));
-}
-
-function teamForSeat(seat) {
-  return room.mode === 'team' ? seat % room.teamCount : seat;
-}
-
-/** How many players sit in each team, index = team number. */
-function teamSizes() {
-  const sizes = new Array(room.teamCount).fill(0);
-  for (const ws of room.players.values()) {
-    const team = clampTeam(ws.team ?? 0);
-    sizes[team] += 1;
-  }
-  return sizes;
-}
-
-/**
- * Rebuilds teams from seat order. Only used when the host asks for auto
- * balance – hand-picked teams (`team` messages) are kept as they are.
- */
-function refreshTeams() {
-  let seat = 0;
-  for (const ws of room.players.values()) {
-    ws.team = teamForSeat(seat);
-    seat += 1;
-  }
-}
-
-/**
- * Guarantees nobody sits on a team that does not exist, and that every team has
- * somebody. Pulls players out of the largest team, never below one member.
- */
-function fillTeams() {
-  for (const ws of room.players.values()) ws.team = clampTeam(ws.team ?? 0);
-  const sizes = teamSizes();
-  for (let team = 0; team < room.teamCount; team += 1) {
-    if (sizes[team] > 0) continue;
-    // Move one player from the biggest team that can spare one.
-    let donor = -1;
-    for (let i = 0; i < sizes.length; i += 1) {
-      if (sizes[i] > 1 && (donor < 0 || sizes[i] > sizes[donor])) donor = i;
-    }
-    if (donor < 0) break;
-    const mover = [...room.players.values()].find((player) => (player.team ?? 0) === donor);
-    if (!mover) break;
-    mover.team = team;
-    sizes[donor] -= 1;
-    sizes[team] += 1;
-  }
-}
-
-function announceRoster() {
-  // Teams are sticky: a host's hand-picked sides must survive every roster
-  // broadcast. New seats get a sensible default at join time instead.
-  for (const ws of room.players.values()) send(ws, roster(ws));
-}
-
-/** Least-populated team, so a fresh seat keeps the sides roughly even. */
-function balancedTeam() {
-  const sizes = teamSizes();
-  let best = 0;
-  for (let i = 1; i < sizes.length; i += 1) if (sizes[i] < sizes[best]) best = i;
-  return best;
-}
-
-/** Legacy 1v1 pairing messages, kept so older clients (and the LAN tests) work. */
-function pair() {
-  const host = room.host;
-  const guest = [...room.players.entries()].find(([id]) => id !== 'p1')?.[1] ?? null;
-  if (!host || !guest) return;
-  // No skill in these messages: picks are private (see roster()).
-  send(host, { t: 'peer', state: 'joined', version: guest.version });
-  send(guest, { t: 'paired' });
-  console.log('[lan] host <-> guest paired');
-}
-
-/** How long a dropped seat waits for its owner to reconnect. */
-const SESSION_TTL_MS = 120_000;
-
-/** Seats a room can hand out, in order: p2 … p10. */
-const SEAT_LIMIT = 10;
-
-/**
- * v1.6.1: the smallest free seat id.
- *
- * A plain counter (`p${nextId++}`) only ever climbs, and nothing reset it — so
- * the second match in the same server process handed out p4/p5, and the *first*
- * remote tank in the host's `p2` slot then belonged to a seat called p4 with no
- * input line. Reusing the lowest free number keeps ids inside the palette the
- * game knows (p2…p10) however long the room lives.
- *
- * A seat whose owner dropped is still reserved by `room.sessions`, so a
- * reconnecting guest always gets *its own* number back and never collides with
- * a newcomer.
- */
-function nextSeatId() {
-  const now = Date.now();
-  const reserved = new Set();
-  for (const [session, entry] of room.sessions) {
-    if (now - entry.leftAt > SESSION_TTL_MS) {
-      room.sessions.delete(session);
-      continue;
-    }
-    reserved.add(entry.id);
-  }
-  for (let seat = 2; seat < SEAT_LIMIT + 2; seat += 1) {
-    const id = `p${seat}`;
-    if (room.players.has(id) || reserved.has(id)) continue;
-    return id;
-  }
-  // Every seat is spoken for: fall back to the old counter so the capacity
-  // check (not this function) decides what happens.
-  return `p${room.nextId++}`;
-}
-
-function rememberSession(ws, id) {
-  if (!ws.session || id === 'p1') return;
-  room.sessions.set(ws.session, {
-    id,
-    team: ws.team ?? 0,
-    ready: !!ws.ready,
-    name: ws.name ?? '',
-    leftAt: Date.now(),
-  });
-  // Drop stale entries so a long-running room cannot grow without bound.
-  const now = Date.now();
-  for (const [key, value] of room.sessions) {
-    if (now - value.leftAt > SESSION_TTL_MS) room.sessions.delete(key);
-  }
-}
-
-function unlink(ws) {
-  const id = ws.playerId;
-  if (!id) return;
-  // v1.5.4: the seat must still belong to *this* socket.
-  //
-  // A reconnecting client replaces `room.players[id]` with its new socket, and
-  // the old socket's `close` arrives afterwards. Checking only "is the seat
-  // taken?" therefore deleted the *new* occupant: a host that refreshed its
-  // page had the fresh host socket removed, `room.host` cleared, and the whole
-  // room was torn down under everyone. Whoever owns the socket, owns the seat.
-  if (room.players.get(id) !== ws) {
-    ws.playerId = null;
-    ws.role = null;
-    return;
-  }
-  const wasHost = id === 'p1';
-  if (!wasHost) rememberSession(ws, id);
-  room.players.delete(id);
-  ws.playerId = null;
-  ws.role = null;
-  if (wasHost) room.host = null;
-  room.mapAcks.delete(id);
-  // An empty room forgets the last session entirely.
-  if (!room.players.size) {
-    // v1.6.1: an empty room is a *new* room. Anything left over here surfaced
-    // as "team mode will not start" in the next session: the host's 4-team
-    // setting survived, the next room had three people, and the server refused
-    // `begin` for the empty fourth team while the start button greyed out to
-    // match. Sessions are already cleared above, so no seat is left waiting to
-    // be resumed and the counters below are free to start over.
-    room.started = false;
-    room.map = null;
-    room.mapHash = '';
-    room.mapAcks.clear();
-    room.sessions.clear();
-    room.nextId = 2;
-    room.teamCount = 2;
-    room.mode = 'ffa';
-    room.capacity = DEFAULT_CAPACITY;
-    room.config = null;
-  }
-  send(ws, { t: 'bye' });
-  // Tell the survivors exactly who left. An explicit surrender was already
-  // broadcast by the message handler; a dropped socket only reports "left".
-  broadcast({ t: 'peer', state: 'left', id, host: wasHost });
-  announceRoster();
-}
-
 export function createLanServer({
   port = Number(process.env.PORT) || 8787,
   host = '0.0.0.0',
@@ -533,6 +79,517 @@ export function createLanServer({
   slowBacklog,
   heartbeatMs,
 } = {}) {
+  // v1.6.2: the room, the watermarks and the counters live in this closure.
+  // They used to be module-level, so a second `createLanServer()` in the same
+  // process silently shared the first one's room (tests, embedded use).
+  function json(res, code, body) {
+    const text = JSON.stringify(body);
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text) });
+    res.end(text);
+  }
+
+  async function serveStatic(req, res) {
+    const url = new URL(req.url ?? '/', 'http://lan.local');
+    if (url.pathname === '/info') {
+      return json(res, 200, {
+        ok: true,
+        version: VERSION,
+        port: currentPort,
+        addresses: lanAddresses(),
+        players: countPlayers(),
+        capacity: room.capacity,
+        mode: room.mode,
+        roster: roster().players,
+      });
+    }
+
+    // v1.6.2: a malformed escape (`/%`, `/%E0%A4%A`) made decodeURIComponent
+    // throw *inside an unawaited promise*: the request hung forever and Node's
+    // default unhandledRejection killed the whole server — one bad URL from any
+    // device on the LAN took the room down. Answer 400 instead.
+    let rel;
+    try {
+      rel = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+    } catch {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('bad request');
+      return;
+    }
+    // normalize() collapses "..", and the prefix check rejects anything that
+    // escapes. The separator matters: `startsWith(DIST)` also accepted a
+    // sibling directory called `dist2`.
+    const file = normalize(join(DIST, rel));
+    if (file !== DIST && !file.startsWith(DIST + sep)) {
+      res.writeHead(403).end('forbidden');
+      return;
+    }
+
+    try {
+      const info = await stat(file);
+      if (!info.isFile()) throw new Error('not a file');
+      const body = await readFile(file);
+      res.writeHead(200, {
+        'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
+        'content-length': body.length,
+        'cache-control': 'no-cache',
+      });
+      res.end(body);
+    } catch {
+      // Single-page app: unknown paths fall back to index.html when it exists.
+      try {
+        const html = await readFile(join(DIST, 'index.html'));
+        res.writeHead(200, { 'content-type': MIME['.html'], 'content-length': html.length });
+        res.end(html);
+      } catch {
+        res.writeHead(200, { 'content-type': MIME['.html'] }).end(NO_DIST);
+      }
+    }
+  }
+
+  /**
+   * v1.3: one room, up to 10 players.
+   *
+   * The host (p1) keeps the authoritative simulation; the server only relays.
+   * Seats are handed out on join (p2, p3, …), teams alternate, and everyone gets
+   * the same roster so every screen shows identical information.
+   */
+  /** Seats in a fresh room; the host can raise it to 10 in the lobby. */
+  const DEFAULT_CAPACITY = 6;
+
+  const room = {
+    host: null,
+    /** id -> socket, host included as 'p1'. */
+    players: new Map(),
+    capacity: DEFAULT_CAPACITY,
+    mode: 'ffa',
+    config: null,
+    nextId: 2,
+    /** True once the host has started a match; a new join drops back to lobby. */
+    started: false,
+    /**
+     * sessionId -> the seat it owned, kept for a short grace period after a drop.
+     * A flaky Wi-Fi hiccup must not turn into "everyone back to the lobby": the
+     * same client reconnects and takes its old seat (and its tank) back.
+     */
+    sessions: new Map(),
+    /** How many teams team-mode uses. The host can add/remove teams in the lobby. */
+    teamCount: 2,
+    /**
+     * The map the room will play. The host pushes the file itself, the server
+     * keeps it so late joiners get the same one, and every guest must confirm it
+     * before `begin` is accepted.
+     */
+    map: null,
+    mapHash: '',
+    /** Seats that have confirmed they hold the current map. */
+    mapAcks: new Set(),
+    /**
+     * v1.6.2: session token -> the socket currently using it.
+     *
+     * Without this, a second socket with the same token was treated as a brand
+     * new guest: it took a *different* seat, and when it was the last one to
+     * leave it wrote its seat number into `sessions[token]` — so the original
+     * owner's next reconnect dropped into that seat and kicked its occupant out.
+     * A token now belongs to one seat for as long as it is alive.
+     */
+    tokenSeat: new Map(),
+  };
+
+  /** Same cap as `MAX_MAP_BYTES` in src/net/protocol.ts. */
+  const MAX_MAP_BYTES = 48 * 1024;
+
+  /** Guests that still need to confirm the room's map. */
+  function mapPending() {
+    if (!room.map) return [];
+    return [...room.players.keys()].filter((id) => id !== 'p1' && !room.mapAcks.has(id));
+  }
+
+  function mapStatus() {
+    return {
+      t: 'map-status',
+      waiting: mapPending(),
+      ready: [...room.mapAcks].filter((id) => id !== 'p1' && room.players.has(id)),
+    };
+  }
+
+  /** True when the payload is a map file we are willing to relay. */
+  function isMapPayload(map) {
+    if (!map || typeof map !== 'object') return false;
+    if (map.format !== 'tankmap') return false;
+    try {
+      return JSON.stringify(map).length <= MAX_MAP_BYTES;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Host pushed a map: cache it, hand it to the guests, forget old acks.
+   * `hash` is what the host computed; guests echo it back in `map-ack`, which is
+   * how a damaged or stale copy is caught before the first shot.
+   */
+  function setRoomMap(map, hash) {
+    room.map = map;
+    room.mapHash = typeof hash === 'string' ? hash : '';
+    room.mapAcks.clear();
+    broadcast({ t: 'map', map: room.map, hash: room.mapHash });
+    console.log(`[lan] map ${map.id ?? '?'} rev ${map.rev ?? '?'} -> room`);
+  }
+
+  /** Host switched back to a built-in map: nothing to relay, nothing to ack. */
+  function clearRoomMap() {
+    if (!room.map && !room.mapHash) return;
+    room.map = null;
+    room.mapHash = '';
+    room.mapAcks.clear();
+    broadcast({ t: 'map', map: null, hash: '' });
+    console.log('[lan] room back on a built-in map');
+  }
+  let totalPlayers = 0;
+  let currentPort = 0;
+
+  function countPlayers() {
+    return room.players.size;
+  }
+
+  /**
+   * v1.5.4: per-connection backpressure watermarks.
+   *
+   * A relay that only calls `ws.send()` will happily queue minutes of snapshots
+   * for a client whose socket (or machine) has stopped draining. That client then
+   * replays the backlog in order — every old sound and every old position — and
+   * can never catch up, while the process grows. Two levels:
+   *
+   *   coalesce — stop forwarding *plain deltas* to this connection only. It is at
+   *              most one second from the next keyframe, which re-syncs it fully;
+   *              every other player is untouched.
+   *   slow     — the queue is hopeless (1 MB), so terminate it; the client's own
+   *              reconnect puts it back in its old seat and a keyframe rebuilds it.
+   */
+  const DEFAULT_LIMITS = { coalesceBacklog: 64 * 1024, slowBacklog: 1024 * 1024 };
+  /** How often a socket that stopped answering pings is culled (see `createLanServer`). */
+  const DEFAULT_HEARTBEAT_MS = 15_000;
+  let limits = { ...DEFAULT_LIMITS };
+
+  /** Bytes currently queued on this socket (ws exposes `bufferedAmount`). */
+  function backlogOf(ws) {
+    const amount = ws?.bufferedAmount;
+    return typeof amount === 'number' && Number.isFinite(amount) ? amount : 0;
+  }
+
+  /**
+   * One serialisation per message, then a cheap write per receiver.
+   * `budget` = the largest backlog a receiver may have before it is skipped,
+   * or Infinity for traffic that must always be delivered.
+   */
+  function writeAll(msg, { exceptWs = null, skipBacklogged = false } = {}) {
+    let payload;
+    try {
+      payload = JSON.stringify(msg);
+    } catch {
+      return;
+    }
+    for (const ws of room.players.values()) {
+      if (ws === exceptWs) continue;
+      if (ws.readyState !== ws.OPEN) continue;
+      const backlog = backlogOf(ws);
+      // The hard level is checked first: a connection that is already hopeless
+      // must be cut, not merely skipped (`skipBacklogged` only saves bandwidth).
+      if (backlog > limits.slowBacklog) {
+        console.log(`[lan] dropping ${ws.playerId ?? '?'}: ${Math.round(backlog / 1024)} KB backlog`);
+        try {
+          ws.terminate();
+        } catch {
+          /* already gone */
+        }
+        continue;
+      }
+      if (skipBacklogged && backlog > limits.coalesceBacklog) continue;
+      try {
+        ws.send(payload);
+      } catch {
+        /* a socket that died mid-broadcast must not stop the others */
+      }
+    }
+  }
+
+  /** Control traffic: always delivered, still bounded by the hard watermark. */
+  function send(ws, msg) {
+    if (!ws || ws.readyState !== ws.OPEN) return;
+    if (backlogOf(ws) > limits.slowBacklog) {
+      try {
+        ws.terminate();
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
+    try {
+      ws.send(JSON.stringify(msg));
+    } catch {
+      /* socket died between the check and the write */
+    }
+  }
+
+  /**
+   * Snapshots are the only high-rate traffic, so they are the only thing that is
+   * coalesced: a guest that is behind simply skips the deltas and picks the next
+   * keyframe up. A keyframe (`kf`) is never skipped — it is the repair.
+   */
+  function broadcast(msg, exceptWs = null) {
+    const isDelta = msg?.t === 'state' && msg.kf !== 1;
+    writeAll(msg, { exceptWs, skipBacklogged: isDelta });
+  }
+
+  /**
+   * Room snapshot, tailored per viewer.
+   *
+   * A player's summoner-skill choice is **private**: only the seat itself (and the
+   * host, which has to simulate it) ever receives the value. Everyone else just
+   * learns whether the seat has picked something yet.
+   */
+  function roster(viewer = null) {
+    const viewerId = viewer?.playerId ?? null;
+    const isHost = viewer?.role === 'host';
+    const players = [];
+    for (const [id, ws] of room.players) {
+      const mine = id === viewerId || isHost;
+      const chosen = ws.skill ?? '';
+      players.push({
+        id,
+        name: ws.name || `P${id.replace(/^p/, '')}`,
+        skill: mine ? chosen : '',
+        /** True once that seat has picked something (safe for others to know). */
+        hasSkill: !!chosen,
+        team: ws.team ?? 0,
+        ready: id === 'p1' ? true : !!ws.ready,
+        host: id === 'p1',
+      });
+    }
+    return {
+      t: 'roster',
+      players,
+      capacity: room.capacity,
+      mode: room.mode,
+      teams: room.teamCount,
+      host: players.find((p) => p.host)?.id ?? null,
+      started: room.started,
+      config: room.config,
+    };
+  }
+
+  function clampTeam(team) {
+    return Math.max(0, Math.min(room.teamCount - 1, Number(team) || 0));
+  }
+
+  function teamForSeat(seat) {
+    return room.mode === 'team' ? seat % room.teamCount : seat;
+  }
+
+  /** How many players sit in each team, index = team number. */
+  function teamSizes() {
+    const sizes = new Array(room.teamCount).fill(0);
+    for (const ws of room.players.values()) {
+      const team = clampTeam(ws.team ?? 0);
+      sizes[team] += 1;
+    }
+    return sizes;
+  }
+
+  /**
+   * Rebuilds teams from seat order. Only used when the host asks for auto
+   * balance – hand-picked teams (`team` messages) are kept as they are.
+   */
+  function refreshTeams() {
+    let seat = 0;
+    for (const ws of room.players.values()) {
+      // v1.6.2: FFA has no teams. The old `seat` fallback wrote team 7 into an
+      // 8-player room with two teams, which `clampTeam` and `balancedTeam` then
+      // disagreed about (the roster carried a team that does not exist).
+      ws.team = room.mode === 'team' ? teamForSeat(seat) : 0;
+      seat += 1;
+    }
+  }
+
+  /**
+   * Guarantees nobody sits on a team that does not exist, and that every team has
+   * somebody. Pulls players out of the largest team, never below one member.
+   */
+  function fillTeams() {
+    for (const ws of room.players.values()) ws.team = clampTeam(ws.team ?? 0);
+    const sizes = teamSizes();
+    for (let team = 0; team < room.teamCount; team += 1) {
+      if (sizes[team] > 0) continue;
+      // Move one player from the biggest team that can spare one.
+      let donor = -1;
+      for (let i = 0; i < sizes.length; i += 1) {
+        if (sizes[i] > 1 && (donor < 0 || sizes[i] > sizes[donor])) donor = i;
+      }
+      if (donor < 0) break;
+      const mover = [...room.players.values()].find((player) => (player.team ?? 0) === donor);
+      if (!mover) break;
+      mover.team = team;
+      sizes[donor] -= 1;
+      sizes[team] += 1;
+    }
+  }
+
+  function announceRoster() {
+    // Teams are sticky: a host's hand-picked sides must survive every roster
+    // broadcast. New seats get a sensible default at join time instead.
+    for (const ws of room.players.values()) send(ws, roster(ws));
+  }
+
+  /** Least-populated team, so a fresh seat keeps the sides roughly even. */
+  function balancedTeam() {
+    const sizes = teamSizes();
+    let best = 0;
+    for (let i = 1; i < sizes.length; i += 1) if (sizes[i] < sizes[best]) best = i;
+    return best;
+  }
+
+  /**
+   * v1.6.2: a socket that has been replaced loses every privilege immediately.
+   *
+   * It used to keep `role`/`playerId`, so a host that had been replaced went on
+   * broadcasting `state` (fake snapshots mixed into the real stream) and
+   * `config`/`begin` (changing the room), and a replaced guest went on sending
+   * `input` for a seat somebody else now owned. Saying `replaced` and leaving the
+   * socket armed was the whole hole.
+   */
+  function retire(staleWs) {
+    if (!staleWs) return;
+    send(staleWs, { t: 'replaced' });
+    staleWs.playerId = null;
+    staleWs.role = null;
+    staleWs.session = '';
+    staleWs.ready = false;
+    staleWs.isAlive = false;
+  }
+
+  /** Legacy 1v1 pairing messages, kept so older clients (and the LAN tests) work. */
+  function pair(joinedWs = null) {
+    const host = room.host;
+    // v1.6.2: `paired` used to go to "the first non-p1 player", which in a room
+    // of three was somebody else's socket.
+    const guest = joinedWs ?? [...room.players.entries()].find(([id]) => id !== 'p1')?.[1] ?? null;
+    if (!host || !guest) return;
+    // No skill in these messages: picks are private (see roster()).
+    send(host, { t: 'peer', state: 'joined', version: guest.version });
+    send(guest, { t: 'paired' });
+    console.log('[lan] host <-> guest paired');
+  }
+
+  /** How long a dropped seat waits for its owner to reconnect. */
+  const SESSION_TTL_MS = 120_000;
+
+  /** Seats a room can hand out, in order: p2 … p10. */
+  const SEAT_LIMIT = 10;
+
+  /**
+   * v1.6.1: the smallest free seat id.
+   *
+   * A plain counter (`p${nextId++}`) only ever climbs, and nothing reset it — so
+   * the second match in the same server process handed out p4/p5, and the *first*
+   * remote tank in the host's `p2` slot then belonged to a seat called p4 with no
+   * input line. Reusing the lowest free number keeps ids inside the palette the
+   * game knows (p2…p10) however long the room lives.
+   *
+   * A seat whose owner dropped is still reserved by `room.sessions`, so a
+   * reconnecting guest always gets *its own* number back and never collides with
+   * a newcomer.
+   */
+  function nextSeatId() {
+    const now = Date.now();
+    const reserved = new Set();
+    for (const [session, entry] of room.sessions) {
+      if (now - entry.leftAt > SESSION_TTL_MS) {
+        room.sessions.delete(session);
+        continue;
+      }
+      reserved.add(entry.id);
+    }
+    for (let seat = 2; seat < SEAT_LIMIT + 2; seat += 1) {
+      const id = `p${seat}`;
+      if (room.players.has(id) || reserved.has(id)) continue;
+      return id;
+    }
+    // Every seat is spoken for (live players plus seats still reserved for a
+    // reconnect). v1.6.2: the old fallback handed out p11+, which has no colour
+    // and no input routing — the caller now refuses the join instead.
+    return null;
+  }
+
+  function rememberSession(ws, id) {
+    if (!ws.session || id === 'p1') return;
+    room.sessions.set(ws.session, {
+      id,
+      team: ws.team ?? 0,
+      ready: !!ws.ready,
+      name: ws.name ?? '',
+      leftAt: Date.now(),
+    });
+    // Drop stale entries so a long-running room cannot grow without bound.
+    const now = Date.now();
+    for (const [key, value] of room.sessions) {
+      if (now - value.leftAt > SESSION_TTL_MS) room.sessions.delete(key);
+    }
+  }
+
+  function unlink(ws) {
+    const id = ws.playerId;
+    if (!id) return;
+    // v1.5.4: the seat must still belong to *this* socket.
+    //
+    // A reconnecting client replaces `room.players[id]` with its new socket, and
+    // the old socket's `close` arrives afterwards. Checking only "is the seat
+    // taken?" therefore deleted the *new* occupant: a host that refreshed its
+    // page had the fresh host socket removed, `room.host` cleared, and the whole
+    // room was torn down under everyone. Whoever owns the socket, owns the seat.
+    if (room.players.get(id) !== ws) {
+      ws.playerId = null;
+      ws.role = null;
+      return;
+    }
+    const wasHost = id === 'p1';
+    if (!wasHost) rememberSession(ws, id);
+    if (ws.session && room.tokenSeat.get(ws.session)?.ws === ws) room.tokenSeat.delete(ws.session);
+    room.players.delete(id);
+    ws.playerId = null;
+    ws.role = null;
+    if (wasHost) room.host = null;
+    room.mapAcks.delete(id);
+    // An empty room forgets the last session entirely.
+    if (!room.players.size) {
+      // v1.6.1: an empty room is a *new* room. Anything left over here surfaced
+      // as "team mode will not start" in the next session: the host's 4-team
+      // setting survived, the next room had three people, and the server refused
+      // `begin` for the empty fourth team while the start button greyed out to
+      // match. Sessions are already cleared above, so no seat is left waiting to
+      // be resumed and the counters below are free to start over.
+      room.started = false;
+      room.map = null;
+      room.mapHash = '';
+      room.mapAcks.clear();
+      room.sessions.clear();
+      room.tokenSeat.clear();
+      room.nextId = 2;
+      room.teamCount = 2;
+      room.mode = 'ffa';
+      room.capacity = DEFAULT_CAPACITY;
+      room.config = null;
+    }
+    send(ws, { t: 'bye' });
+    // Tell the survivors exactly who left. An explicit surrender was already
+    // broadcast by the message handler; a dropped socket only reports "left".
+    broadcast({ t: 'peer', state: 'left', id, host: wasHost });
+    announceRoster();
+    // v1.6.2: the map checklist is per seat. When the guest that still owed an
+    // ack left, the host kept waiting for it forever (mapPending true → 开始对局
+    // greyed out with no explanation, and no 重发 button because the list was
+    // empty). Re-send the real state after every departure.
+    if (room.map && room.host && room.host !== ws) send(room.host, mapStatus());
+  }
+
   // Tests inject tiny watermarks to trigger both levels deterministically.
   limits = {
     coalesceBacklog:
@@ -572,13 +629,19 @@ export function createLanServer({
       if (!msg || typeof msg.t !== 'string') return;
 
       if (msg.t === 'join') {
+        // v1.6.2: joining twice on one socket used to hand out a second seat;
+        // the first became a zombie that never acked a map, blocked `begin`
+        // forever and kept the room from ever being reset.
+        if (ws.playerId) return;
         const role = msg.role === 'host' ? 'host' : 'guest';
         ws.skill = typeof msg.skill === 'string' ? msg.skill : undefined;
         ws.version = typeof msg.version === 'string' ? msg.version : '';
         ws.name = typeof msg.name === 'string' && msg.name ? msg.name.slice(0, 12) : '';
 
         // A guest from a different build cannot be played with – say why.
-        if (role === 'guest' && ws.version && ws.version !== VERSION) {
+        // v1.6.2: a *missing* version used to slip through the gate, so a client
+        // that never sent one joined a room it could not stay in sync with.
+        if (role === 'guest' && ws.version !== VERSION) {
           send(ws, { t: 'reject', reason: 'version', hostVersion: VERSION, yourVersion: ws.version });
           console.log(`[lan] rejected guest ${ws.version} (host ${VERSION})`);
           ws.role = null;
@@ -589,7 +652,7 @@ export function createLanServer({
           // A reconnecting host takes the p1 seat back and keeps the guests –
           // a restart in the middle of a match must not kick everybody.
           const previous = room.players.get('p1');
-          if (previous && previous !== ws) send(previous, { t: 'replaced' });
+          if (previous && previous !== ws) retire(previous);
           room.host = ws;
           ws.playerId = 'p1';
           ws.role = 'host';
@@ -620,22 +683,63 @@ export function createLanServer({
         // crucially no `started = false` (the match keeps running).
         const session = typeof msg.session === 'string' && msg.session ? msg.session.slice(0, 64) : '';
         ws.session = session;
+
+        // v1.6.2: the same token arriving while its socket still looks alive
+        // (laptop sleep, half-open TCP) is a *reconnect*, not a new player. Hand
+        // it its own seat back instead of minting a second one for the same
+        // client — the old behaviour left a duplicate seat that later stole the
+        // reservation and pulled the next reconnect into somebody else's tank.
+        const live = session ? room.tokenSeat.get(session) : null;
+        if (live && live.ws !== ws && room.players.get(live.id) === live.ws) {
+          const seat = live.id;
+          const team = live.ws.team ?? 0;
+          const ready = !!live.ws.ready;
+          retire(live.ws);
+          ws.playerId = seat;
+          ws.role = 'guest';
+          ws.team = team;
+          ws.ready = ready;
+          room.players.set(seat, ws);
+          room.tokenSeat.set(session, { id: seat, ws });
+          send(ws, {
+            t: 'joined',
+            role: 'guest',
+            id: seat,
+            host: !!room.host,
+            capacity: room.capacity,
+            version: VERSION,
+            peerVersion: room.host?.version,
+            resumed: true,
+          });
+          console.log(`[lan] guest ${seat} took its seat back from a stale socket`);
+          if (room.map) {
+            room.mapAcks.delete(seat);
+            send(ws, { t: 'map', map: room.map, hash: room.mapHash });
+          }
+          if (room.host) send(room.host, { t: 'peer', state: 'joined', id: seat, version: ws.version });
+          announceRoster();
+          return;
+        }
+
         const known = session ? room.sessions.get(session) : null;
         if (known) {
           room.sessions.delete(session);
           const stale = room.players.get(known.id);
-          if (stale && stale !== ws) send(stale, { t: 'replaced' });
+          if (stale && stale !== ws) retire(stale);
           if (!stale) totalPlayers += 1;
           ws.playerId = known.id;
           ws.role = 'guest';
           ws.team = known.team;
           ws.ready = known.ready;
           room.players.set(known.id, ws);
+          if (session) room.tokenSeat.set(session, { id: known.id, ws });
           send(ws, {
             t: 'joined',
             role: 'guest',
             id: known.id,
-            host: true,
+            // v1.6.2: `host` is the client's "a room is waiting for you" flag;
+            // with no host in the room the guest landed in a phantom match.
+            host: !!room.host,
             capacity: room.capacity,
             version: VERSION,
             peerVersion: room.host?.version,
@@ -648,7 +752,7 @@ export function createLanServer({
           }
           if (room.host) send(room.host, { t: 'peer', state: 'joined', id: known.id, version: ws.version });
           announceRoster();
-          pair();
+          pair(ws);
           return;
         }
 
@@ -659,12 +763,18 @@ export function createLanServer({
           return;
         }
         const id = nextSeatId();
+        if (!id) {
+          send(ws, { t: 'reject', reason: 'full', capacity: room.capacity });
+          console.log('[lan] rejected guest: every seat is taken');
+          return;
+        }
         ws.playerId = id;
         ws.role = 'guest';
         ws.team = room.mode === 'team' ? balancedTeam() : 0;
         ws.ready = false;
         totalPlayers += 1;
         room.players.set(id, ws);
+        if (session) room.tokenSeat.set(session, { id, ws });
         // Someone walked into the room: back to the lobby so everyone can
         // pick sides and skills before the next match.
         room.started = false;
@@ -672,7 +782,7 @@ export function createLanServer({
           t: 'joined',
           role: 'guest',
           id,
-          host: true,
+          host: !!room.host,
           capacity: room.capacity,
           version: VERSION,
           peerVersion: room.host?.version,
@@ -687,14 +797,21 @@ export function createLanServer({
         }
         if (room.host) send(room.host, { t: 'peer', state: 'joined', id, version: ws.version });
         announceRoster();
-        pair();
+        pair(ws);
         return;
       }
 
       // Host-owned room settings: capacity, mode, win conditions, damage switches.
       if (msg.t === 'config') {
         if (ws.role !== 'host') return;
-        const capacity = Math.max(2, Math.min(10, Number(msg.capacity) || room.capacity));
+        let capacity = Math.max(2, Math.min(10, Number(msg.capacity) || room.capacity));
+        // v1.6.2: shrinking below the people already seated produced a room that
+        // showed "8/2" and then refused everybody — including the guests it
+        // already had — until someone left.
+        if (capacity < room.players.size) {
+          send(ws, { t: 'lobby-error', reason: 'capacity', capacity: room.players.size });
+          capacity = room.players.size;
+        }
         const previousMode = room.mode;
         room.capacity = capacity;
         room.mode = msg.mode === 'team' ? 'team' : 'ffa';
@@ -799,8 +916,10 @@ export function createLanServer({
         return;
       }
 
-      // How many teams team-mode has. Adding a team immediately re-seats players
-      // into the empty one so it never starts life empty.
+      // How many teams team-mode has. The host's 补齐空队 (`fill-teams`) moves a
+      // player into a team that would otherwise be empty; raising the count only
+      // clamps existing teams, so the lobby shows the gap and the host fills it
+      // (v1.6.2 corrected this comment, which claimed the re-seat happened here).
       if (msg.t === 'teams') {
         if (ws.role !== 'host') return;
         room.teamCount = Math.max(2, Math.min(6, Number(msg.count) || room.teamCount));
@@ -826,6 +945,22 @@ export function createLanServer({
 
       if (msg.t === 'begin') {
         if (ws.role !== 'host') return;
+        // Readiness is *advisory* on the wire: the host's lobby refuses to send
+        // `begin` until every guest has clicked 准备, and the host owns the start
+        // button. Enforcing it again here would refuse a start the players asked
+        // for whenever a roster broadcast was still in flight.
+        // v1.6.2: a double click (or a slow-link retry) used to begin twice, and
+        // the second `begin` reset the match that had just started.
+        if (room.started) {
+          send(ws, roster(ws));
+          return;
+        }
+        // FFA with one player is a free win, not a match. The lobby already says
+        // so; the server enforces it now.
+        if (room.mode === 'ffa' && room.players.size < 2) {
+          send(ws, { t: 'lobby-error', reason: 'solo' });
+          return;
+        }
         // Every team needs at least one player: an empty side makes the match
         // nonsense (and a 1v1 with a phantom team is a free win).
         if (room.mode === 'team') {
@@ -851,9 +986,16 @@ export function createLanServer({
         return;
       }
 
-      // Any player can walk away; the others must be told it was a surrender.
+      // A seated player can walk away; the others must be told it was a surrender.
+      //
+      // v1.6.2: only the seat itself may say who it is. The old line fell back to
+      // `msg.by`, so a socket that never joined could send
+      // `{ t: 'surrender', by: 'p1' }` and every guest tore the match down
+      // ("房主离开了房间") — any device on the LAN could end any game.
       if (msg.t === 'surrender') {
-        broadcast({ t: 'surrender', by: ws.playerId ?? msg.by ?? 'p1' }, ws);
+        const by = ws.playerId;
+        if (!by) return;
+        broadcast({ t: 'surrender', by }, ws);
         unlink(ws);
         return;
       }
@@ -892,12 +1034,19 @@ export function createLanServer({
 
   return new Promise((resolvePromise, reject) => {
     const onError = (err) => {
+      clearInterval(heartbeat);
       cleanup();
       reject(err);
     };
     const cleanup = () => {
       socketServer.off('error', onError);
       wss.off('error', onError);
+      // v1.6.2: a permanent no-op listener stays behind. Removing *every* error
+      // listener after a successful listen meant a later accept error (EMFILE on
+      // a busy machine) was thrown from an 'error' event with nobody watching —
+      // which kills the process and the whole room with it.
+      socketServer.on('error', () => {});
+      wss.on('error', () => {});
     };
     socketServer.once('error', onError);
     wss.once('error', onError);
@@ -951,20 +1100,22 @@ export function createLanServer({
             guard.unref?.();
             // The HTTP server going down is enough; do not depend on the chain.
             server.once('close', finish);
+            // v1.6.2: shut the HTTP server down *first*. Closing only the
+            // WebSocket server left the listening socket open until its callback
+            // ran, so a quick restart on the same port hit EADDRINUSE while the
+            // old instance was still accepting new connections.
+            try {
+              server.close(() => finish());
+            } catch {
+              /* already closed */
+            }
             try {
               server.closeAllConnections?.();
             } catch {
               /* an older runtime without the helper */
             }
             try {
-              wss.close(() => {
-                try {
-                  server.close(() => finish());
-                } catch {
-                  // Already closed: the 'close' listener above already fired.
-                  finish();
-                }
-              });
+              wss.close(() => finish());
             } catch {
               finish();
             }

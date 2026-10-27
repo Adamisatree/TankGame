@@ -222,6 +222,24 @@ console.log('\n本地地图库');
   const againReceived = archiveReceived(received) as MapFile;
   check('the same revision twice is a no-op', againReceived.rev === received.rev && countMaps() === 3);
 
+  // v1.6.2: the hash was 32-bit, which a crafted map can collide with.
+  const h1 = mapHash(getMap(made.id)!);
+  const tweaked = { ...getMap(made.id)!, walls: [...getMap(made.id)!.walls] };
+  tweaked.walls[0] = { ...tweaked.walls[0], x: tweaked.walls[0].x + 1 };
+  check('map hashes are 64-bit hex', /^[0-9a-f]{16}$/.test(h1), h1);
+  check('a one-pixel change changes the hash', mapHash(tweaked) !== h1, `${h1} vs ${mapHash(tweaked)}`);
+
+  // v1.6.2: an id that is not a plain identifier is replaced, not trusted.
+  const riskyId = normalizeMapFile({ ...emptyMap({ name: 'x' }), id: '../evil id' });
+  check('an imported id is replaced when it is not an identifier', /^custom-[a-z0-9]+$/.test(riskyId.id), riskyId.id);
+
+  // v1.6.2: a peer must not be able to blank a local map by sending junk.
+  const blank = archiveReceived({ format: MAP_FORMAT, id: made.id, rev: 99, walls: [], spawns: [] } as unknown as MapFile);
+  check('an empty map from the network is refused', blank === null, JSON.stringify(blank));
+  check('...so the local copy is untouched', (getMap(made.id)?.walls.length ?? 0) > 0);
+  const junk = archiveReceived({ format: MAP_FORMAT, id: 'x', rev: 2 } as unknown as MapFile);
+  check('a map without geometry is refused', junk === null);
+
   const text = exportMapText(getMap(made.id)!);
   check('export names the file after the map', exportFileName(getMap(made.id)!).endsWith('.tankmap.json'));
   check('the exported file names the format', JSON.parse(text).format === MAP_FORMAT);

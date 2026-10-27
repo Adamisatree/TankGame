@@ -18,6 +18,7 @@ import { dirname } from 'node:path';
  *   timeoutMs?: number,
  *   onProgress?: (info: { received: number, total: number, url: string, id: string }) => void,
  *   fetchImpl?: typeof fetch,
+ *   allowFinalUrl?: (url: string) => boolean,
  * }} [options]
  */
 export async function downloadWithFallback(url, destPath, options = {}) {
@@ -27,6 +28,7 @@ export async function downloadWithFallback(url, destPath, options = {}) {
     timeoutMs = 30000,
     onProgress,
     fetchImpl = fetch,
+    allowFinalUrl = null,
   } = options;
 
   /** @type {string[]} */
@@ -71,6 +73,18 @@ export async function downloadWithFallback(url, destPath, options = {}) {
       });
       if (!res.ok || !res.body) {
         errors.push(`${candidate.id}: HTTP ${res.status}`);
+        continue;
+      }
+      // v1.6.2: `redirect: 'follow'` means the host that answers can point the
+      // download anywhere. Re-check where it actually landed before a byte is
+      // written, so the whitelist covers redirects too.
+      if (allowFinalUrl && res.url && !allowFinalUrl(res.url)) {
+        errors.push(`${candidate.id}: 被重定向到不受信任的地址`);
+        try {
+          await res.body.cancel();
+        } catch {
+          /* already gone */
+        }
         continue;
       }
 

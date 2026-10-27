@@ -312,17 +312,33 @@ export const DEFAULT_LAN_PORT = 8787;
  *  - an IP/host: explicitly typed (guest pointing at the host machine)
  *  - a full URL: used verbatim
  */
+/**
+ * Appends the game's socket path to whatever the user typed.
+ *
+ * v1.6.2: the old version pasted `"/ws"` onto a raw string, so `ws://host:8787/ws/`
+ * became `/ws/ws`, and a full `http://host/foo` address lost its path entirely
+ * (the room lives under a path when the server is behind a proxy). Now the URL is
+ * parsed and the path is kept.
+ */
+function withSocketPath(url: URL): string {
+  const path = url.pathname.replace(/\/+$/, '');
+  const full = path.endsWith('/ws') ? path : `${path}/ws`;
+  const proto = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${url.host}${full}${url.search}`;
+}
+
 export function resolveSocketUrl(raw: string): string {
   const value = raw.trim();
   if (!value) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     return `${proto}://${location.host}/ws`;
   }
-  if (/^wss?:\/\//i.test(value)) return value.endsWith('/ws') ? value : value.replace(/\/$/, '') + '/ws';
-  if (/^https?:\/\//i.test(value)) {
-    const url = new URL(value);
-    const proto = url.protocol === 'https:' ? 'wss' : 'ws';
-    return `${proto}://${url.host}/ws`;
+  if (/^wss?:\/\//i.test(value) || /^https?:\/\//i.test(value)) {
+    try {
+      return withSocketPath(new URL(value));
+    } catch {
+      return value;
+    }
   }
   const withPort = /:\d+$/.test(value) ? value : `${value}:${DEFAULT_LAN_PORT}`;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
