@@ -450,6 +450,21 @@ check('reset restores the defaults', getBindings().solo.fire === defaults.solo.f
   check('team kills are summed', teamWin.kind === 'win' && teamWin.winners.includes('p1') && teamWin.winners.includes('p2'));
   const teamTie = R.evaluateMatch([line('p1', 5, 0), line('p3', 5, 1)], teamCfg, 300);
   check('equal team scores draw on time', teamTie.kind === 'draw');
+  // v1.6.2: both teams can reach the kill target on the same frame. The old code
+  // took whichever team the (order-dependent) sort put first, so the same match
+  // could be won by either side.
+  const teamKillTie = R.evaluateMatch([line('p1', 7, 0), line('p3', 3, 0), line('p2', 10, 1)], teamCfg, 30);
+  check(
+    'a team-kill tie shares the win instead of picking a side',
+    teamKillTie.kind === 'win' && teamKillTie.winners.includes('p1') && teamKillTie.winners.includes('p2'),
+    JSON.stringify(teamKillTie)
+  );
+  const teamKillTieReversed = R.evaluateMatch([line('p2', 10, 1), line('p3', 3, 0), line('p1', 7, 0)], teamCfg, 30);
+  check(
+    '...and the verdict does not depend on line order',
+    teamKillTieReversed.kind === 'win' && teamKillTieReversed.winners.length === 3,
+    JSON.stringify(teamKillTieReversed)
+  );
 
   // Teams alternate.
   const teams = R.assignTeams(['a', 'b', 'c', 'd']);

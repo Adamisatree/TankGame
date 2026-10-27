@@ -115,12 +115,28 @@ async function fetchManifestInBrowser(): Promise<{ manifest: Manifest; label: st
   return result.manifest ? { manifest: result.manifest, label: result.source?.label ?? '镜像' } : null;
 }
 
+/**
+ * v1.6.2: everything in a manifest is remote input. The panel pasted version
+ * numbers, asset names, digests and dates straight into `innerHTML`, so a
+ * mirror (or anything that can answer as one) could put a `<script>` in the
+ * update list — and from the desktop shell that chain ends at "run this exe".
+ * Escape every value that comes off the wire.
+ */
+function esc(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function releaseRow(release: ReleaseInfo): string {
   const isCurrent = compareVersions(release.version, currentVersion()) === 0;
   const newer = isNewer(release.version, currentVersion());
   const asset = pickForThisMachine(release);
   const html = release.assets.find((a) => classifyAsset(a.name).kind === 'html');
-  const date = release.publishedAt ? release.publishedAt.slice(0, 10) : '';
+  const date = release.publishedAt ? esc(String(release.publishedAt).slice(0, 10)) : '';
   const size = asset ? formatBytes(asset.size) : '';
   if (!state.browserMirrorId && MIRRORS[0]) state.browserMirrorId = MIRRORS[0].id;
   const mirror = preferredMirror();
@@ -129,20 +145,20 @@ function releaseRow(release: ReleaseInfo): string {
   return `
     <div class="ver-row ${isCurrent ? 'is-current' : ''}">
       <div class="ver-main">
-        <b>v${release.version}</b>${tag}
-        <span class="ver-meta">${date}${size ? ` · ${size}` : ''}${asset ? ` · ${asset.name}` : ''}</span>
+        <b>v${esc(release.version)}</b>${tag}
+        <span class="ver-meta">${date}${size ? ` · ${esc(size)}` : ''}${asset ? ` · ${esc(asset.name)}` : ''}</span>
       </div>
       <div class="ver-actions">
         ${
           asset && !isCurrent
-            ? `<button type="button" class="chip" data-ver-download="${release.version}" data-asset="${asset.name}" data-sha="${asset.sha256 ?? ''}" data-size="${asset.size}">
+            ? `<button type="button" class="chip" data-ver-download="${esc(release.version)}" data-asset="${esc(asset.name)}" data-sha="${esc(asset.sha256 ?? '')}" data-size="${esc(asset.size)}">
                  ${bridge() ? '下载并安装' : '下载'}
                </button>`
             : ''
         }
         ${
           html
-            ? `<a class="chip" href="${downloadUrl(html, mirror, release.version)}" target="_blank" rel="noreferrer">网页版</a>`
+            ? `<a class="chip" href="${esc(downloadUrl(html, mirror, release.version))}" target="_blank" rel="noreferrer">网页版</a>`
             : ''
         }
         ${
@@ -150,7 +166,7 @@ function releaseRow(release: ReleaseInfo): string {
             ? `<span class="ver-note" title="这个版本没有适合当前系统的安装包，可以先用网页版或到发布页手动下载">本机无对应安装包</span>`
             : ''
         }
-        <a class="chip ghost" href="${OFFICIAL.releasePage}/tag/v${release.version}" target="_blank" rel="noreferrer">发布页</a>
+        <a class="chip ghost" href="${esc(`${OFFICIAL.releasePage}/tag/v${release.version}`)}" target="_blank" rel="noreferrer">发布页</a>
       </div>
     </div>`;
 }
@@ -195,9 +211,9 @@ function compareSummary(): string {
   if (!state.manifest) return '';
   const latest = state.manifest.releases.find((r) => !r.prerelease) ?? state.manifest.releases[0];
   if (!latest) return '';
-  if (isNewer(latest.version, currentVersion())) return `发现新版本 v${latest.version}`;
+  if (isNewer(latest.version, currentVersion())) return `发现新版本 v${esc(latest.version)}`;
   if (compareVersions(latest.version, currentVersion()) === 0) return '已是最新版本';
-  return `你用的是较新的版本（线上最新 v${latest.version}）`;
+  return `你用的是较新的版本（线上最新 v${esc(latest.version)}）`;
 }
 
 export function updaterPanelHtml(): string {
@@ -216,7 +232,7 @@ export function updaterPanelHtml(): string {
     <details class="updater" ${state.expanded ? 'open' : ''}>
       <summary>
         更新与版本 <span class="ver-current">v${version}</span>
-        ${state.message ? `<span class="ver-badge">${state.message}</span>` : ''}
+        ${state.message ? `<span class="ver-badge">${esc(state.message)}</span>` : ''}
       </summary>
 
       <div class="upd-row">
@@ -243,15 +259,15 @@ export function updaterPanelHtml(): string {
 
       <div class="upd-status">
         ${state.checkingSlow ? '<span class="lan-loading">正在从镜像获取版本列表…</span>' : ''}
-        ${state.manifest ? `<span>${compareSummary()} · 列表来源 ${state.source || '缓存'}</span>` : ''}
-        ${state.error ? `<span class="upd-error">${state.error}</span>` : ''}
-        ${probeText ? `<span class="upd-probe">测速：${probeText}</span>` : ''}
+        ${state.manifest ? `<span>${compareSummary()} · 列表来源 ${esc(state.source || '缓存')}</span>` : ''}
+        ${state.error ? `<span class="upd-error">${esc(state.error)}</span>` : ''}
+        ${probeText ? `<span class="upd-probe">测速：${esc(probeText)}</span>` : ''}
       </div>
 
       ${
         state.downloading
           ? `<div class="upd-progress"><div class="bar" style="width:${Math.round(state.progress * 100)}%"></div>
-               <span>${state.downloading} ${Math.round(state.progress * 100)}%</span></div>`
+               <span>${esc(state.downloading)} ${Math.round(state.progress * 100)}%</span></div>`
           : ''
       }
 

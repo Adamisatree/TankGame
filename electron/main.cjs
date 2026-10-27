@@ -165,7 +165,14 @@ ipcMain.handle('update:info', () => updateInfo());
 ipcMain.handle('update:check', async (_event, options) => {
   const result = await updater.fetchManifest(options || {});
   const settings = await updater.readSettings();
-  await updater.writeSettings({ ...settings, lastCheckAt: Date.now() });
+  // v1.6.2: `cachedManifest` had no writer at all, so 镜像测速 always probed the
+  // raw manifest instead of a real installer URL (D3) — it ranked mirrors by the
+  // wrong upstream. Store the manifest that just worked.
+  await updater.writeSettings({
+    ...settings,
+    lastCheckAt: Date.now(),
+    cachedManifest: result.manifest ?? settings.cachedManifest ?? null,
+  });
   if (!result.manifest) return { ok: false, errors: result.errors };
 
   const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
@@ -194,8 +201,15 @@ ipcMain.handle('update:probe', async (event) => {
 });
 
 ipcMain.handle('update:download', async (event, payload) => {
-  const { assetName, url: givenUrl, version, sha256, size } = payload || {};
-  if (!assetName || !version) return { ok: false, error: 'missing asset' };
+  const { assetName: rawName, url: givenUrl, version, sha256: rawSha, size } = payload || {};
+  if (!rawName || !version) return { ok: false, error: 'missing asset' };
+  // v1.6.2: the manifest is fetched over the network, so its values are input,
+  // not trust. A `name` of `..\..\evil.exe` was written outside the version store.
+  const assetName = updater.safeAssetName(rawName);
+  if (!assetName) return { ok: false, error: '安装包文件名不合法' };
+  // Only a real sha256 is worth comparing; a dirty value made every mirror
+  // report a mismatch (D5).
+  const sha256 = typeof rawSha === 'string' && /^[0-9a-f]{64}$/i.test(rawSha) ? rawSha.toLowerCase() : '';
 
   const core = await import(toFileUrl(path.join(__dirname, '..', 'shared', 'update-core.mjs')).href);
   const url = givenUrl || `${core.OFFICIAL.releaseDownload}/v${version}/${assetName}`;
@@ -241,15 +255,23 @@ ipcMain.handle('update:download', async (event, payload) => {
   };
 });
 
+// v1.6.2: a double click used to spawn the installer twice.
+let installing = false;
 ipcMain.handle('update:install', async (_event, payload) => {
+  if (installing) return { ok: false, error: '正在启动安装程序，请稍候' };
   if (!pendingInstall) return { ok: false, error: '还没有下载好的安装包' };
   // An installer we could not verify only runs if the player said so.
   if (!pendingInstall.verified && !payload?.allowUnverified) {
     return { ok: false, error: 'unverified' };
   }
-  const result = await updater.installDownloaded(pendingInstall.path, pendingInstall.asset);
-  if (result.launched === false) return { ok: false, error: result.error ?? '安装失败' };
-  return { ok: true, ...result };
+  try {
+    installing = true;
+    const result = await updater.installDownloaded(pendingInstall.path, pendingInstall.asset);
+    if (result.launched === false) return { ok: false, error: result.error ?? '安装失败' };
+    return { ok: true, ...result };
+  } finally {
+    installing = false;
+  }
 });
 
 ipcMain.handle('update:local', async () => ({
@@ -258,12 +280,15 @@ ipcMain.handle('update:local', async () => ({
 }));
 
 ipcMain.handle('update:install-file', async (_event, payload) => {
-  const filePath = String(payload?.path ?? '');
+  // v1.6.2: resolve first. The old check compared the *raw* string, so
+  // `…/versions\..\..\evil.exe` started with the allowed prefix and walked out.
+  const filePath = path.resolve(String(payload?.path ?? ''));
   // Only ever launch something from our own version store. The separator
   // matters: `…/versions-x/evil.exe` is not inside `…/versions` (D4).
-  const dir = updater.versionsDir();
+  const dir = path.resolve(updater.versionsDir());
   const separator = path.sep;
-  if (!filePath.startsWith(dir.endsWith(separator) ? dir : `${dir}${separator}`)) {
+  const inside = filePath.startsWith(dir.endsWith(separator) ? dir : `${dir}${separator}`);
+  if (!inside || filePath.includes(`..${separator}`) || !path.basename(filePath).match(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
     return { ok: false, error: '未知的安装包路径' };
   }
   const asset = {
@@ -272,10 +297,16 @@ ipcMain.handle('update:install-file', async (_event, payload) => {
   };
   // Switching to a version already in the archive is itself the player's
   // consent (they clicked that exact build), so no extra prompt here.
+  if (installing) return { ok: false, error: '正在启动安装程序，请稍候' };
   pendingInstall = { path: filePath, asset, verified: false };
-  const result = await updater.installDownloaded(filePath, asset);
-  if (result.launched === false) return { ok: false, error: result.error ?? '安装失败' };
-  return { ok: true, ...result };
+  try {
+    installing = true;
+    const result = await updater.installDownloaded(filePath, asset);
+    if (result.launched === false) return { ok: false, error: result.error ?? '安装失败' };
+    return { ok: true, ...result };
+  } finally {
+    installing = false;
+  }
 });
 
 ipcMain.handle('update:reveal', async (_event, filePath) => {

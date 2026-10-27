@@ -5,6 +5,7 @@
  *
  *   npm run test:desktop   (needs `npm run build` first)
  */
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
@@ -49,6 +50,43 @@ await second.close();
 
 await handle.close();
 check('shutting down releases the port', await fetch(`${base}/`).then(() => false).catch(() => true));
+
+// --- v1.6.2: the update path must not launch anything it was told to fetch.
+{
+  // The guards are pure (shared/asset-guard.mjs), so they can be checked without
+  // an Electron binary — which is also why they live there now.
+  const guard = require('../shared/asset-guard.mjs') as {
+    safeAssetName: (name: unknown) => string;
+    assetUrlAllowed: (url: string, options: { hosts: string[]; repo: string }) => boolean;
+  };
+  const mirrors = JSON.parse(readFileSync(resolve('mirrors.json'), 'utf8')) as { mirrors: { prefix: string }[] };
+  const hosts = [
+    'github.com',
+    'objects.githubusercontent.com',
+    ...mirrors.mirrors.map((m) => new URL(m.prefix).hostname),
+  ];
+  const repo = 'Adamisatree/TankGame';
+  const allowed = (url: string): boolean => guard.assetUrlAllowed(url, { hosts, repo });
+
+  check('a plain asset name is accepted', guard.safeAssetName('TankGame-1.6.2-x64-setup.exe') === 'TankGame-1.6.2-x64-setup.exe');
+  check('a windows path in the asset name is refused', guard.safeAssetName('..\\..\\evil.exe') === '', guard.safeAssetName('..\\..\\evil.exe'));
+  check('a posix path in the asset name is refused', guard.safeAssetName('../../evil.exe') === '');
+  check('a name that is just dots is refused', guard.safeAssetName('..') === '');
+
+  const official = `https://github.com/${repo}/releases/download/v1.6.2/TankGame-1.6.2-x64-setup.exe`;
+  check('the official asset URL is allowed', allowed(official));
+  check('a mirror prefix in front of the official URL is allowed', allowed(`https://ghfast.top/${official}`));
+  check(
+    'a mirror prefix in front of *another* host is refused',
+    !allowed('https://ghfast.top/https://attacker.example/x.exe')
+  );
+  check('an unrelated host is refused', !allowed('https://attacker.example/x.exe'));
+  check(
+    'a lookalike repository path is refused',
+    !allowed('https://github.com/Adamisatree/TankGame-evil/releases/download/v1/TankGame.exe')
+  );
+  check('plain http is refused', !allowed(`http://github.com/${repo}/releases/download/v1/x.exe`));
+}
 
 let failed = 0;
 for (const [name, ok, detail] of checks) {

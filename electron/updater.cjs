@@ -15,6 +15,8 @@ const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const MIRRORS_FILE = join(__dirname, '..', 'mirrors.json');
+/** Pure download/asset guards (no Electron, so the tests can import them). */
+const assetGuard = require('../shared/asset-guard.mjs');
 const TIMEOUT_MS = 12000;
 
 /** @type {typeof import('../shared/update-core.mjs') | null} */
@@ -46,10 +48,25 @@ async function readSettings() {
   }
 }
 
+/**
+ * v1.6.2: settings are written through a single chain, to a temp file and then
+ * renamed. Two concurrent writers (a check finishing while the probe ranking is
+ * saved) used to interleave and lose one of the updates, and a crash mid-write
+ * left a truncated JSON that read back as "everything default".
+ */
+let settingsChain = Promise.resolve();
 async function writeSettings(next) {
-  await mkdir(app.getPath('userData'), { recursive: true });
-  await writeFile(settingsPath(), JSON.stringify(next, null, 2), 'utf8');
-  return next;
+  const run = async () => {
+    await mkdir(app.getPath('userData'), { recursive: true });
+    const file = settingsPath();
+    const temp = `${file}.tmp`;
+    await writeFile(temp, JSON.stringify(next, null, 2), 'utf8');
+    const { rename } = require('node:fs/promises');
+    await rename(temp, file);
+    return next;
+  };
+  settingsChain = settingsChain.then(run, run);
+  return settingsChain;
 }
 
 async function readMirrors() {
@@ -193,10 +210,26 @@ async function downloadWithMirrors(url, destPath, options = {}) {
   if (!candidates.length) {
     return { ok: false, path: '', sha256: '', size: 0, source: null, errors: [`所选镜像 ${preferred} 不可用，请在更新面板改为「自动」`] };
   }
+  // Anything GitHub serves through a redirect (release assets go to
+  // objects.githubusercontent.com) is fine; a random host is not.
+  const allowFinalUrl = (finalUrl) => {
+    try {
+      const host = new URL(finalUrl).hostname.toLowerCase();
+      return (
+        host === 'github.com' ||
+        host === 'api.github.com' ||
+        host.endsWith('.githubusercontent.com') ||
+        host.endsWith('.github.com')
+      );
+    } catch {
+      return false;
+    }
+  };
   const result = await downloadWithFallback(url, destPath, {
     candidates,
     expectedSha: options.expectedSha,
     onProgress: options.onProgress,
+    allowFinalUrl,
   });
   return result;
 }
@@ -206,8 +239,15 @@ function versionsDir() {
   return join(app.getPath('userData'), 'versions');
 }
 
+/** v1.6.2: a name from a manifest is a file name, never a path (see shared/asset-guard). */
+function safeAssetName(name) {
+  return assetGuard.safeAssetName(name);
+}
+
 function versionFileFor(asset) {
-  return join(versionsDir(), String(asset.name));
+  const safe = safeAssetName(asset?.name);
+  if (!safe) throw new Error('安装包文件名不合法');
+  return join(versionsDir(), safe);
 }
 
 /**
@@ -362,16 +402,14 @@ async function allowedDownloadHosts() {
 }
 
 /** @param {string} url */
+/**
+ * v1.6.2: the rule lives in `shared/asset-guard.mjs` so it can be tested without
+ * an Electron binary. Only the host list and the repo name are wiring.
+ */
 async function isAllowedAssetUrl(url) {
-  let parsed;
-  try {
-    parsed = new URL(String(url));
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== 'https:') return false;
+  const core = await loadCore();
   const hosts = await allowedDownloadHosts();
-  return hosts.has(parsed.hostname.toLowerCase());
+  return assetGuard.assetUrlAllowed(url, { hosts, repo: core.REPO });
 }
 
 async function openFolder(path) {
@@ -379,6 +417,7 @@ async function openFolder(path) {
 }
 
 module.exports = {
+  safeAssetName,
   fetchManifest,
   probeMirrors,
   downloadWithMirrors,

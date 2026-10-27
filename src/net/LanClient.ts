@@ -9,8 +9,8 @@ import {
 } from './protocol';
 import { APP_VERSION } from '../version';
 import { DEFAULT_MATCH, type MatchConfig } from '../game/rules';
-import { mapHash, normalizeMapFile, type MapFile } from '../maps/format';
-import { archiveReceived } from '../maps/store';
+import { looksLikeMap, mapHash, normalizeMapFile, type MapFile } from '../maps/format';
+import { archiveReceived, isLibraryFull } from '../maps/store';
 import { refreshLevels } from '../maps/registry';
 
 export type LanStatus = 'idle' | 'connecting' | 'waiting' | 'playing' | 'closed' | 'error' | 'rejected';
@@ -151,6 +151,9 @@ export class LanClient {
 
   connect(): void {
     this.clearRetry();
+    // v1.6.2: a frame that was waiting in the burst coalescer belongs to the
+    // previous socket; replaying it after a reconnect shows a stale arena.
+    this.clearSnapCoalesce();
     this.closedByUser = false;
     this.setStatus('connecting');
     // v1.6 (review finding 1): leftover frames belong to the *previous* socket,
@@ -306,7 +309,16 @@ export class LanClient {
           this.handlers.onLog?.('连接结束');
           break;
         case 'replaced':
+          // v1.6.2: the server now strips the old socket's privileges, and this
+          // side closes too — a replaced connection has nothing left to say.
           this.handlers.onLog?.('房间被同一角色的新连接取代');
+          this.closedByUser = true;
+          this.handlers.onStatus?.('closed', '这个座位已在别处重新连接');
+          try {
+            this.ws?.close();
+          } catch {
+            /* already gone */
+          }
           break;
         default:
           break;
@@ -332,6 +344,10 @@ export class LanClient {
     };
 
     ws.onclose = () => {
+      // v1.6.2: `reject` (version mismatch, full room) closes the socket itself,
+      // and the follow-up `closed` overwrote the explanation within a frame —
+      // players saw 「连接已断开」 and never learned why.
+      if (this.status === 'rejected') return;
       if (this.closedByUser) {
         this.setStatus('closed');
         return;
@@ -414,11 +430,23 @@ export class LanClient {
   private takeMap(raw: unknown, hash: string): void {
     let stored: MapFile | null = null;
     let ok = false;
+    // v1.6.2: every failure used to report 「地图文件读不出来」, including a full
+    // library. The host needs the real reason to know whether to retry.
+    let reason = '地图文件读不出来';
     try {
-      stored = archiveReceived(normalizeMapFile(raw));
-      // The library may have kept a newer revision of the same id; the hash has
-      // to match what the host is about to play, or the arena would differ.
-      ok = !!stored && mapHash(stored) === hash;
+      if (!looksLikeMap(raw)) {
+        reason = '收到的不是地图文件';
+      } else {
+        stored = archiveReceived(normalizeMapFile(raw));
+        if (!stored) {
+          reason = isLibraryFull() ? '本机地图库满了，存不下这张图' : '本机存不下这张图（浏览器存储已满或被禁用）';
+        } else {
+          // The library may have kept a newer revision of the same id; the hash
+          // has to match what the host is about to play, or the arena would differ.
+          ok = mapHash(stored) === hash;
+          if (!ok) reason = '地图校验失败';
+        }
+      }
     } catch {
       ok = false;
     }
@@ -432,12 +460,12 @@ export class LanClient {
         rev: stored.rev,
         hash,
         ok,
-        ...(ok ? {} : { reason: '地图校验失败' }),
+        ...(ok ? {} : { reason }),
       });
       this.handlers.onLog?.(ok ? `收到房主地图 ${stored.name}` : `地图 ${stored.name} 校验失败`);
       return;
     }
-    this.sendRaw({ t: 'map-ack', id: '', rev: 0, hash, ok: false, reason: '地图文件读不出来' });
+    this.sendRaw({ t: 'map-ack', id: '', rev: 0, hash, ok: false, reason });
   }
 
   /**
@@ -502,7 +530,16 @@ export class LanClient {
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN && this.trySend(ws, payload)) return;
     if (!queue) return;
-    if (this.pending.length < 20) this.pending.push(payload);
+    // v1.6.2: a full queue used to drop the new message silently. Control
+    // messages are *state* (ready / begin / config / map): only the newest one
+    // matters, so replace the previous message of the same kind.
+    if (this.pending.length >= 20) {
+      const kind = (message as { t?: string }).t;
+      const at = kind ? this.pending.findIndex((m) => m.startsWith(`{"t":"${kind}"`)) : -1;
+      if (at < 0) return;
+      this.pending.splice(at, 1);
+    }
+    this.pending.push(payload);
   }
 
   /**

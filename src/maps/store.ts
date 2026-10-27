@@ -27,6 +27,13 @@ const STORE_VERSION = 1;
  * just because it is the oldest one (C4).
  */
 export const MAX_MAPS = 200;
+/**
+ * v1.6.2: `MAX_MAPS` alone did not bound anything real — 100 hand-drawn 48 KB
+ * maps blow past the ~5 MB localStorage budget long before the 200th file, and
+ * the failure surfaced as "the map could not be stored" with no explanation.
+ */
+export const MAX_MAP_BYTES = 48 * 1024;
+export const MAX_LIBRARY_BYTES = 3.5 * 1024 * 1024;
 
 interface StoreShape {
   version: number;
@@ -117,10 +124,26 @@ export function saveMap(raw: MapFile, options: { bumpRev?: boolean } = {}): MapF
 /** True when the library is at its cap, so a *new* map cannot be added. */
 export const isLibraryFull = (): boolean => isFull(readStore());
 
-const isFull = (shape: StoreShape): boolean => shape.maps.length >= MAX_MAPS;
+const storeBytes = (shape: StoreShape): number => {
+  try {
+    return JSON.stringify({ version: STORE_VERSION, maps: shape.maps }).length;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+};
+
+const isFull = (shape: StoreShape): boolean => shape.maps.length >= MAX_MAPS || storeBytes(shape) > MAX_LIBRARY_BYTES;
 
 /** Stores a map received from another player without touching its revision. */
 export function archiveReceived(raw: MapFile): MapFile | null {
+  // v1.6.2: `normalizeMapFile` never refuses anything — an empty object with the
+  // right id is a valid 1v1 arena with no walls. A peer could therefore replace a
+  // hand-drawn map (same id, higher rev) with a blank one and the local copy was
+  // gone. Refuse anything that is not recognisably a map.
+  if (!looksLikeMap(raw)) return null;
+  if (typeof raw?.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(raw.id)) return null;
+  if (!Array.isArray(raw.walls) || raw.walls.length < 1) return null;
+  if (!Array.isArray(raw.spawns) || raw.spawns.length < 2) return null;
   const shape = readStore();
   const incoming = normalizeMapFile({ ...raw, source: 'received' });
   const existing = shape.maps.findIndex((map) => map.id === incoming.id);

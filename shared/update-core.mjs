@@ -28,8 +28,11 @@ export const OFFICIAL = {
 export function parseVersion(value) {
   const text = String(value ?? '').trim().replace(/^v/i, '');
   const [core, ...rest] = text.split('-');
+  // v1.6.2: `parseInt` accepted trailing junk ("1.6.1beta" → 1.6.1) and the
+  // prerelease tag was compared as a plain string, so beta.10 sorted *below*
+  // beta.2. Digits are now parsed strictly and the tag compares piecewise.
   const parts = core.split('.').map((p) => {
-    const n = Number.parseInt(p, 10);
+    const n = /^\d+$/.test(p) ? Number.parseInt(p, 10) : 0;
     return Number.isFinite(n) ? n : 0;
   });
   return {
@@ -55,7 +58,37 @@ export function compareVersions(a, b) {
   if (x.pre === y.pre) return 0;
   if (!x.pre) return 1;
   if (!y.pre) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  return comparePrerelease(x.pre, y.pre);
+}
+
+/**
+ * Compares `alpha.2` style tags the way semver does: numeric identifiers by
+ * value, alphanumeric ones lexically, a shorter list first when it is a prefix.
+ * @param {string} a
+ * @param {string} b
+ * @returns {-1 | 0 | 1}
+ */
+function comparePrerelease(a, b) {
+  const x = a.split('.');
+  const y = b.split('.');
+  for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+    const left = x[i];
+    const right = y[i];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    const leftNum = /^\d+$/.test(left);
+    const rightNum = /^\d+$/.test(right);
+    if (leftNum && rightNum) {
+      const diff = Number(left) - Number(right);
+      if (diff !== 0) return diff < 0 ? -1 : 1;
+    } else if (leftNum !== rightNum) {
+      // Numeric identifiers always have lower precedence than alphanumeric ones.
+      return leftNum ? -1 : 1;
+    } else if (left !== right) {
+      return left < right ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
 export function isNewer(candidate, current) {

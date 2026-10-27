@@ -6,6 +6,8 @@
  */
 import { readFile } from 'node:fs/promises';
 import WebSocket from 'ws';
+// The build injects the version; under tsx we read it from package.json.
+const TANK_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 import { createLanServer } from '../server/lan-server.mjs';
 import { emptyMap, mapHash } from '../src/maps/format';
 
@@ -84,12 +86,12 @@ check('path traversal is blocked', traversal.status === 200 && !(await traversal
 
 // --- pairing
 const host = await open(wsUrl);
-host.send({ t: 'join', role: 'host', skill: 'rage' });
+host.send({ t: 'join', role: 'host', skill: 'rage' , version: TANK_VERSION });
 check('host gets a joined ack', await waitFor(() => host.messages.some((m) => m.t === 'joined')), JSON.stringify(host.messages));
 check('host ack says nobody has joined yet', host.messages.find((m) => m.t === 'joined')?.guest === false);
 
 const guest = await open(wsUrl);
-guest.send({ t: 'join', role: 'guest', skill: 'weaken' });
+guest.send({ t: 'join', role: 'guest', skill: 'weaken' , version: TANK_VERSION });
 check('guest gets a joined ack', await waitFor(() => guest.messages.some((m) => m.t === 'joined')));
 check('the ack tells the guest which version it is playing', guest.messages.find((m) => m.t === 'joined')?.version === pkg.version);
 check('guest ack sees the host present', guest.messages.find((m) => m.t === 'joined')?.host === true);
@@ -166,9 +168,9 @@ check('the room empties once the host leaves', await waitFor(() => server.stats(
 // --- a fresh pair still works (no stale state)
 await sleep(120);
 const host2 = await open(wsUrl);
-host2.send({ t: 'join', role: 'host' });
+host2.send({ t: 'join', role: 'host' , version: TANK_VERSION });
 const guest2 = await open(wsUrl);
-guest2.send({ t: 'join', role: 'guest' });
+guest2.send({ t: 'join', role: 'guest' , version: TANK_VERSION });
 check('a second match can pair up', await waitFor(() => guest2.messages.some((m) => m.t === 'paired')));
 host2.send({ t: 'state', seq: 42, level: 1, phase: 'playing', score: 5, crates: [], tanks: [], bullets: [], events: [] });
 check('second match relays state', await waitFor(() => guest2.messages.some((m) => m.t === 'state' && m.seq === 42)));
@@ -181,11 +183,11 @@ await sleep(120);
   const roomMap = emptyMap({ name: '联机测试图' });
   const mapMsg = { t: 'map', map: roomMap, hash: mapHash(roomMap) };
   const host3 = await open(wsUrl);
-  host3.send({ t: 'join', role: 'host', map: roomMap, mapHash: mapHash(roomMap) });
+  host3.send({ t: 'join', role: 'host', map: roomMap, mapHash: mapHash(roomMap) , version: TANK_VERSION });
   await waitFor(() => host3.messages.some((m) => m.t === 'joined'));
 
   const guest3 = await open(wsUrl);
-  guest3.send({ t: 'join', role: 'guest' });
+  guest3.send({ t: 'join', role: 'guest' , version: TANK_VERSION });
   check('a joining guest receives the room map', await waitFor(() => guest3.messages.some((m) => m.t === 'map')));
   // Seat ids grow across the whole process, so read ours instead of assuming p2.
   const seat3 = guest3.messages.find((m) => m.t === 'joined')?.id as string;
@@ -221,7 +223,7 @@ await sleep(120);
 
   // A newcomer still gets the map (the server caches it).
   const guest4 = await open(wsUrl);
-  guest4.send({ t: 'join', role: 'guest' });
+  guest4.send({ t: 'join', role: 'guest' , version: TANK_VERSION });
   check('a late guest also receives the map', await waitFor(() => guest4.messages.some((m) => m.t === 'map')));
   check('the late guest gets the same map', guest4.messages.find((m) => m.t === 'map')?.map?.id === roomMap.id);
   guest4.close();
@@ -249,10 +251,10 @@ await sleep(120);
 await sleep(120);
 {
   const host5 = await open(wsUrl);
-  host5.send({ t: 'join', role: 'host' });
+  host5.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => host5.messages.some((m) => m.t === 'joined'));
   const guest5 = await open(wsUrl);
-  guest5.send({ t: 'join', role: 'guest' });
+  guest5.send({ t: 'join', role: 'guest' , version: TANK_VERSION });
   await waitFor(() => guest5.messages.some((m) => m.t === 'paired'));
   host5.send({ t: 'begin' });
   check('a built-in map room starts without any ack', await waitFor(() => guest5.messages.some((m) => m.t === 'begin')));
@@ -264,10 +266,10 @@ await sleep(120);
 await sleep(120);
 {
   const host6 = await open(wsUrl);
-  host6.send({ t: 'join', role: 'host' });
+  host6.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => host6.messages.some((m) => m.t === 'joined'));
   const guest6 = await open(wsUrl);
-  guest6.send({ t: 'join', role: 'guest', session: 'sess-alpha' });
+  guest6.send({ t: 'join', role: 'guest', session: 'sess-alpha' , version: TANK_VERSION });
   check('a session guest is seated', await waitFor(() => guest6.messages.some((m) => m.t === 'joined' && !m.resumed)));
   const seat = guest6.messages.find((m) => m.t === 'joined' && !m.resumed)?.id;
   host6.send({ t: 'config', mode: 'ffa', capacity: 6, killTarget: 15, timeLimit: 480 });
@@ -279,7 +281,7 @@ await sleep(120);
   await waitFor(() => host6.messages.some((m) => m.t === 'peer' && m.state === 'left'));
 
   const back = await open(wsUrl);
-  back.send({ t: 'join', role: 'guest', session: 'sess-alpha' });
+  back.send({ t: 'join', role: 'guest', session: 'sess-alpha' , version: TANK_VERSION });
   check('the reconnect is recognised as a resume', await waitFor(() => back.messages.some((m) => m.t === 'joined' && m.resumed === true)));
   check('it gets the same seat back', back.messages.find((m) => m.t === 'joined')?.id === seat, `${back.messages.find((m) => m.t === 'joined')?.id} vs ${seat}`);
 
@@ -290,7 +292,7 @@ await sleep(120);
 
   // A *new* session still lands in the lobby (that is not a resume).
   const fresh = await open(wsUrl);
-  fresh.send({ t: 'join', role: 'guest', session: 'sess-beta' });
+  fresh.send({ t: 'join', role: 'guest', session: 'sess-beta' , version: TANK_VERSION });
   await waitFor(() => fresh.messages.some((m) => m.t === 'joined'));
   const freshRoster = fresh.messages.filter((m) => m.t === 'roster').pop();
   check('a brand-new player still drops the room to the lobby', freshRoster?.started === false);
@@ -340,15 +342,15 @@ console.log('\nbackpressure');
   });
   const url = `ws://127.0.0.1:${slow.port}/ws`;
   const host = await open(url);
-  host.send({ t: 'join', role: 'host' });
+  host.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => host.messages.some((m) => m.t === 'joined'));
 
   const lagging = await open(url);
-  lagging.send({ t: 'join', role: 'guest', session: 'slow-one' });
+  lagging.send({ t: 'join', role: 'guest', session: 'slow-one' , version: TANK_VERSION });
   await waitFor(() => lagging.messages.some((m) => m.t === 'joined'));
 
   const healthy = await open(url);
-  healthy.send({ t: 'join', role: 'guest', session: 'healthy-one' });
+  healthy.send({ t: 'join', role: 'guest', session: 'healthy-one' , version: TANK_VERSION });
   await waitFor(() => healthy.messages.some((m) => m.t === 'joined'));
 
   // Stop reading this socket entirely: frames pile up in the server's send
@@ -412,13 +414,13 @@ console.log('\nbackpressure · hard limit');
   });
   const url = `ws://127.0.0.1:${cut.port}/ws`;
   const host = await open(url);
-  host.send({ t: 'join', role: 'host' });
+  host.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => host.messages.some((m) => m.t === 'joined'));
   const lagging = await open(url);
-  lagging.send({ t: 'join', role: 'guest', session: 'stalled' });
+  lagging.send({ t: 'join', role: 'guest', session: 'stalled' , version: TANK_VERSION });
   await waitFor(() => lagging.messages.some((m) => m.t === 'joined'));
   const watcher = await open(url);
-  watcher.send({ t: 'join', role: 'guest', session: 'watcher' });
+  watcher.send({ t: 'join', role: 'guest', session: 'watcher' , version: TANK_VERSION });
   await waitFor(() => watcher.messages.some((m) => m.t === 'joined'));
   const stalledSeat = lagging.messages.find((m) => m.t === 'joined')?.id;
 
@@ -460,12 +462,12 @@ console.log('\nroom state across sessions');
   const url = `ws://127.0.0.1:${fresh.port}/ws`;
 
   const round1Host = await open(url);
-  round1Host.send({ t: 'join', role: 'host' });
+  round1Host.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => round1Host.messages.some((m) => m.t === 'joined'));
   const a = await open(url);
-  a.send({ t: 'join', role: 'guest', session: 'round1-a' });
+  a.send({ t: 'join', role: 'guest', session: 'round1-a' , version: TANK_VERSION });
   const b = await open(url);
-  b.send({ t: 'join', role: 'guest', session: 'round1-b' });
+  b.send({ t: 'join', role: 'guest', session: 'round1-b' , version: TANK_VERSION });
   await waitFor(() => a.messages.some((m) => m.t === 'joined') && b.messages.some((m) => m.t === 'joined'));
   check(
     'the first session hands out p2 and p3',
@@ -485,12 +487,12 @@ console.log('\nroom state across sessions');
 
   // A brand-new session in the same process.
   const round2Host = await open(url);
-  round2Host.send({ t: 'join', role: 'host' });
+  round2Host.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => round2Host.messages.some((m) => m.t === 'joined'));
   const c = await open(url);
-  c.send({ t: 'join', role: 'guest', session: 'round2-c' });
+  c.send({ t: 'join', role: 'guest', session: 'round2-c' , version: TANK_VERSION });
   const d = await open(url);
-  d.send({ t: 'join', role: 'guest', session: 'round2-d' });
+  d.send({ t: 'join', role: 'guest', session: 'round2-d' , version: TANK_VERSION });
   await waitFor(() => c.messages.some((m) => m.t === 'joined') && d.messages.some((m) => m.t === 'joined'));
 
   check(
@@ -524,11 +526,11 @@ console.log('\nseat reservation');
   const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
   const url = `ws://127.0.0.1:${fresh.port}/ws`;
   const host = await open(url);
-  host.send({ t: 'join', role: 'host' });
+  host.send({ t: 'join', role: 'host' , version: TANK_VERSION });
   await waitFor(() => host.messages.some((m) => m.t === 'joined'));
 
   const leaver = await open(url);
-  leaver.send({ t: 'join', role: 'guest', session: 'keep-me' });
+  leaver.send({ t: 'join', role: 'guest', session: 'keep-me' , version: TANK_VERSION });
   await waitFor(() => leaver.messages.some((m) => m.t === 'joined'));
   check('the leaver takes p2', leaver.messages.find((m) => m.t === 'joined')?.id === 'p2');
 
@@ -536,13 +538,13 @@ console.log('\nseat reservation');
   await sleep(300);
 
   const newcomer = await open(url);
-  newcomer.send({ t: 'join', role: 'guest', session: 'someone-else' });
+  newcomer.send({ t: 'join', role: 'guest', session: 'someone-else' , version: TANK_VERSION });
   await waitFor(() => newcomer.messages.some((m) => m.t === 'joined'));
   const taken = newcomer.messages.find((m) => m.t === 'joined')?.id;
   check('a newcomer cannot take a reserved seat', taken !== 'p2', `got ${taken}`);
 
   const back = await open(url);
-  back.send({ t: 'join', role: 'guest', session: 'keep-me' });
+  back.send({ t: 'join', role: 'guest', session: 'keep-me' , version: TANK_VERSION });
   await waitFor(() => back.messages.some((m) => m.t === 'joined'));
   check('the dropped guest still resumes into p2', back.messages.find((m) => m.t === 'joined')?.id === 'p2');
 
@@ -550,6 +552,334 @@ console.log('\nseat reservation');
   newcomer.close();
   host.close();
   await sleep(200);
+  await fresh.close();
+}
+
+// ===========================================================================
+// v1.6.2 — the review's server-side findings, each one a live reproduction
+// ===========================================================================
+console.log('\nmalformed requests (A-3/A-16)');
+{
+  // The main server has already been torn down above, so use a fresh one.
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const base = `http://127.0.0.1:${fresh.port}`;
+  // One bad URL from any device on the LAN used to hang the request and then
+  // kill the whole server process (unhandled rejection from decodeURIComponent).
+  for (const bad of ['/%', '/%E0%A4%A', '/%zz', '/%C3%28']) {
+    let status = 0;
+    try {
+      const res = await fetch(`${base}${bad}`, { signal: AbortSignal.timeout(2000) });
+      status = res.status;
+      await res.text();
+    } catch {
+      status = -1; // hung or aborted
+    }
+    check(`a malformed URL is answered, not fatal: ${bad}`, status === 400, `status ${status}`);
+  }
+  const after = await fetch(`${base}/info`);
+  check('the server is still alive after those requests', after.ok);
+  check('/info still answers', (await after.json()).ok === true);
+  // A sibling directory whose name merely starts with "dist" must not be served.
+  const sibling = await fetch(`${base}/%2e%2e%2fdist2%2fpackage.json`);
+  check('a sibling directory with a dist prefix is not served', sibling.status !== 200 || !(await sibling.text()).includes('"scripts"'), String(sibling.status));
+  await fresh.close();
+}
+
+console.log('\nprivilege of a replaced socket (A-2)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+
+  const oldHost = await open(url);
+  oldHost.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => oldHost.messages.some((m) => m.t === 'joined'));
+
+  const guest = await open(url);
+  guest.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  await waitFor(() => guest.messages.some((m) => m.t === 'joined'));
+
+  // A second host socket takes the room over (page refresh, new window).
+  const newHost = await open(url);
+  newHost.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => newHost.messages.some((m) => m.t === 'joined'));
+  check('the old host is told it was replaced', await waitFor(() => oldHost.messages.some((m) => m.t === 'replaced')));
+
+  const before = guest.messages.length;
+  oldHost.send({ t: 'state', kf: 1, tanks: [] });
+  oldHost.send({ t: 'config', mode: 'team', capacity: 8 });
+  await sleep(200);
+  const leaked = guest.messages.slice(before).filter((m) => m.t === 'state' || m.t === 'config');
+  check('a replaced host can no longer broadcast snapshots', !leaked.some((m) => m.t === 'state'), JSON.stringify(leaked));
+  check('a replaced host can no longer change the room', !leaked.some((m) => m.t === 'config'), JSON.stringify(leaked));
+
+  // Same for a guest seat: the old socket must stop driving the tank.
+  const original = await open(url);
+  original.send({ t: 'join', role: 'guest', version: TANK_VERSION, session: 'seat-x' });
+  await waitFor(() => original.messages.some((m) => m.t === 'joined'));
+  const seat = original.messages.find((m) => m.t === 'joined')?.id;
+  const takeover = await open(url);
+  takeover.send({ t: 'join', role: 'guest', version: TANK_VERSION, session: 'seat-x' });
+  await waitFor(() => takeover.messages.some((m) => m.t === 'joined'));
+  check('the same token takes its own seat back', takeover.messages.find((m) => m.t === 'joined')?.id === seat, String(seat));
+  check('no extra seat was created for the same token', fresh.stats().players === 3, JSON.stringify(fresh.stats()));
+
+  const mark = newHost.messages.length;
+  original.send({ t: 'input', input: { turn: 1, drive: 1, aim: 0, fire: false }, seq: 1 });
+  await sleep(200);
+  check(
+    'a replaced guest can no longer send input',
+    !newHost.messages.slice(mark).some((m) => m.t === 'input'),
+    JSON.stringify(newHost.messages.slice(mark))
+  );
+
+  original.close();
+  takeover.close();
+  guest.close();
+  newHost.close();
+  await sleep(200);
+  await fresh.close();
+}
+
+console.log('\nfake surrender (A-1)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+  const guest = await open(url);
+  guest.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  await waitFor(() => guest.messages.some((m) => m.t === 'joined'));
+
+  // A device that never joined sends "the host surrendered".
+  const stranger = await open(url);
+  stranger.send({ t: 'surrender', by: 'p1' });
+  await sleep(250);
+  check('a naked socket cannot surrender for somebody else', !guest.messages.some((m) => m.t === 'surrender'), JSON.stringify(guest.messages));
+  check('...and the room is untouched', fresh.stats().players === 2, JSON.stringify(fresh.stats()));
+  stranger.close();
+
+  // A real seat still can, and the server says who it really was.
+  guest.send({ t: 'surrender', by: 'p1' });
+  const real = await waitFor(() => host.messages.some((m) => m.t === 'surrender'), 1500);
+  check('a seated player can still surrender', real);
+  check(
+    'the surrender names the seat that actually sent it',
+    host.messages.find((m) => m.t === 'surrender')?.by === 'p2',
+    String(host.messages.find((m) => m.t === 'surrender')?.by)
+  );
+
+  host.close();
+  await sleep(150);
+  await fresh.close();
+}
+
+console.log('\njoin is idempotent (A-10)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+
+  const twice = await open(url);
+  twice.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  await waitFor(() => twice.messages.some((m) => m.t === 'joined'));
+  twice.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  twice.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await sleep(250);
+  check('joining twice on one socket does not take a second seat', fresh.stats().players === 2, JSON.stringify(fresh.stats()));
+  check('the room still has its host', host.messages.some((m) => m.t === 'joined'));
+
+  // ...and it does not leave a zombie behind: everyone can leave cleanly.
+  twice.close();
+  await sleep(250);
+  check('leaving frees the only guest seat', fresh.stats().players === 1, JSON.stringify(fresh.stats()));
+
+  host.close();
+  await sleep(150);
+  await fresh.close();
+}
+
+console.log('\nbegin is idempotent (A-12)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+
+  host.send({ t: 'begin' });
+  await sleep(250);
+  check('FFA with one player is not a match', !host.messages.some((m) => m.t === 'begin'), JSON.stringify(host.messages));
+  check(
+    'the refusal says why',
+    host.messages.some((m) => m.t === 'lobby-error' && m.reason === 'solo'),
+    JSON.stringify(host.messages.filter((m) => m.t === 'lobby-error'))
+  );
+
+  const guest = await open(url);
+  guest.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  await waitFor(() => guest.messages.some((m) => m.t === 'joined'));
+  host.send({ t: 'begin' });
+  await waitFor(() => guest.messages.some((m) => m.t === 'begin'), 1500);
+  host.send({ t: 'begin' });
+  await sleep(250);
+  check('a double click begins once', guest.messages.filter((m) => m.t === 'begin').length === 1, String(guest.messages.filter((m) => m.t === 'begin').length));
+
+  guest.close();
+  host.close();
+  await sleep(150);
+  await fresh.close();
+}
+
+console.log('\nversion gate needs a version (A-13)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+
+  const silent = await open(url);
+  silent.send({ t: 'join', role: 'guest' });
+  const refused = await waitFor(() => silent.messages.some((m) => m.t === 'reject'), 1500);
+  check('a guest that sends no version is refused', refused && silent.messages.find((m) => m.t === 'reject')?.reason === 'version');
+  check('...and takes no seat', fresh.stats().players === 1, JSON.stringify(fresh.stats()));
+
+  silent.close();
+  host.close();
+  await sleep(150);
+  await fresh.close();
+}
+
+console.log('\ncapacity, teams and seat limits (A-14/A-15/A-21)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+  const guests = [];
+  for (let i = 0; i < 3; i += 1) {
+    const g = await open(url);
+    g.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+    await waitFor(() => g.messages.some((m) => m.t === 'joined'));
+    guests.push(g);
+  }
+
+  host.send({ t: 'config', capacity: 2, mode: 'ffa' });
+  await sleep(250);
+  check(
+    'the room cannot be shrunk below its players',
+    host.messages.some((m) => m.t === 'lobby-error' && m.reason === 'capacity'),
+    JSON.stringify(host.messages.filter((m) => m.t === 'lobby-error'))
+  );
+  const roster = host.messages.filter((m) => m.t === 'roster').pop();
+  check('...and the capacity keeps up with the room', roster?.capacity === 4, String(roster?.capacity));
+
+  // FFA has no teams: auto-balance must not invent team 7.
+  host.send({ t: 'teams', count: 2 });
+  host.send({ t: 'auto-teams' });
+  await sleep(250);
+  const ffaRoster = host.messages.filter((m) => m.t === 'roster').pop();
+  check('auto-teams in FFA keeps everybody on team 0', ffaRoster?.players.every((p: { team: number }) => p.team === 0), JSON.stringify(ffaRoster?.players));
+
+  // Ten seats and no p11.
+  host.send({ t: 'config', capacity: 10, mode: 'ffa' });
+  await sleep(150);
+  const more = [];
+  for (let i = 0; i < 6; i += 1) {
+    const g = await open(url);
+    g.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+    await waitFor(() => g.messages.some((m) => m.t === 'joined' || m.t === 'reject'), 1200);
+    more.push(g);
+  }
+  const overflow = await open(url);
+  overflow.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  await waitFor(() => overflow.messages.some((m) => m.t === 'joined' || m.t === 'reject'), 1500);
+  const ids = [...guests, ...more].map((g) => g.messages.find((m) => m.t === 'joined')?.id).filter(Boolean);
+  check('every seat is inside p2…p10', ids.every((id) => /^p([2-9]|10)$/.test(String(id))), JSON.stringify(ids));
+  check('a full house is refused instead of inventing p11', overflow.messages.some((m) => m.t === 'reject'), JSON.stringify(overflow.messages));
+
+  overflow.close();
+  for (const g of [...guests, ...more]) g.close();
+  host.close();
+  await sleep(200);
+  await fresh.close();
+}
+
+console.log('\ntwo servers in one process (A-20)');
+{
+  // The room used to be module-level state: the second server shared the first
+  // one's players, which is what made a few review scenarios look like game bugs.
+  const a = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const b = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const guestA = await open(`ws://127.0.0.1:${a.port}/ws`);
+  guestA.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => guestA.messages.some((m) => m.t === 'joined'));
+  check('the first server has the host', a.stats().players === 1, JSON.stringify(a.stats()));
+  check('the second server is still empty', b.stats().players === 0, JSON.stringify(b.stats()));
+  const infoB = await fetch(`http://127.0.0.1:${b.port}/info`).then((r) => r.json() as Promise<{ players: number }>);
+  check('/info is per server too', infoB.players === 0, JSON.stringify(infoB));
+  guestA.close();
+  await sleep(150);
+  await a.close();
+  await b.close();
+}
+
+console.log('\nclosing frees the port at once (A-17)');
+{
+  const first = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const port = first.port;
+  await first.close();
+  let rebound = false;
+  try {
+    const second = await createLanServer({ port, host: '127.0.0.1', quiet: true });
+    rebound = true;
+    await second.close();
+  } catch {
+    rebound = false;
+  }
+  check('the same port can be used again immediately', rebound);
+}
+
+console.log('\nmap checklist after a departure (A-4)');
+{
+  const fresh = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url = `ws://127.0.0.1:${fresh.port}/ws`;
+  const host = await open(url);
+  host.send({ t: 'join', role: 'host', version: TANK_VERSION });
+  await waitFor(() => host.messages.some((m) => m.t === 'joined'));
+  const guest = await open(url);
+  guest.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  await waitFor(() => guest.messages.some((m) => m.t === 'joined'));
+
+  const custom = emptyMap({ name: 'waiting-room' });
+  host.send({ t: 'map', map: custom, hash: mapHash(custom) });
+  await waitFor(() => host.messages.some((m) => m.t === 'map-status' && m.waiting.length === 1), 1500);
+  check('the host sees the guest owing an ack', host.messages.some((m) => m.t === 'map-status' && m.waiting.length === 1));
+
+  guest.close();
+  const cleared = await waitFor(
+    () => host.messages.filter((m) => m.t === 'map-status').pop()?.waiting.length === 0,
+    1500
+  );
+  check('the departure clears the map checklist', cleared, JSON.stringify(host.messages.filter((m) => m.t === 'map-status')));
+
+  // A second player walks in and confirms the map, so the room can start.
+  const next = await open(url);
+  next.send({ t: 'join', role: 'guest', version: TANK_VERSION });
+  const mapMsg = await waitFor(() => next.messages.some((m) => m.t === 'map'), 1500);
+  check('a late joiner is handed the room map', mapMsg);
+  next.send({ t: 'map-ack', id: custom.id, rev: custom.rev, hash: mapHash(custom), ok: true });
+  await sleep(150);
+  host.send({ t: 'begin' });
+  check('and the room can start', await waitFor(() => host.messages.some((m) => m.t === 'begin'), 1500), JSON.stringify(host.messages.filter((m) => m.t === 'lobby-error')));
+  next.close();
+
+  host.close();
+  await sleep(150);
   await fresh.close();
 }
 

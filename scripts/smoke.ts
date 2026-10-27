@@ -4,7 +4,10 @@
  * without a browser. Run with `npm run smoke`.
  */
 import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
+// The build injects the version; under tsx we read it from package.json.
+const TANK_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const dom = new JSDOM('<!doctype html><html><body><div id="game"></div></body></html>', {
   pretendToBeVisual: true,
@@ -250,6 +253,14 @@ type Poked = {
   fire: (tank: unknown) => void;
   firePlayer?: () => void;
   setPaused: (paused: boolean) => void;
+  // v1.6.2 additions (all private in the scene, reached through the cast above).
+  lanRole: 'host' | 'guest' | null;
+  startPending: boolean;
+  roomLevelId: string;
+  levelIndexNumber?: number;
+  snap: unknown;
+  netEvent: (kind: string, x: number, y: number) => void;
+  requestKeyframe: () => void;
   setAutoDodge: (on: boolean) => void;
   restartGame: () => void;
 };
@@ -475,6 +486,39 @@ poke.setPaused(false);
 await wait(150);
 check('pause/resume keeps the game healthy', poke.phase !== 'over', poke.phase);
 
+// --- v1.6.2: the 内测 panel must not stack listeners on every rebind.
+//
+// 恢复默认 / 导入参数 rebuild the rows and re-bind the panel; the buttons that
+// are *not* rebuilt (恢复默认 itself, 导出, 展开) used to gain one more listener
+// per rebind, so N clicks ran 2^N handlers and the panel became unusable.
+{
+  const { bindTuningPanel, tuningPanelHtml } = await import('../src/ui/tuningPanel');
+  const host = document.createElement('div');
+  host.innerHTML = tuningPanelHtml(false);
+  document.body.appendChild(host);
+
+  let changes = 0;
+  const bind = (): void => bindTuningPanel(host, () => {
+    changes += 1;
+  });
+  bind();
+  bind();
+  bind();
+  const reset = () => host.querySelector<HTMLButtonElement>('#tune-reset');
+  reset()?.click();
+  // `bind` runs again inside the reset handler, so this counts one rebind too.
+  const afterFirst = changes;
+  reset()?.click();
+  reset()?.click();
+  check('one 恢复默认 click runs one handler', afterFirst === 1, String(afterFirst));
+  check(
+    'clicking it three times does not multiply the handlers',
+    changes === 3,
+    `${changes} handler runs for 3 clicks`
+  );
+  host.remove();
+}
+
 // --- LAN: host the match for real and connect a guest over WebSocket.
 const { createLanServer } = await import('../server/lan-server.mjs');
 const lanServer = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
@@ -500,7 +544,7 @@ await new Promise<void>((resolve, reject) => {
   guest.once('open', () => resolve());
   guest.once('error', reject);
 });
-guest.send(JSON.stringify({ t: 'join', role: 'guest' }));
+guest.send(JSON.stringify({ t: 'join', role: 'guest', version: TANK_VERSION }));
 await wait(500);
 // v1.4: newcomers land in the room lobby; the host starts the match.
 const hostPhase = () => (poke as any).phase as string;
@@ -804,7 +848,7 @@ await new Promise<void>((resolve, reject) => {
   guest2.once('open', () => resolve());
   guest2.once('error', reject);
 });
-guest2.send(JSON.stringify({ t: 'join', role: 'guest' }));
+guest2.send(JSON.stringify({ t: 'join', role: 'guest', version: TANK_VERSION }));
 await wait(500);
 // A new seat drops the room back to the lobby until the host starts again.
 poke.startRoomMatch();
@@ -890,7 +934,7 @@ check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown 
         const msg = JSON.parse(String(raw));
         if (msg.t === 'joined') resolve(String(msg.id));
       });
-      ws.send(JSON.stringify({ t: 'join', role: 'guest', session }));
+      ws.send(JSON.stringify({ t: 'join', role: 'guest', session, version: TANK_VERSION }));
     });
     return { id, ws };
   };
@@ -982,6 +1026,262 @@ check('leaving LAN mode stops the socket', !(scene as unknown as { lan: unknown 
   poke.restartGame();
   await wait(1200);
 }
+
+// --- v1.6.2: the client half of the review -------------------------------
+//
+// Everything below is a symptom a player actually hit: a reconnect that healed
+// them for free, a start button stuck on a guest that had left, a guest staring
+// at a black screen while the host was paused, an arena that silently differed
+// from the host's, and a result card that blamed the wrong seat.
+
+// ---- B-5 / B-6: address parsing and the control-message queue (pure).
+{
+  const { resolveSocketUrl } = await import('../src/net/protocol');
+  check('a trailing slash does not double the socket path', resolveSocketUrl('ws://host:8787/ws/') === 'ws://host:8787/ws', resolveSocketUrl('ws://host:8787/ws/'));
+  check('an http address keeps its path', resolveSocketUrl('http://host:8787/foo') === 'ws://host:8787/foo/ws', resolveSocketUrl('http://host:8787/foo'));
+  check('a bare address still works', resolveSocketUrl('192.168.1.9') === 'ws://192.168.1.9:8787/ws', resolveSocketUrl('192.168.1.9'));
+
+  const { LanClient } = await import('../src/net/LanClient');
+  const queued = new LanClient('host', '127.0.0.1:1', {});
+  for (let i = 0; i < 25; i += 1) queued.send({ t: 'ready', ready: i % 2 === 0 } as never);
+  const queue = (queued as unknown as { pending: string[] }).pending;
+  check('the control queue stays bounded', queue.length === 20, String(queue.length));
+  check('...and keeps the newest intent', JSON.parse(queue[queue.length - 1]).ready === true, queue[queue.length - 1]);
+}
+
+{
+  const { createLanServer } = await import('../server/lan-server.mjs');
+  const server2 = await createLanServer({ port: 0, host: '127.0.0.1', quiet: true });
+  const url2 = `ws://127.0.0.1:${server2.port}/ws`;
+  const openGuest = async (session: string) => {
+    const ws = new NodeWebSocket(url2);
+    const messages: any[] = [];
+    ws.on('message', (raw: unknown) => {
+      try {
+        messages.push(JSON.parse(String(raw)));
+      } catch {
+        /* ignore */
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    ws.send(JSON.stringify({ t: 'join', role: 'guest', session, version: TANK_VERSION }));
+    await wait(300);
+    return { ws, messages, id: messages.find((m) => m.t === 'joined')?.id as string };
+  };
+
+  settings.mode = 'lan';
+  settings.lanRole = 'host';
+  settings.lanAddress = `127.0.0.1:${server2.port}`;
+  poke.restartGame();
+  await wait(1600);
+
+  const anyScene = scene as unknown as Record<string, any>;
+
+  // ---- A-6: switching maps cancels a pending start.
+  {
+    // `setRoomLevel` writes the real settings, so put the map back afterwards:
+    // the solo checks further down expect the arena this suite started on.
+    const previousMap = settings.mapId;
+    const previousRoomLevel = anyScene.roomLevelId;
+    anyScene.startPending = true;
+    anyScene.setRoomLevel('random');
+    check('switching the room map forgets a pending start', anyScene.startPending === false, String(anyScene.startPending));
+    settings.mapId = previousMap;
+    anyScene.roomLevelId = previousRoomLevel;
+  }
+
+  // ---- A-4: the map checklist only names seats that still exist.
+  {
+    anyScene.mapWaiting = ['p2', 'p5'];
+    anyScene.mapReady = ['p2'];
+    anyScene.syncRoster([{ id: 'p1', team: 0, skill: '', ready: true }]);
+    check(
+      'a departed seat is pruned from the map checklist',
+      anyScene.mapWaiting.length === 0 && anyScene.mapReady.length === 0,
+      JSON.stringify({ waiting: anyScene.mapWaiting, ready: anyScene.mapReady })
+    );
+  }
+
+  // ---- B-4: the event buffer is a hard 40.
+  {
+    anyScene.netEvents.length = 0;
+    for (let i = 0; i < 50; i += 1) anyScene.netEvent('hit', 10, 10);
+    check('the net-event buffer stops at 40', anyScene.netEvents.length === 40, String(anyScene.netEvents.length));
+    anyScene.netEvents.length = 0;
+  }
+
+  // ---- B-8: effect timers keep their milliseconds.
+  {
+    poke.p1.shieldUntil = scene.time.now + 1234;
+    anyScene.netKeyframe = true;
+    const snap = anyScene.buildSnapshot() as { tanks: { id: string; shield?: number }[] };
+    const row = snap.tanks.find((t) => t.id === 'p1');
+    check(
+      'effect timers are not rounded to 100 ms',
+      typeof row?.shield === 'number' && row.shield % 100 !== 0 && Math.abs(row.shield - 1234) < 40,
+      String(row?.shield)
+    );
+    poke.p1.shieldUntil = 0;
+  }
+
+  // ---- B-10 / B-11: the lobby describes the room, not this machine.
+  {
+    const previousRole = anyScene.lanRole;
+    const previousRoom = anyScene.roomLevelId;
+    anyScene.lanRole = 'guest';
+    anyScene.roomLevelId = 'custom-abc123';
+    check('the lobby calls the room map custom', anyScene.lobbyMap()?.custom === true, JSON.stringify(anyScene.lobbyMap()));
+    anyScene.roomLevelId = 'court';
+    check('a built-in room map is not called custom', anyScene.lobbyMap()?.custom === false, JSON.stringify(anyScene.lobbyMap()));
+    anyScene.lanRole = previousRole;
+    anyScene.roomLevelId = previousRoom;
+
+    const previousMode = settings.match.mode;
+    settings.match.mode = 'team';
+    poke.roster = [
+      { id: 'p1', team: 0, skill: '' },
+      { id: 'p2', team: 1, skill: '' },
+      { id: 'p3', team: 1, skill: '' },
+    ];
+    anyScene.refreshNotice();
+    const labels = (anyScene.noticeLabels as { text: string }[]).map((l) => l.text).filter(Boolean);
+    check(
+      'the notice column labels teams by mode',
+      labels.some((text) => text.includes('队2')) && !labels.some((text) => text.includes('FFA')),
+      JSON.stringify(labels)
+    );
+    settings.match.mode = previousMode;
+    poke.roster = [];
+    anyScene.refreshNotice();
+  }
+
+  // ---- A-9: a named map this machine does not have must not fall back to an index.
+  {
+    const before = poke.levelIndex;
+    const previousPhase = poke.phase;
+    anyScene.missingLevelNote = '';
+    poke.snap = null;
+    anyScene.applySnapshot({
+      kf: 1,
+      phase: 'playing',
+      level: (before + 1) % 4,
+      levelId: 'custom-does-not-exist',
+      tanks: [],
+      crates: [],
+      events: [],
+      bullets: [],
+      elapsed: 0,
+    } as never);
+    check('an unknown map id does not load a different arena', poke.levelIndex === before, `${before} -> ${poke.levelIndex}`);
+    check('...and the player is told why', anyScene.missingLevelNote === 'custom-does-not-exist', String(anyScene.missingLevelNote));
+    // Put the scene back: a real snapshot stream follows in the next section.
+    anyScene.applySnapshot({
+      kf: 1,
+      phase: previousPhase,
+      level: before,
+      tanks: [],
+      crates: [],
+      events: [],
+      bullets: [],
+      elapsed: 0,
+    } as never);
+    poke.snap = null;
+  }
+
+  // ---- A-8: a guest that has never received a frame is still diagnosed.
+  {
+    const previousRole = anyScene.lanRole;
+    const previousPhase = poke.phase;
+    anyScene.lanRole = 'guest';
+    anyScene.phase = 'playing';
+    poke.snap = null;
+    anyScene.snapAt = scene.time.now - 12000;
+    anyScene.staleCheckedAt = 0;
+    anyScene.staleNote = '';
+    anyScene.updateGuest(1 / 60);
+    check(
+      'a guest with no snapshot yet still gets an explanation',
+      String(anyScene.staleNote).includes('收不到房主数据'),
+      String(anyScene.staleNote)
+    );
+    anyScene.lanRole = previousRole;
+    anyScene.phase = previousPhase;
+    poke.snap = null;
+    anyScene.staleNote = '';
+  }
+
+  // ---- A-5 / A-19: the real thing — drop, reconnect, and who left.
+  const a = await openGuest('a');
+  const b = await openGuest('b');
+  poke.startRoomMatch();
+  await wait(1200);
+  check('the room is playing with two guests', poke.phase === 'playing' || poke.phase === 'ready', String(poke.phase));
+
+  // A-5: get shot at, then drop. Coming back must not be a free full heal.
+  {
+    const tank = anyScene.byId('p2');
+    if (tank) {
+      tank.setHp(34);
+      tank.kills = 3;
+      tank.deaths = 2;
+    }
+    a.ws.close();
+    await wait(900);
+    const back = await openGuest('a');
+    const revived = anyScene.byId(back.id);
+    check(
+      'a reconnect comes back to the tank it left',
+      !!revived && revived.hp === 34 && revived.kills === 3 && revived.deaths === 2,
+      JSON.stringify({ id: back.id, hp: revived?.hp, kills: revived?.kills, deaths: revived?.deaths })
+    );
+    a.ws = back.ws;
+    a.messages = back.messages;
+  }
+
+  // A-19: two departures; the verdict must name the seat that left *last*, and
+  // the room must end up decided (the host is the only one left).
+  {
+    const sent: any[] = [];
+    const originalSend = anyScene.lan.send.bind(anyScene.lan);
+    anyScene.lan.send = (msg: any) => {
+      if (msg?.t === 'result') sent.push(msg);
+      return originalSend(msg);
+    };
+    b.ws.close();
+    await wait(500);
+    anyScene.leftSeat = { id: 'p3', at: 0 };
+    anyScene.checkLeftSeat();
+    await wait(150);
+    check('one of two departures does not end the match', !poke.matchOver, String(poke.matchOver));
+    a.ws.close();
+    await wait(500);
+    anyScene.leftSeat = { id: 'p2', at: 0 };
+    anyScene.checkLeftSeat();
+    await wait(200);
+    anyScene.lan.send = originalSend;
+    const payload = sent[sent.length - 1];
+    check('the result card names the seat that just left', payload?.surrenderBy === 'p2', JSON.stringify(payload?.surrenderBy));
+  }
+
+  for (const guest of [a, b]) {
+    try {
+      guest.ws.close();
+    } catch {
+      /* already closed */
+    }
+  }
+  await wait(400);
+  await server2.close();
+
+  settings.mode = 'solo';
+  settings.lanAddress = '';
+  poke.restartGame();
+  await wait(1200);
+}
+
 
 // --- v1.5.4 netcode: a dead socket must never throw, and a burst must coalesce.
 {
@@ -1196,7 +1496,18 @@ poke.p1.invulnerableUntil = 0;
 poke.p1.x = 640;
 poke.p1.y = 420;
 poke.spawnBullet(poke.p1.x - 50, poke.p1.y, 0, 'enemy', 600, 2);
-await wait(500);
+// v1.6.2: a fixed 500 ms assumed the shell always lands in that window; on a
+// loaded machine (this suite runs a whole LAN room first) the frame budget is
+// nowhere near 60 fps and the check went red without anything being wrong. Wait
+// for the shell to connect instead.
+const shieldLanded = async (): Promise<boolean> => {
+  for (let i = 0; i < 30; i += 1) {
+    if (poke.p1.shieldUntil <= scene.time.now || poke.p1.hp !== shielded) return true;
+    await wait(50);
+  }
+  return false;
+};
+await shieldLanded();
 check('a shield blocks the hit', poke.p1.hp === shielded, `${shielded} -> ${poke.p1.hp}`);
 // v1.3: one hit is all it stops.
 check('the shield is used up by that hit', poke.p1.shieldUntil <= scene.time.now, `until=${poke.p1.shieldUntil} now=${scene.time.now}`);
@@ -1325,7 +1636,7 @@ check(
     peer.once('open', () => resolve());
     peer.once('error', reject);
   });
-  peer.send(JSON.stringify({ t: 'join', role: 'guest' }));
+  peer.send(JSON.stringify({ t: 'join', role: 'guest', version: TANK_VERSION }));
   await wait(700);
 
   const pushed = [...peerMsgs].reverse().find((m) => m.t === 'map');

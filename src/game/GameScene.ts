@@ -39,7 +39,7 @@ import type { NetEvent, Snapshot, TankInput, TankSnapshot } from '../net/protoco
 /** Arenas per solo run. */
 const SOLO_CAMPAIGN_LENGTH = 5;
 
-const IDLE_INPUT: TankInput = { turn: 0, drive: 0, aim: 0, fire: false };
+const IDLE_INPUT: TankInput = Object.freeze({ turn: 0, drive: 0, aim: 0, fire: false }) as TankInput;
 
 const PLAY_RECT: PlayRect = { x: 34, y: 82, w: GAME_W - 68, h: GAME_H - 82 - 46 };
 
@@ -252,8 +252,22 @@ export class GameScene extends Phaser.Scene {
   private goneSeats = new Set<string>();
   /** Host: a start was requested while guests were still confirming the map. */
   private startPending = false;
+  /**
+   * v1.6.2: what a dropped seat must come back to.
+   *
+   * A reconnect used to re-create the tank from scratch (`hp = 100`, 0 kills),
+   * so dropping the network at 10 HP was a free full heal — and an innocent
+   * Wi-Fi hiccup wiped the score. The host remembers the seat for the same few
+   * seconds it waits for the reconnect, then forgets it (a real departure must
+   * not hand its stats to whoever takes the seat number next).
+   */
+  private seatMemory = new Map<string, { hp: number; kills: number; deaths: number; at: number }>();
+  /** Set once a snapshot names a map this machine does not have (warn once). */
+  private missingLevelNote = '';
   /** Host: hash of the map currently cached in the room (avoids re-pushing). */
   private pushedMapHash = '';
+  /** Host: id of the map currently cached in the room (v1.6.2, pending-start guard). */
+  private pushedMapId = '';
   /** Which room this socket belongs to (`role@address`), so a rematch keeps it. */
   private lanTarget = '';
   /** Set once the player asked to leave: the scene must stop touching the DOM. */
@@ -391,6 +405,10 @@ export class GameScene extends Phaser.Scene {
     this.matchElapsed = 0;
     this.startPending = false;
     this.pushedMapHash = '';
+    // A new match means new scorelines: nothing from the previous one may be
+    // restored into it (v1.6.2).
+    this.seatMemory.clear();
+    this.pushedMapId = '';
     this.respawnQueue.clear();
     this.lanClosed = false;
     this.autoDodge = settings.autoDodge;
@@ -441,7 +459,9 @@ export class GameScene extends Phaser.Scene {
         else if (status === 'playing') this.netBanner = '';
         else if (status === 'error') this.netBanner = detail ?? '连接失败';
         else if (status === 'rejected') this.netBanner = detail ?? '版本不一致，无法联机';
-        else if (status === 'closed') this.netBanner = '连接已断开';
+        // v1.6.2: a close that carries a reason ("this seat reconnected
+        // elsewhere") must say so instead of the generic message.
+        else if (status === 'closed') this.netBanner = detail ?? '连接已断开';
         else if (status === 'connecting') this.netBanner = detail ?? '连接中…';
         if (this.netBanner) this.showBanner(this.netBanner, 1.6);
         this.modeText.setText(this.modeLabel());
@@ -467,6 +487,13 @@ export class GameScene extends Phaser.Scene {
         if (state === 'joined') {
           this.leftSeat = null;
           sound.ui();
+          // v1.6.2: while paused the host sends nothing, so a guest that joined
+          // during the pause stared at an empty arena with no explanation. Push
+          // one frame (it carries paused=1) so it at least knows why.
+          if (this.lanMode && this.lanRole === 'host' && this.paused) {
+            this.netKeyframe = true;
+            this.lan?.sendSnapshot(this.buildSnapshot());
+          }
           // v1.4: a new player lands in the lobby. The host decides when the
           // match starts, so joining never yanks anyone into a firefight.
           // Only clear the arena outside a match: a *reconnecting* guest must
@@ -500,6 +527,15 @@ export class GameScene extends Phaser.Scene {
         this.roomCapacity = capacity;
         this.teamCount = info.teams;
         this.matchLive = info.started;
+        // v1.6.2: the roster carries the room's rules. Ignoring them left a guest
+        // that joined late reading the *default* 15 kills / 8 minutes in the
+        // lobby while the host had set something else.
+        if (role === 'guest' && info.config) {
+          settings.match = { ...settings.match, ...(info.config as unknown as typeof settings.match) };
+          const announced = (info.config as { levelId?: unknown }).levelId;
+          if (typeof announced === 'string' && announced) this.roomLevelId = announced;
+          this.modeText.setText(this.modeLabel());
+        }
         // Guests (and the host) sit in the lobby until the host starts.
         if (!info.started) this.enterLobby(info);
         else if (this.phase === 'lobby') this.leaveLobby();
@@ -776,6 +812,10 @@ export class GameScene extends Phaser.Scene {
   /** Host: start the match for the whole room. */
   startRoomMatch(): void {
     if (this.lanRole !== 'host' || !this.lan) return;
+    // v1.6.2: a double click used to send `begin` twice; the room then started,
+    // reset and started again. The scene is the second line of defence (the
+    // server dedupes too).
+    if (this.startPending) return;
     // A match nobody can win is a bug, not a setting: refuse to start one.
     if (!matchHasEnder(settings.match)) {
       this.showBanner('没有结束条件（人头和时间都不限），先在房间面板里开一个', 2.4);
@@ -867,9 +907,16 @@ export class GameScene extends Phaser.Scene {
     // Only between matches: changing the arena under a running fight would
     // teleport everyone mid-shell.
     if (this.phase !== 'lobby') return;
-    const next = id && id !== 'random' && (isCustomLevel(id) || levelIndexOf(id) >= 0) ? id : 'random';
+    // v1.6.2: `levelIndexOf` clamps to 0, so it is always >= 0 and every id —
+    // including a typo — was accepted as a room map. Ask the list directly.
+    const known = !!id && (isCustomLevel(id) || levels().some((level) => level.id === id));
+    const next = id && id !== 'random' && known ? id : 'random';
     settings.mapId = next;
     this.roomLevelId = next;
+    // v1.6.2: a start clicked for the *previous* map must not fire later. The
+    // pending flag survived a map switch, so the next time the new map finished
+    // confirming the room started on its own — nobody pressed 开始对局.
+    this.startPending = false;
     this.pushRoomMap();
     this.lan.matchConfig = { ...settings.match, levelId: next };
     this.lan.send({ t: 'config', ...this.lan.matchConfig, tuning: { ...tuning() } });
@@ -883,6 +930,14 @@ export class GameScene extends Phaser.Scene {
    */
   private pushRoomMap(force = false): void {
     if (!this.lanMode || this.lanRole !== 'host' || !this.lan) return;
+    // v1.6.2: pushing a *different* map invalidates any pending start (the click
+    // belonged to the map that was in the room at that moment). A resend of the
+    // same file keeps it.
+    const wasCustom = this.pickedMapId();
+    if (wasCustom !== this.pushedMapId) {
+      this.startPending = false;
+      this.pushedMapId = wasCustom;
+    }
     const custom = this.pickedMapId();
     if (custom) {
       const map = getMap(custom);
@@ -939,7 +994,9 @@ export class GameScene extends Phaser.Scene {
   } | null {
     if (!this.lanMode) return null;
     const id = this.roomLevel();
-    const custom = !!this.pickedMapId();
+    // v1.6.2: a guest judged "custom map" by its own `settings.mapId`, so the
+    // lobby showed the wrong label and sync progress for the room's map.
+    const custom = isCustomLevel(id);
     const total = Math.max(0, this.roster.filter((seat) => seat.id !== 'p1').length);
     const waiting = this.lanRole === 'host' ? this.mapWaiting.filter((seat) => seat !== 'p1').length : 0;
     return {
@@ -1191,7 +1248,9 @@ export class GameScene extends Phaser.Scene {
     const input = this.remoteInputs.get(tank.id) ?? IDLE_INPUT;
     this.applyInput(tank, input, dt, { aimRate: 22 });
     // A skill press is a one-shot latch: consume it so it fires exactly once.
-    if (input.skill) {
+    // v1.6.2: `IDLE_INPUT` is shared and now frozen — writing the latch back into
+    // it would throw in strict mode (or poison every other seat, in a sloppy one).
+    if (input.skill && input !== IDLE_INPUT) {
       input.skill = false;
       this.useSkill(tank);
     }
@@ -1202,6 +1261,17 @@ export class GameScene extends Phaser.Scene {
     const spot = this.placeSpawn(spawn.x, spawn.y, TANK.radius);
     const tank = new Tank(this, spot.x, spot.y, spawn.angle, id, 22, this.colorForSeat(id, team));
     tank.team = team;
+    // v1.6.2: a seat that dropped mid-match comes back to the tank it left.
+    const memory = this.seatMemory.get(id);
+    if (memory && this.matchLive && this.phase !== 'lobby') {
+      this.seatMemory.delete(id);
+      tank.setHp(memory.hp);
+      tank.kills = memory.kills;
+      tank.deaths = memory.deaths;
+      this.showBanner(`${this.nameOf(id)} 回来了`, 1.6);
+    } else if (memory) {
+      this.seatMemory.delete(id);
+    }
     if (!this.p2) this.p2 = tank;
     else this.extras.push(tank);
     return tank;
@@ -1212,6 +1282,17 @@ export class GameScene extends Phaser.Scene {
     // not survive the seat — otherwise the newcomer would be driven by the last
     // thing the previous owner pressed.
     this.remoteInputs.delete(id);
+    // v1.6.2: keep the seat's score and health for the reconnect window (see
+    // `seatMemory`). Only a running match is worth remembering.
+    const leaving = this.byId(id);
+    if (leaving && this.matchLive && this.phase !== 'lobby') {
+      this.seatMemory.set(id, {
+        hp: leaving.hp,
+        kills: leaving.kills,
+        deaths: leaving.deaths,
+        at: this.time.now,
+      });
+    }
     if (this.p2 && this.p2.id === id) {
       this.p2.destroy();
       this.p2 = undefined;
@@ -1249,6 +1330,13 @@ export class GameScene extends Phaser.Scene {
     for (const tank of [...this.extras, this.p2].filter((t): t is Tank => !!t)) {
       if (!wanted.has(tank.id)) this.removeRemoteTank(tank.id);
     }
+    // v1.6.2: the map checklist is a snapshot of who owed an ack when the map
+    // was pushed. A guest that left kept its id in that list forever, so the
+    // host's 开始对局 stayed disabled (and the 重发 button needs a non-empty
+    // total to even render) until somebody new walked in. Prune to the living.
+    const live = new Set(players.filter((p) => p.id !== 'p1').map((p) => p.id));
+    if (this.mapWaiting.some((id) => !live.has(id))) this.mapWaiting = this.mapWaiting.filter((id) => live.has(id));
+    if (this.mapReady.some((id) => !live.has(id))) this.mapReady = this.mapReady.filter((id) => live.has(id));
     for (const player of players) {
       const existing = this.byId(player.id);
       if (existing) {
@@ -1547,7 +1635,8 @@ export class GameScene extends Phaser.Scene {
    * the screen: the old 64px centre text covered the exact spot you aim at.
    * Newest message sits at the bottom, older ones slide up and fade out.
    */
-  private showBanner(text: string, seconds: number): void {
+  /** Public so the lobby (main.ts) can report what it just auto-corrected. */
+  public showBanner(text: string, seconds: number): void {
     if (!text) return;
     const life = Math.max(0.4, seconds) * 1000 + 450;
     this.toasts.push({ text, life, total: life });
@@ -1707,8 +1796,10 @@ export class GameScene extends Phaser.Scene {
         : entry.hasSkill || entry.skill
           ? '已选'
           : '—';
-      const teamSize = this.roster.filter((r) => r.team === entry.team).length;
-      const team = teamSize > 1 ? `队${entry.team}` : 'FFA';
+      // v1.6.2: in team mode every seat belongs to a team, even the only member
+      // of it; in FFA nobody does. The old "more than one member" heuristic
+      // labelled a lone team member as FFA and printed 队0 for whole FFA rooms.
+      const team = this.matchUsesTeams() ? `队${entry.team + 1}` : 'FFA';
       const kills = tank ? `${tank.kills} 杀` : '—';
       label.setText(`${this.nameOf(entry.id)} · ${team} · ${skill} · ${kills}`);
     });
@@ -2149,7 +2240,14 @@ export class GameScene extends Phaser.Scene {
     if (this.matchOver) return;
     // Before the first shot the roster broadcast already updates the seat list;
     // there is no match to keep alive yet.
-    if (this.phase === 'lobby') return;
+    if (this.phase === 'lobby') {
+      // v1.6.2: ...but a guest whose *host* walked out must be told, otherwise
+      // the room just sits there looking normal with a dead 准备 button.
+      if (by === 'p1' && this.lanMode && this.lanRole === 'guest') {
+        this.showBanner('房主离开了房间，这个房间已经失效', 3.2);
+      }
+      return;
+    }
     this.leftSeat = null;
     const name = this.nameOf(by);
     const first = !this.goneSeats.has(by);
@@ -2174,6 +2272,9 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    // v1.6.2: the grace period is over — this seat is really gone, so its
+    // remembered score must not be handed to whoever takes the id next.
+    this.seatMemory.delete(by);
     // Drop everything that belonged to that seat.
     if (this.byId(by)) this.removeRemoteTank(by);
     this.respawnQueue.delete(by);
@@ -2182,7 +2283,7 @@ export class GameScene extends Phaser.Scene {
     if (first) this.showBanner(`${name} 退出了游戏`, 2.4);
     this.hudDirty = true;
     // Only the host decides whether that was the end of the match.
-    if (this.lanMode && this.lanRole === 'host') this.checkLastStanding();
+    if (this.lanMode && this.lanRole === 'host') this.checkLastStanding(by);
   }
 
   /**
@@ -2191,7 +2292,7 @@ export class GameScene extends Phaser.Scene {
    * FFA: one player left → that player wins. Team mode: one whole team left →
    * that team wins. Zero players left → nobody to tell, nothing to send.
    */
-  private checkLastStanding(): void {
+  private checkLastStanding(leftBy?: string): void {
     if (!this.lanMode || this.lanRole !== 'host') return;
     if (this.matchOver) return;
     if (this.phase !== 'playing' && this.phase !== 'ready') return;
@@ -2215,7 +2316,9 @@ export class GameScene extends Phaser.Scene {
       elapsed: this.matchElapsed,
       mode: settings.match.mode,
       teams: this.teamCount,
-      surrenderBy: this.goneSeats.values().next().value as string | undefined,
+      // v1.6.2: the *seat that just left*, not the first one in the set — with
+      // two departures the card blamed whoever walked out first.
+      surrenderBy: leftBy ?? (this.goneSeats.values().next().value as string | undefined),
     };
     this.lan?.send({ t: 'result', ...payload });
     this.finishMatch(payload);
@@ -2318,7 +2421,10 @@ export class GameScene extends Phaser.Scene {
     if (this.phase === 'over' || this.phase === 'victory' || this.phase === 'versusOver') return;
     // Esc on the result card must not turn it into a pause card.
     if (this.matchOver || this.phase === 'matchOver' || this.leaving) return;
-    this.paused = !this.paused;
+    // v1.6.2: go through `setPaused`. Flipping the flag here meant an Esc pause
+    // never pushed the `paused=1` frame, so every guest's watchdog went
+    // 「网络不稳」→「收不到房主数据」 while the host was simply paused.
+    this.setPaused(!this.paused);
     sound.ui();
     this.emitOverlay(this.paused ? { kind: 'paused' } : { kind: 'hidden' });
   }
@@ -2679,12 +2785,20 @@ export class GameScene extends Phaser.Scene {
   private matchOver = false;
 
   /** Guest: the whole match lives on the host, we only read input here. */
+  /** v1.6.2: a skill press is latched on every frame, so a fast tap survives. */
+  private latchGuestSkill(): void {
+    if (this.lanRole !== 'guest') return;
+    if (this.keyJustDown('guest', 'skill')) this.guestSkillLatch = true;
+  }
+
   private readGuestInput(_dt: number): TankInput {
     const prefix = 'guest';
     const pointer = this.input.activePointer;
     const tank = this.byId(this.myId) ?? this.p2;
     const aim = tank ? Math.atan2((pointer.worldY || 0) - tank.y, (pointer.worldX || 0) - tank.x) : 0;
-    if (this.keyJustDown(prefix, 'skill')) this.guestSkillLatch = true;
+    // v1.6.2: the latch is sampled once per *frame* in `update()` (see
+    // `latchGuestSkill`). Sampling it here lost a tap-and-release that happened
+    // between two 33 ms sends.
     const skill = this.guestSkillLatch;
     // v1.3: no trim keys – the barrel points where the hull points unless the
     // mouse says otherwise.
@@ -3634,7 +3748,10 @@ export class GameScene extends Phaser.Scene {
     const now = this.time.now;
     for (const tank of this.tanks()) {
       if (tank.id === 'enemy') continue;
-      const left = (until: number): number => Math.max(0, Math.round((until - now) / 100) * 100);
+      // v1.6.2: quantising to 100 ms made every effect (shield, rage, slow,
+      // cooldown) run up to a tenth of a second long on the guests' screens.
+      // The values are deltas, so precision costs a handful of bytes.
+      const left = (until: number): number => Math.max(0, Math.round(until - now));
       const full: Required<Omit<TankSnapshot, 'id'>> = {
         x: Math.round(tank.x * 10) / 10,
         y: Math.round(tank.y * 10) / 10,
@@ -3706,12 +3823,13 @@ export class GameScene extends Phaser.Scene {
   /** Records an effect that the guest should also see/hear. */
   private netEvent(kind: NetEvent['k'], x: number, y: number, extra: Partial<NetEvent> = {}): void {
     if (!this.lanMode || this.lanRole !== 'host') return;
-    if (this.netEvents.length > 40) return;
+    if (this.netEvents.length >= 40) return;
     this.netEvents.push({ k: kind, x: Math.round(x), y: Math.round(y), ...extra });
   }
 
   /** Guest: send our input and keep the arena alive from snapshots. */
   private updateGuest(dt: number): void {
+    this.latchGuestSkill();
     this.netTimer -= dt;
     if (this.netTimer <= 0) {
       this.netTimer = 1 / 30;
@@ -3719,9 +3837,13 @@ export class GameScene extends Phaser.Scene {
       this.guestSkillLatch = false;
     }
 
+    // v1.6.2: the watchdog only needs `snapAt`, so it must run *before* the
+    // "no snapshot yet" return. A guest that joined while the host was paused
+    // sat on a black screen with no banner at all, because `snap` was null
+    // forever and this line was never reached.
+    this.guestWatchdog();
     const snap = this.snap;
     if (!snap) return;
-    this.guestWatchdog();
     // The host owns the clock: both machines must agree on the time limit.
     if (typeof snap.elapsed === 'number') this.matchElapsed = snap.elapsed;
     const age = Math.min(0.12, (this.time.now - this.snapAt) / 1000);
@@ -3872,13 +3994,23 @@ export class GameScene extends Phaser.Scene {
     // different maps. The id is unambiguous; the index stays as a fallback for
     // a library that does not know the id yet, with an in-range guard.
     let nextLevel: number | null = null;
+    let missingLevel = '';
     if (typeof snap.levelId === 'string' && snap.levelId) {
       const byId = levels().findIndex((entry) => entry.id === snap.levelId);
       if (byId >= 0) nextLevel = byId;
+      else missingLevel = snap.levelId;
     }
-    if (nextLevel === null && typeof snap.level === 'number') {
+    // v1.6.2: the index fallback is only for the old wire format, which had no
+    // levelId. When the host *names* a map this machine does not have, falling
+    // back to an index loads a completely different arena and both sides quietly
+    // play their own game.
+    if (nextLevel === null && !missingLevel && typeof snap.level === 'number') {
       const count = levels().length;
       if (snap.level >= 0 && snap.level < count) nextLevel = snap.level;
+    }
+    if (missingLevel && this.missingLevelNote !== missingLevel) {
+      this.missingLevelNote = missingLevel;
+      this.showBanner('地图不同步：本机没有房主的这张图，请房主重发地图', 3);
     }
     if (nextLevel !== null && nextLevel !== this.levelIndex) {
       // Level changed on the host – rebuild the arena locally. Every remote

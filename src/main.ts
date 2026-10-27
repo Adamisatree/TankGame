@@ -447,11 +447,21 @@ function initGuestTools(): void {
           '<span class="lan-loading">没扫到房间。让房主先点「开始游戏」，或让他把地址发给你直接粘贴。</span>';
         return;
       }
+      // v1.6.2: the room name comes from a UDP broadcast, i.e. from anybody on
+      // the LAN. Pasting it into innerHTML let a stranger inject markup (and,
+      // in the desktop shell, walk the update panel's IPC surface).
+      const esc = (value: unknown): string =>
+        String(value ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
       list.innerHTML = hosts
         .map(
           (h) =>
-            `<button type="button" class="lan-host" data-host="${h.host}:${h.port}">
-               <b>${h.name || 'TankGame 房间'}</b><span>${h.host}:${h.port}</span>
+            `<button type="button" class="lan-host" data-host="${esc(h.host)}:${esc(h.port)}">
+               <b>${esc(h.name || 'TankGame 房间')}</b><span>${esc(h.host)}:${esc(h.port)}</span>
              </button>`
         )
         .join('');
@@ -460,7 +470,7 @@ function initGuestTools(): void {
           const value = btn.dataset.host ?? '';
           if (input) input.value = value;
           settings.lanAddress = value;
-          list.innerHTML = `<span class="lan-loading">已选中 ${value}，点「开始游戏」加入。</span>`;
+          list.innerHTML = `<span class="lan-loading">已选中 ${esc(value)}，点「开始游戏」加入。</span>`;
           sound.ui();
         });
       });
@@ -982,6 +992,9 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
   // everybody is on team 0 on purpose, so an "empty team" is meaningless there
   // — counting it anyway disabled 开始对局 and made 乱斗 impossible to start
   // (v1.5.2 fix; the rule lives in rules.ts so it can be tested).
+  // v1.6.2: `hostId` is null once the host's socket is gone (the server sends
+  // the roster with `host: null`).
+  const hostPresent = !!state.hostId;
   const { emptyTeams, mapPending } = roomStartBlockers({
     mode: state.mode,
     roster: state.roster,
@@ -1141,15 +1154,25 @@ function lobbyHtml(state: Extract<OverlayState, { kind: 'lobby' }>): string {
     ${tuningPanelHtml(!state.isHost)}
     <div class="actions">
       ${
-        state.isHost
-          ? `<button class="primary" id="lobby-start" ${
-              emptyTeams.length || mapPending ? 'disabled' : ''
-            }>开始对局</button>`
-          : `<button class="primary" id="lobby-ready">${me?.ready ? '取消准备' : '准备'}</button>`
+        // v1.6.2: with no host in the room there is nobody to start anything, so
+        // the buttons must not pretend otherwise. A guest used to sit in a dead
+        // room clicking 准备 forever.
+        !state.isHost && !hostPresent
+          ? '<button class="primary" id="lobby-ready" disabled>房主已离开</button>'
+          : state.isHost
+            ? `<button class="primary" id="lobby-start" ${
+                emptyTeams.length || mapPending ? 'disabled' : ''
+              }>开始对局</button>`
+            : `<button class="primary" id="lobby-ready">${me?.ready ? '取消准备' : '准备'}</button>`
       }
       <button class="ghost" id="lobby-leave">离开房间</button>
       <span class="hint">${readyCount}/${state.roster.length} 已准备</span>
     </div>
+    ${
+      !state.isHost && !hostPresent
+        ? '<div class="tip"><span class="dot"></span> 房主离开了，这个房间已经失效。请回到菜单重新加入。</div>'
+        : ''
+    }
     ${
       emptyTeams.length && state.isHost
         ? '<div class="tip"><span class="dot"></span> 每支队伍至少要有 1 人才能开始（点「补齐空队」最快）。</div>'
@@ -1257,8 +1280,11 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
 
   root.querySelector<HTMLButtonElement>('#lobby-team-more')?.addEventListener('click', () => {
     sound.ui();
-    scene.setTeamCount((state.teams ?? 2) + 1);
-    state.teams = (state.teams ?? 2) + 1;
+    // v1.6.2: a fast double click sent 3 then 4 while the first roster was still
+    // in flight, briefly showing "7 队". Clamp before sending, not after.
+    const next = Math.min(6, (state.teams ?? 2) + 1);
+    scene.setTeamCount(next);
+    state.teams = next;
     repaint();
   });
 
@@ -1280,10 +1306,14 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
   });
 
   const setMatch = (patch: Partial<typeof state.match>) => {
-    const next = ensureMatchEnder({ ...state.match, ...patch });
-    if (!matchHasEnder(next)) {
-      window.alert('这样设置这一局永远不会结束：请至少留一个结束条件（人头目标或时间上限）。');
-      return;
+    // v1.6.2: `ensureMatchEnder` always leaves a condition armed, so the old
+    // `if (!matchHasEnder(next)) alert(...)` could never fire — it was dead code
+    // that suggested the case was handled when the real behaviour was "silently
+    // re-arm the default". Say what actually happened instead.
+    const wanted = { ...state.match, ...patch };
+    const next = ensureMatchEnder(wanted);
+    if (!matchHasEnder(wanted)) {
+      scene.showBanner('这一局没有结束条件，已自动打开默认的人头目标', 2.4);
     }
     state.match = next;
     scene.applyRoomConfig(state.match);
@@ -1337,10 +1367,10 @@ function bindLobby(root: HTMLElement, state: Extract<OverlayState, { kind: 'lobb
 
   root.querySelector<HTMLButtonElement>('#lobby-start')?.addEventListener('click', () => {
     sound.ui();
-    if (!matchHasEnder(state.match)) {
-      window.alert('这一局没有结束条件（人头和时间都不限），先把其中一个打开。');
-      return;
-    }
+    // v1.6.2: no `matchHasEnder` check here any more. `setMatch()` and the
+    // settings loader both run `ensureMatchEnder`, so the condition was always
+    // armed and this branch was unreachable. The scene keeps its own last-resort
+    // check for a room config that arrives from somewhere else.
     // Everyone has to be ready – the host waits instead of yanking people in.
     const waiting = state.roster.filter((seat) => !seat.ready && !seat.host);
     if (waiting.length) {

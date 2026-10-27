@@ -121,7 +121,11 @@ export function evaluateMatch(lines: ScoreLine[], config: MatchConfig, elapsed: 
     for (const line of lines) byTeam.set(line.team, (byTeam.get(line.team) ?? 0) + line.kills);
     const teams = [...byTeam.entries()].sort((a, b) => b[1] - a[1]);
     if (killTarget > 0 && teams[0] && teams[0][1] >= killTarget) {
-      const winners = lines.filter((l) => l.team === teams[0][0]).map((l) => l.id);
+      // v1.6.2: two teams reaching the target on the same frame used to be
+      // decided by tank creation order (the sort is not stable across different
+      // line orders). FFA already shared the win; teams now do too.
+      const best = teams[0][1];
+      const winners = lines.filter((l) => (byTeam.get(l.team) ?? 0) === best).map((l) => l.id);
       return { kind: 'win', winners, reason: 'kills' };
     }
     if (timeLimit > 0 && elapsed >= timeLimit) {
